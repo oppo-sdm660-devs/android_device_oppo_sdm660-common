@@ -96,15 +96,22 @@ blob_fixups: blob_fixups_user_type = {
         'vendor/lib/libarcsoft_dualcam_refocus_preview.so',
         'vendor/lib/libarcsoft_dualcam_refocus_right.so',
         'vendor/lib/libarcsoft_smart_denoise.so',
-        'vendor/lib/libfilter.so',
-        'vendor/lib/libmmcamera_hdr_gb_lib.so'
+        'vendor/lib/libfilter.so'
     ): blob_fixup()
+        .replace_needed('libstdc++.so', 'libstdc++_vendor.so'),
+    'vendor/lib/libmmcamera_hdr_gb_lib.so': blob_fixup()
+        .add_needed('liblog.so')
         .replace_needed('libstdc++.so', 'libstdc++_vendor.so'),
     'vendor/lib/libmmcamera_interface.so': blob_fixup()
         .binary_regex_replace(
             b'/system/etc/camera',
             b'/vendor/etc/camera'
         ),
+    (
+        'vendor/lib/libmmcamera_pdaf.so',
+        'vendor/lib/libmmcamera_pdafcamif.so'
+    ): blob_fixup()
+        .add_needed('liblog.so'),
     'vendor/lib/libmmcamera2_sensor_modules.so': blob_fixup()
         .sig_replace(
             '32 D8 DF E8 07 F0 36 03 03 3B 3E 00 00 26 9D 20 39 E0',
@@ -133,6 +140,8 @@ blob_fixups: blob_fixups_user_type = {
             '20 BC FF B0 00 E8 17 91 84 80 46 94 E0 17 00 F9 86 80 46 94 E0 13 00 F9 88 80 46 94 E1 03 00 2A 26 7C 40 93 E6 0F 00 F9 73 FF FF 97 E8 3B 40 B9 A9 00 80 52 E0 0B 00 F9 E0 03 09 2A 21 BE FF 90 21 90 2D 91 A2 BF FF F0 42 48 27 91',
             'FF 03 01 D1 FD 7B 03 A9 FD C3 00 91 E0 13 00 A9 E5 1B 01 A9 39 40 FC 97 08 04 00 11 E8 83 00 39 E0 03 40 F9 A1 04 80 52 E2 83 00 91 23 00 80 52 E4 07 40 F9 E5 13 40 B9 E6 1B 40 B9 CD FF FF 97 FD 7B 43 A9 FF 03 01 91 C0 03 5F D6'
         ),
+    'vendor/lib64/libwvhidl.so': blob_fixup()
+        .add_needed('libcrypto_shim.so'),
 }  # fmt: skip
 
 module = ExtractUtilsModule(
