@@ -57,9 +57,6 @@ TARGET_TAP_TO_WAKE_NODE := "/sys/touchpanel/double_tap"
 # Filesystem
 TARGET_FS_CONFIG_GEN := $(COMMON_PATH)/config.fs
 
-# Init
-TARGET_INIT_VENDOR_LIB := //$(COMMON_PATH):libinit_oppo_sdm660
-
 # Kernel
 TARGET_KERNEL_ARCH := arm64
 BOARD_BOOTIMG_HEADER_VERSION := 1
