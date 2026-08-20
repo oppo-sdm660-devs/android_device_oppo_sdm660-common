@@ -63,7 +63,6 @@ vendor/lib/libgcs-calwrapper.so
 vendor/lib/libgcs-ipc.so
 vendor/lib/libgcs-osal.so
 vendor/lib/libgcs.so
-vendor/lib/libjnihelper.so
 vendor/lib/libmulawdec.so
 vendor/lib/libsmwrapper.so
 vendor/lib64/hw/sound_trigger.primary.sdm660.so
@@ -485,6 +484,7 @@ vendor/lib64/vendor.qti.gnss@2.0.so
 vendor/lib64/vendor.qti.gnss@2.1.so
 vendor/lib64/vendor.qti.gnss@3.0-service.so
 vendor/lib64/vendor.qti.gnss@3.0.so
+vendor/lib64/vendor.qti.hardware.cacert@1.0.so
 
 # IMS - from Cat S62Pro
 system_ext/etc/permissions/telephony_system-ext_privapp-permissions-qti.xml|4f0056403f56928b8c75a617ba582f17061f89ae
@@ -552,7 +552,9 @@ vendor/lib64/libqtikeymaster4.so
 # Mink-Lowi Interface daemon
 vendor/bin/mlid
 vendor/lib/libminksocket.so
+vendor/lib/libqcbor.so
 vendor/lib64/libminksocket.so
+vendor/lib64/libqcbor.so
 
 # Peripheral manager
 vendor/bin/pm-proxy
