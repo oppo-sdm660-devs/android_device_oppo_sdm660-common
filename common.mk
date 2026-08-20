@@ -229,7 +229,8 @@ PRODUCT_PACKAGES += \
     LineageSdkResOverlayCommon \
     SettingsOverlayCommon \
     SettingsProviderOverlayCommon \
-    TelephonyOverlayCommon
+    TelephonyOverlayCommon \
+    WifiOverlayCommon
 
 # Permissions
 PRODUCT_COPY_FILES += \
