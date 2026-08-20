@@ -33,6 +33,15 @@ def lib_fixup_vendor_suffix(lib: str, partition: str, *args, **kwargs):
     return f'{lib}_{partition}' if partition == 'vendor' else None
 
 
+lib_fixups: lib_fixups_user_type = {
+    **lib_fixups,
+    (
+        'com.qualcomm.qti.dpm.api@1.0',
+        'vendor.qti.hardware.fm@1.0',
+    ): lib_fixup_vendor_suffix,
+}
+
+
 blob_fixups: blob_fixups_user_type = {
     'vendor/bin/pm-service': blob_fixup()
         .replace_needed('libutils.so', 'libutils-v33.so'),

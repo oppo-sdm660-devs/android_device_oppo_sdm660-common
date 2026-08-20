@@ -329,7 +329,7 @@ system_ext/etc/permissions/com.qti.dpmframework.xml|c4b7ad0879d00c1eba4f3fe3a88d
 system_ext/etc/permissions/dpmapi.xml|9158c9789cc7135a685b3fb27f8cc27108b51fef
 system_ext/framework/com.qti.dpmframework.jar|96a29e28b3abffb9223daadd67459e3f5a3271df
 system_ext/framework/dpmapi.jar|2e2fbe2257a697b96a644c774136da0554430d3f
-system_ext/lib64/com.qualcomm.qti.dpm.api@1.0.so|b992e1f565f7b8b814eac0c88517543e6d0de603
+system_ext/lib64/com.qualcomm.qti.dpm.api@1.0.so;MODULE_SUFFIX=_vendor|b992e1f565f7b8b814eac0c88517543e6d0de603
 system_ext/lib64/libdiag_system.so|17ac8fa06b11bb993517d58b0d95d30dd8ab93b3
 system_ext/lib64/libdpmctmgr.so|8a687fce30df9483a96065e6cc4154f03562dfa9
 system_ext/lib64/libdpmfdmgr.so|bf3666db17e77da3a303c10579baec0bd018089f
@@ -449,7 +449,7 @@ system/lib64/fm_helium.so:system_ext/lib64/fm_helium.so|b2440e4feaae8a7f5e226952
 system/lib64/libfm-hci.so:system_ext/lib64/libfm-hci.so|758c6e7cfafc964b5cd9d71806ec5455e0d78716
 system_ext/lib64/vendor.qti.hardware.fm@1.0.so|5eaf6d5d67361ff6236c1ec4f5225c6185a904a6
 vendor/lib64/hw/vendor.qti.hardware.fm@1.0-impl.so|05931b5d088bd7000b0b002ee650b0953e272cd7
-vendor/lib64/vendor.qti.hardware.fm@1.0.so|f6e23f902b7e15232b20af55161a24da93ffe25f
+vendor/lib64/vendor.qti.hardware.fm@1.0.so;MODULE_SUFFIX=_vendor|f6e23f902b7e15232b20af55161a24da93ffe25f
 
 # GNSS
 vendor/bin/hw/android.hardware.gnss@2.0-service-qti
