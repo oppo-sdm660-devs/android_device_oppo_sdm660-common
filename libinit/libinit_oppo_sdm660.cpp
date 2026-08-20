@@ -20,18 +20,12 @@ struct ModelInfo {
 };
 
 const std::unordered_map<int, ModelInfo> kModelInfoMap = {
-    {0,     {"sdm660",     "sdm660"}},
     {16051, {"R11",        "OPPO R11"}},
-    {16052, {"R11t",       "OPPO R11t"}},
-    {16102, {"R11Plust",   "OPPO R11 Plust"}},
     {16103, {"R11Plus",    "OPPO R11 Plus"}},
-    {16116, {"R11Pluskt",  "OPPO R11 Pluskt"}},
     {16118, {"R11Plusk",   "OPPO R11 Plusk"}},
     
     {17011, {"R11s",       "OPPO R11s"}},
-    {17013, {"R11st",      "OPPO R11st"}},
     {17021, {"R11sPlus",   "OPPO R11s Plus"}},
-    {17023, {"R11sPlust",  "OPPO R11s Plust"}},
 };
 
 /*
@@ -85,7 +79,7 @@ int read_file(const char *fname, char *data, int max_size) {
 }
 
 void vendor_load_properties() {
-    char const *prj_file = "/proc/oppoVersion/real_prjVersion";
+    char const *prj_file = "/proc/oppoVersion/prjVersion";
     char prj_version[16];
 
     if (read_file(prj_file, prj_version, sizeof(prj_version))) {
