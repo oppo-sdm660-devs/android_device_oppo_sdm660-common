@@ -44,6 +44,11 @@ lib_fixups: lib_fixups_user_type = {
 
 
 blob_fixups: blob_fixups_user_type = {
+    (
+        'system_ext/lib64/lib-imscamera.so',
+        'system_ext/lib64/lib-imsvideocodec.so'
+    ): blob_fixup()
+        .add_needed('libgui_shim.so'),
     'vendor/bin/pm-service': blob_fixup()
         .replace_needed('libutils.so', 'libutils-v33.so'),
     'vendor/lib/hw/camera.sdm660.so': blob_fixup()

@@ -488,8 +488,8 @@ vendor/lib64/vendor.qti.hardware.cacert@1.0.so
 
 # IMS - from Cat S62Pro
 system_ext/etc/permissions/telephony_system-ext_privapp-permissions-qti.xml|4f0056403f56928b8c75a617ba582f17061f89ae
-system_ext/lib64/lib-imscamera.so|49ead972646b09d700556d63676673b3e8af2036
-system_ext/lib64/lib-imsvideocodec.so|ee8ba719d4d73998f45c131f6d90e638f31ecded
+system_ext/lib64/lib-imscamera.so|49ead972646b09d700556d63676673b3e8af2036|8f9cf8dc8fb88493959b48bd55fe7a5afb133899
+system_ext/lib64/lib-imsvideocodec.so|ee8ba719d4d73998f45c131f6d90e638f31ecded|0d1d54f6bc0c01fc4e08c44aa1be58e3563cdef5
 system_ext/lib64/lib-imsvt.so|353df5991439224f0cdb2e3439ec0f618fe2bb24
 system_ext/lib64/lib-imsvtextutils.so|336c0ffed49a0a4605f41b488771ee0217fa80f0
 system_ext/lib64/lib-imsvtutils.so|b4a39a247f767723ce67182ee92f526c029a019d
