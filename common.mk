@@ -23,14 +23,15 @@ PRODUCT_PACKAGES += \
     android.hardware.audio.effect@6.0 \
     android.hardware.audio.effect@6.0-impl \
     android.hardware.audio.service \
-    android.hardware.soundtrigger@2.1 \
-    android.hardware.soundtrigger@2.1-impl \
+    android.hardware.soundtrigger@2.3 \
+    android.hardware.soundtrigger@2.3-impl \
     android.hardware.soundtrigger@2.0-core
 
 PRODUCT_PACKAGES += \
     audio.primary.sdm660 \
     audio.r_submix.default \
-    audio.usb.default
+    audio.usb.default \
+    sound_trigger.primary.sdm660
 
 PRODUCT_PACKAGES += \
     liba2dpoffload \
