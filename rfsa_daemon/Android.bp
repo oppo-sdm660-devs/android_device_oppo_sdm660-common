@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// rfsa_daemon: userspace RFSA (0x1C) service that hands the rmtfs and
+// oembackup shared-memory physical addresses to the modem, replacing the 4.4
+// kernel-side sharedmem_qmi.c which cannot be ported to 4.19 (900E).
+//
+// libqmi_csi / libqmi_common_so are prebuilt blobs declared as
+// cc_prebuilt_library_shared in proprietary_vendor_oppo_sdm660-common/
+// (Android.bp) and installed to /vendor/lib64 at image build time, so this
+// module only needs to link them. qmi-framework headers are vendored under
+// include/ (no exported headers from the prebuilt modules).
+
+cc_binary {
+    name: "rfsa_daemon",
+
+    srcs: [
+        "remote_filesystem_access_v01.c",
+        "rfsa_svc.c",
+    ],
+    local_include_dirs: [
+        "include",
+    ],
+    shared_libs: [
+        "libcutils",
+        "liblog",
+        "libqmi_csi",
+        "libqmi_common_so",
+    ],
+    header_libs: [
+        "libcutils_headers",
+        "liblog_headers",
+    ],
+    cflags: [
+        "-DLOG_NIDEBUG=0",
+        "-Wno-unused-parameter",
+    ],
+
+    init_rc: [
+        "vendor.oppo.rfsa.rc",
+    ],
+
+    compile_multilib: "64",
+    proprietary: true,
+    owner: "oppo",
+}
