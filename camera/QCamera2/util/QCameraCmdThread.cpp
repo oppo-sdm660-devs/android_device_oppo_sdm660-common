@@ -29,6 +29,7 @@
 
 // System dependencies
 #include <string.h>
+#include <errno.h>
 #include <utils/Errors.h>
 #define PRCTL_H <SYSTEM_HEADER_PREFIX/prctl.h>
 #include PRCTL_H
@@ -43,6 +44,15 @@ extern "C" {
 using namespace android;
 
 namespace qcamera {
+namespace {
+struct CommandLock {
+    pthread_mutex_t *mutex;
+    explicit CommandLock(pthread_mutex_t *lock) : mutex(lock) {
+        if (mutex) pthread_mutex_lock(mutex);
+    }
+    ~CommandLock() { if (mutex) pthread_mutex_unlock(mutex); }
+};
+}
 
 /*===========================================================================
  * FUNCTION   : QCameraCmdThread
@@ -54,9 +64,11 @@ namespace qcamera {
  * RETURN     : None
  *==========================================================================*/
 QCameraCmdThread::QCameraCmdThread() :
-    cmd_queue()
+    cmd_queue(), mExitRequested(false), mStopRequested(false)
 {
     cmd_pid = 0;
+    pthread_mutex_init(&mSyncCommandLock, NULL);
+    pthread_mutex_init(&mThreadLock, NULL);
     cam_sem_init(&sync_sem, 0);
     cam_sem_init(&cmd_sem, 0);
 }
@@ -75,6 +87,8 @@ QCameraCmdThread::~QCameraCmdThread()
     exit();
     cam_sem_destroy(&sync_sem);
     cam_sem_destroy(&cmd_sem);
+    pthread_mutex_destroy(&mSyncCommandLock);
+    pthread_mutex_destroy(&mThreadLock);
 }
 
 /*===========================================================================
@@ -93,11 +107,17 @@ QCameraCmdThread::~QCameraCmdThread()
 int32_t QCameraCmdThread::launch(void *(*start_routine)(void *),
                                  void* user_data)
 {
-    /* launch the thread */
-    pthread_create(&cmd_pid,
-                   NULL,
-                   start_routine,
-                   user_data);
+    CommandLock syncLock(&mSyncCommandLock);
+    CommandLock threadLock(&mThreadLock);
+    if (cmd_pid != 0) return INVALID_OPERATION;
+    mExitRequested.store(false);
+    mStopRequested.store(false);
+    cmd_queue.init();
+    int rc = pthread_create(&cmd_pid, NULL, start_routine, user_data);
+    if (rc != 0) {
+        cmd_pid = 0;
+        return -rc;
+    }
     return NO_ERROR;
 }
 
@@ -138,9 +158,23 @@ int32_t QCameraCmdThread::setName(const char* name)
  *==========================================================================*/
 int32_t QCameraCmdThread::sendCmd(camera_cmd_type_t cmd, uint8_t sync_cmd, uint8_t priority)
 {
+    // Only sync senders take the ack lock; async sends stay possible meanwhile.
+    CommandLock syncLock(sync_cmd ? &mSyncCommandLock : NULL);
+    pthread_mutex_lock(&mThreadLock);
+    if (cmd_pid == 0 || mExitRequested.load()) {
+        pthread_mutex_unlock(&mThreadLock);
+        return -ENODEV;
+    }
     camera_cmd_t *node = (camera_cmd_t *)malloc(sizeof(camera_cmd_t));
     if (NULL == node) {
         LOGE("No memory for camera_cmd_t");
+        if (cmd == CAMERA_CMD_TYPE_STOP_DATA_PROC && !sync_cmd) {
+            mStopRequested.store(true);
+            cam_sem_post(&cmd_sem);
+            pthread_mutex_unlock(&mThreadLock);
+            return NO_ERROR;
+        }
+        pthread_mutex_unlock(&mThreadLock);
         return NO_MEMORY;
     }
     memset(node, 0, sizeof(camera_cmd_t));
@@ -158,7 +192,18 @@ int32_t QCameraCmdThread::sendCmd(camera_cmd_type_t cmd, uint8_t sync_cmd, uint8
             node = NULL;
         }
     }
+    if (node == NULL) {
+        if (cmd == CAMERA_CMD_TYPE_STOP_DATA_PROC && !sync_cmd) {
+            mStopRequested.store(true);
+            cam_sem_post(&cmd_sem);
+            pthread_mutex_unlock(&mThreadLock);
+            return NO_ERROR;
+        }
+        pthread_mutex_unlock(&mThreadLock);
+        return NO_MEMORY;
+    }
     cam_sem_post(&cmd_sem);
+    pthread_mutex_unlock(&mThreadLock);
 
     /* if is a sync call, need to wait until it returns */
     if (sync_cmd) {
@@ -178,6 +223,8 @@ int32_t QCameraCmdThread::sendCmd(camera_cmd_type_t cmd, uint8_t sync_cmd, uint8
  *==========================================================================*/
 camera_cmd_type_t QCameraCmdThread::getCmd()
 {
+    if (mExitRequested.load()) return CAMERA_CMD_TYPE_EXIT;
+    if (mStopRequested.exchange(false)) return CAMERA_CMD_TYPE_STOP_DATA_PROC;
     camera_cmd_type_t cmd = CAMERA_CMD_TYPE_NONE;
     camera_cmd_t *node = (camera_cmd_t *)cmd_queue.dequeue();
     if (NULL == node) {
@@ -202,6 +249,9 @@ camera_cmd_type_t QCameraCmdThread::getCmd()
  *==========================================================================*/
 camera_cmd_type_t QCameraCmdThread::getCmd(uint8_t &sync_cmd)
 {
+    sync_cmd = 0;
+    if (mExitRequested.load()) return CAMERA_CMD_TYPE_EXIT;
+    if (mStopRequested.exchange(false)) return CAMERA_CMD_TYPE_STOP_DATA_PROC;
     camera_cmd_type_t cmd = CAMERA_CMD_TYPE_NONE;
     camera_cmd_t *node = (camera_cmd_t *)cmd_queue.dequeue();
     if (NULL == node) {
@@ -228,23 +278,28 @@ camera_cmd_type_t QCameraCmdThread::getCmd(uint8_t &sync_cmd)
  *==========================================================================*/
 int32_t QCameraCmdThread::exit()
 {
+    CommandLock syncLock(&mSyncCommandLock);
     int32_t rc = NO_ERROR;
-
+    pthread_mutex_lock(&mThreadLock);
     if (cmd_pid == 0) {
+        pthread_mutex_unlock(&mThreadLock);
         return rc;
     }
 
-    rc = sendCmd(CAMERA_CMD_TYPE_EXIT, 0, 1);
-    if (NO_ERROR != rc) {
-        LOGE("Error during exit, rc = %d", rc);
-        return rc;
-    }
+    // Shutdown must work even when command/node allocation fails.
+    mExitRequested.store(true);
+    cam_sem_post(&cmd_sem);
+    pthread_t exitingThread = cmd_pid;
+    pthread_mutex_unlock(&mThreadLock);
 
     /* wait until cmd thread exits */
-    if (pthread_join(cmd_pid, NULL) != 0) {
+    if (pthread_join(exitingThread, NULL) != 0) {
         LOGD("pthread dead already\n");
     }
+    pthread_mutex_lock(&mThreadLock);
     cmd_pid = 0;
+    cmd_queue.flush();
+    pthread_mutex_unlock(&mThreadLock);
     return rc;
 }
 

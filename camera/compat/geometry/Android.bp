@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: BSD-3-Clause
+cc_library_shared {
+    name: "liboppo_camera_geometry",
+    vendor: true,
+    compile_multilib: "32",
+    cpp_std: "gnu++17",
+    srcs: ["CameraGeometry.cpp", "IspGeometryProxy.cpp", "CppGeometryProxy.cpp", "SensorGeometryProxy.cpp", "StatsGeometryProxy.cpp", "MctSyncProxy.cpp"],
+    export_include_dirs: ["."],
+    cflags: ["-Wall", "-Wextra", "-Werror"],
+    // Bionic searches DF_1_GLOBAL before stock's local self-PLT. The original
+    // DSOs keep their names and exports; exact-handle dlsym calls their body.
+    ldflags: ["-Wl,-z,global"],
+    shared_libs: ["libdl"],
+}

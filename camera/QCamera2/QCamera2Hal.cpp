@@ -29,13 +29,28 @@
 
 // Camera dependencies
 #include "QCamera2Factory.h"
-#include "util/QCameraCommon.h"
+#include <errno.h>
+
+static int getPhysicalCameraInfo(int, camera_metadata_t **metadata)
+{
+    if (metadata) *metadata = nullptr;
+    return -EINVAL;
+}
+
+static int isStreamCombinationSupported(int, const camera_stream_combination_t *)
+{
+    // Configuration is authoritative until the HAL has a side-effect-free query.
+    return -ENOSYS;
+}
+
+static void notifyDeviceStateChange(uint64_t)
+{
+}
 #include "HAL3/QCamera3VendorTags.h"
-#include "util/QCameraCommon.h"
 
 static hw_module_t camera_common = {
     .tag                    = HARDWARE_MODULE_TAG,
-    .module_api_version     = CAMERA_MODULE_API_VERSION_2_4,
+    .module_api_version     = CAMERA_MODULE_API_VERSION_2_5,
     .hal_api_version        = HARDWARE_HAL_API_VERSION,
     .id                     = CAMERA_HARDWARE_MODULE_ID,
     .name                   = "QCamera Module",
@@ -51,9 +66,11 @@ camera_module_t HAL_MODULE_INFO_SYM = {
     .get_camera_info        = qcamera::QCamera2Factory::get_camera_info,
     .set_callbacks          = qcamera::QCamera2Factory::set_callbacks,
     .get_vendor_tag_ops     = qcamera::QCamera3VendorTags::get_vendor_tag_ops,
-    .open_legacy            = (qcamera::QCameraCommon::needHAL1Support()) ?
-                                    qcamera::QCamera2Factory::open_legacy : NULL,
+    .open_legacy            = NULL,
     .set_torch_mode         = qcamera::QCamera2Factory::set_torch_mode,
     .init                   = NULL,
+    .get_physical_camera_info = getPhysicalCameraInfo,
+    .is_stream_combination_supported = isStreamCombinationSupported,
+    .notify_device_state_change = notifyDeviceStateChange,
     .reserved               = {0}
 };

@@ -970,6 +970,9 @@ uint8_t get_num_of_cameras();
 
 /* return number of cameras to expose*/
 uint8_t get_num_of_cameras_to_expose();
+/* Factory-only append of the paired HAL3 id; idempotent. Run before public
+ * enumeration, with capability-query handles already closed. */
+int32_t publish_hal3_dual_camera(void);
 
 /* return reference pointer of camera vtbl */
 int32_t camera_open(uint8_t camera_idx, mm_camera_vtbl_t **camera_obj);

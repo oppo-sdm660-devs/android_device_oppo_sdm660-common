@@ -7,6 +7,11 @@ cc_library_shared {
     ],
     c_std: "gnu11",
     srcs: [
+        "mm-camera-interface/src/mm_camera_oppo_format.c",
+        "mm-camera-interface/src/mm_camera_oppo_capability.c",
+        "mm-camera-interface/src/mm_camera_oppo_metadata.c",
+        "mm-camera-interface/src/mm_camera_oppo_stream.c",
+        "mm-camera-interface/src/mm_camera_oppo_dual.c",
         "mm-camera-interface/src/mm_camera_interface.c",
         "mm-camera-interface/src/mm_camera.c",
         "mm-camera-interface/src/mm_camera_muxer.c",
@@ -17,7 +22,6 @@ cc_library_shared {
     ],
     cflags: [
         "-DUSE_KERNEL_VERSION_GE_4_4_DEFS",
-        "-DUSE_4_9_DEFS",
     ],
     shared_libs: [
         // mm_camera.h includes camera_common.h, whose system camera headers

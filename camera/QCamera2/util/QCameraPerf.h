@@ -31,6 +31,7 @@
 #define __QCAMERAPERF_H__
 
 // System dependencies
+#include <array>
 #include <utils/Mutex.h>
 
 // Camera dependencies
@@ -103,7 +104,7 @@ private:
     PerfLockEnum         mPerfLockType;
     QCameraPerfLockIntf *mPerfLockIntf;
 
-    static PerfLockInfo  mPerfLockInfo[PERF_LOCK_COUNT];
+    static std::array<PerfLockInfo, PERF_LOCK_COUNT> mPerfLockInfo;
 
     void restartTimer(uint32_t timer);
     bool isTimedOut();

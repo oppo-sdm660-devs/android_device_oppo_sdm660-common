@@ -223,30 +223,26 @@ static int32_t perfLockParamsFlush[] = {
     MPCTLV3_MIN_FREQ_CLUSTER_LITTLE_CORE_0, 0xFFF
 };
 
-PerfLockInfo QCameraPerfLock::mPerfLockInfo[] = {
-    { //PERF_LOCK_OPEN_CAMERA
-      perfLockParamsOpenCamera,
-      sizeof(perfLockParamsOpenCamera)/sizeof(int32_t) },
-    { //PERF_LOCK_CLOSE_CAMERA
-      perfLockParamsCloseCamera,
-      sizeof(perfLockParamsCloseCamera)/sizeof(int32_t) },
-    { //PERF_LOCK_START_PREVIEW
-      perfLockParamsStartPreview,
-      sizeof(perfLockParamsStartPreview)/sizeof(int32_t) },
-    { //PERF_LOCK_TAKE_SNAPSHOT
-      perfLockParamsTakeSnapshot,
-      sizeof(perfLockParamsTakeSnapshot)/sizeof(int32_t) },
-    { //PERF_LOCK_POWERHINT_PREVIEW
-      NULL, 0},
-    { //PERF_LOCK_POWERHINT_ENCODE
-      NULL, 0},
-    { //PERF_LOCK_BOKEH_SNAPSHOT
-      perfLockParamsBokehSnapshot,
-      sizeof(perfLockParamsBokehSnapshot)/sizeof(int32_t) },
-    { //PERF_LOCK_FLUSH
-      perfLockParamsFlush,
-      sizeof(perfLockParamsFlush)/sizeof(int32_t) },
-    };
+std::array<PerfLockInfo, PERF_LOCK_COUNT> QCameraPerfLock::mPerfLockInfo =
+        []() -> std::array<PerfLockInfo, PERF_LOCK_COUNT> {
+    std::array<PerfLockInfo, PERF_LOCK_COUNT> table = {};
+    table[PERF_LOCK_OPEN_CAMERA] = {perfLockParamsOpenCamera,
+            sizeof(perfLockParamsOpenCamera) / sizeof(int32_t)};
+    table[PERF_LOCK_CLOSE_CAMERA] = {perfLockParamsCloseCamera,
+            sizeof(perfLockParamsCloseCamera) / sizeof(int32_t)};
+    table[PERF_LOCK_START_PREVIEW] = {perfLockParamsStartPreview,
+            sizeof(perfLockParamsStartPreview) / sizeof(int32_t)};
+    table[PERF_LOCK_TAKE_SNAPSHOT] = {perfLockParamsTakeSnapshot,
+            sizeof(perfLockParamsTakeSnapshot) / sizeof(int32_t)};
+    table[PERF_LOCK_POWERHINT_PREVIEW] = {nullptr, 0};
+    table[PERF_LOCK_POWERHINT_ENCODE] = {nullptr, 0};
+    table[PERF_LOCK_POWERHINT_HFR] = {nullptr, 0};
+    table[PERF_LOCK_BOKEH_SNAPSHOT] = {perfLockParamsBokehSnapshot,
+            sizeof(perfLockParamsBokehSnapshot) / sizeof(int32_t)};
+    table[PERF_LOCK_FLUSH] = {perfLockParamsFlush,
+            sizeof(perfLockParamsFlush) / sizeof(int32_t)};
+    return table;
+}();
 
 Mutex                QCameraPerfLockIntf::mMutex;
 QCameraPerfLockIntf* QCameraPerfLockIntf::mInstance = NULL;

@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+// Android 9 GraphicBuffer ABI used by the stock MMS backend.
+
+cc_library_shared {
+    name: "libui_vstab_shim",
+    vendor: true,
+    compile_multilib: "32",
+    srcs: ["ui_vstab_shim.cpp"],
+    shared_libs: [
+        "libui",
+        "liblog",
+    ],
+    header_libs: [
+        "libui_headers",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+}

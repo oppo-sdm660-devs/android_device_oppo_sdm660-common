@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <limits.h>
 #include <cutils/properties.h>
 
 #define PRCTL_H <SYSTEM_HEADER_PREFIX/prctl.h>
@@ -47,6 +48,7 @@
 #include "mm_jpeg_interface.h"
 #include "mm_jpeg.h"
 #include "mm_jpeg_inlines.h"
+#include "mm_camera_oppo_metadata.h"
 #ifdef LIB2D_ROTATION_ENABLE
 #include "mm_lib2d.h"
 #endif
@@ -434,6 +436,8 @@ void mm_jpeg_session_destroy(mm_jpeg_job_session_t* p_session)
 
   LOGD("E");
   if (NULL == p_session->omx_handle) {
+    free(p_session->oppo_metadata);
+    p_session->oppo_metadata = NULL;
     LOGE("invalid handle");
     return;
   }
@@ -478,6 +482,8 @@ void mm_jpeg_session_destroy(mm_jpeg_job_session_t* p_session)
     LOGE("OMX_FreeHandle failed (%d)", rc);
   }
   p_session->omx_handle = NULL;
+  free(p_session->oppo_metadata);
+  p_session->oppo_metadata = NULL;
 
   pthread_mutex_destroy(&p_session->lock);
   pthread_cond_destroy(&p_session->cond);
@@ -825,10 +831,31 @@ OMX_ERRORTYPE mm_jpeg_metadata(
     return rc;
   }
 
-  lMeta.metadata = (OMX_U8 *)p_jobparams->p_metadata;
-  lMeta.metaPayloadSize = sizeof(*p_jobparams->p_metadata);
-  lMeta.mobicat_mask = p_jobparams->mobicat_mask;
-  lMeta.static_metadata = (OMX_U8 *)my_obj->jpeg_metadata;
+  /* OMX may retain metadata after SetConfig; storage is session-owned. */
+  if (p_session->oppo_metadata == NULL) {
+    p_session->oppo_metadata = calloc(1, MM_CAMERA_OPPO_METADATA_SIZE);
+    if (p_session->oppo_metadata == NULL)
+      return OMX_ErrorInsufficientResources;
+  }
+  if (mm_camera_oppo_metadata_encode(p_jobparams->p_metadata,
+      p_session->oppo_metadata) != 0)
+    return OMX_ErrorBadParameter;
+  lMeta.metadata = (OMX_U8 *)p_session->oppo_metadata;
+  lMeta.metaPayloadSize = MM_CAMERA_OPPO_METADATA_SIZE;
+  /* Stock appends 0x1ba bytes of dual calibration after flip/mount. */
+  memset(p_session->oppo_static_metadata, 0,
+      sizeof(p_session->oppo_static_metadata));
+  lMeta.static_metadata = NULL;
+  if (my_obj->jpeg_metadata != NULL) {
+    uint32_t geometry[2] = {
+      my_obj->jpeg_metadata->default_sensor_flip,
+      my_obj->jpeg_metadata->sensor_mount_angle,
+    };
+    memcpy(p_session->oppo_static_metadata, geometry, sizeof(geometry));
+    lMeta.static_metadata = p_session->oppo_static_metadata;
+  }
+  /* Stock debug tails are not translated. */
+  lMeta.mobicat_mask = 0;
 
   rc = OMX_SetConfig(p_session->omx_handle, indexType, &lMeta);
   if (rc != OMX_ErrorNone) {
@@ -1776,7 +1803,9 @@ static OMX_ERRORTYPE mm_jpeg_configure_job_params(
   LOGH("Work buffer info %d %p WorkBufSize: %d invalidate",
       work_buffer.fd, work_buffer.vaddr, work_buffer.length);
 
-  buffer_invalidate(&p_session->work_buffer);
+  if (buffer_invalidate(&p_session->work_buffer) < 0) {
+    return OMX_ErrorUndefined;
+  }
 
   ret = OMX_SetConfig(p_session->omx_handle, work_buffer_index,
     &work_buffer);
@@ -2257,7 +2286,6 @@ int32_t mm_jpeg_jobmgr_thread_release(mm_jpeg_obj * my_obj)
  *  Arguments:
  *    @my_obj: jpeg object
  *    @work_bufs_need: number of work buffers required
- *    @work_buf_size: size of the work buffer
  *
  *  Return:
  *       greater or equal to 0 for success else failure
@@ -2267,38 +2295,50 @@ int32_t mm_jpeg_jobmgr_thread_release(mm_jpeg_obj * my_obj)
  *
  **/
 int32_t mm_jpeg_alloc_workbuffer(mm_jpeg_obj *my_obj,
-  uint32_t work_bufs_need,
-  uint32_t work_buf_size)
+  uint32_t work_bufs_need)
 {
-  int32_t rc = 0;
-  uint32_t i;
-  LOGH("work_bufs_need %d work_buf_cnt %d",
-    work_bufs_need, my_obj->work_buf_cnt);
-  for (i = my_obj->work_buf_cnt; i < work_bufs_need; i++) {
-    my_obj->ionBuffer[i].size = CEILING32(work_buf_size);
-    LOGH("Max picture size %d x %d, WorkBufSize = %zu",
-      my_obj->max_pic_w, my_obj->max_pic_h, my_obj->ionBuffer[i].size);
-    my_obj->ionBuffer[i].addr = (uint8_t *)buffer_allocate(&my_obj->ionBuffer[i], 1);
-    if (NULL == my_obj->ionBuffer[i].addr) {
-      LOGE("Ion allocation failed");
-      while (i--) {
-        buffer_deallocate(&my_obj->ionBuffer[i]);
-        my_obj->work_buf_cnt--;
+  if (my_obj == NULL || work_bufs_need == 0 ||
+    work_bufs_need > MM_JPEG_CONCURRENT_SESSIONS_COUNT ||
+    my_obj->work_buf_cnt > MM_JPEG_CONCURRENT_SESSIONS_COUNT ||
+    my_obj->max_pic_w == 0 || my_obj->max_pic_h == 0 ||
+    my_obj->max_pic_w > SIZE_MAX - 63 || my_obj->max_pic_h > SIZE_MAX - 63) {
+    return -1;
+  }
+  const size_t width = ((size_t)my_obj->max_pic_w + 63) & ~(size_t)63;
+  const size_t height = ((size_t)my_obj->max_pic_h + 63) & ~(size_t)63;
+  if (width == 0 || height == 0 || width > SIZE_MAX / height) {
+    return -1;
+  }
+  const size_t pixels = width * height;
+  if (pixels > SIZE_MAX / 3) {
+    return -1;
+  }
+  const size_t work_buf_size = pixels * 3 / 2;
+  if (work_buf_size > (size_t)SSIZE_MAX - 4095) {
+    return -1;
+  }
+
+  const uint32_t previous_count = my_obj->work_buf_cnt;
+  while (my_obj->work_buf_cnt < work_bufs_need) {
+    buffer_t *buffer = &my_obj->ionBuffer[my_obj->work_buf_cnt];
+    buffer->size = work_buf_size;
+    buffer->addr = buffer_allocate(buffer, 1);
+    if (buffer->addr == NULL) {
+      while (my_obj->work_buf_cnt > previous_count) {
+        buffer_deallocate(&my_obj->ionBuffer[--my_obj->work_buf_cnt]);
       }
       return -1;
     }
-    my_obj->work_buf_cnt++;
-    rc = i;
+    ++my_obj->work_buf_cnt;
   }
- LOGH("rc %d ", rc);
-  return rc;
+  return (int32_t)work_bufs_need - 1;
 }
 
 /** mm_jpeg_release_workbuffer:
  *
  *  Arguments:
  *    @my_obj: jpeg object
- *    @work_bufs_need: number of work buffers allocated
+ *    @work_bufs_release: number of work buffers to release
  *
  *  Return:
  *       0 for success else failure
@@ -2308,15 +2348,21 @@ int32_t mm_jpeg_alloc_workbuffer(mm_jpeg_obj *my_obj,
  *
  **/
 int32_t mm_jpeg_release_workbuffer(mm_jpeg_obj *my_obj,
-  uint32_t work_bufs_need)
+  uint32_t work_bufs_release)
 {
-  int32_t rc = 0;
-  uint32_t i;
- LOGH("release work_bufs %d ", work_bufs_need);
-  for (i = my_obj->work_buf_cnt; i < work_bufs_need; i++) {
-    buffer_deallocate(&my_obj->ionBuffer[i]);
+  if (my_obj == NULL ||
+    my_obj->work_buf_cnt > MM_JPEG_CONCURRENT_SESSIONS_COUNT) {
+    return -1;
   }
-  return rc;
+  int32_t result = 0;
+  while (work_bufs_release-- != 0 && my_obj->work_buf_cnt != 0) {
+    const int32_t rc =
+      buffer_deallocate(&my_obj->ionBuffer[--my_obj->work_buf_cnt]);
+    if (result == 0) {
+      result = rc;
+    }
+  }
+  return result;
 }
 
 /** mm_jpeg_init:
@@ -2334,7 +2380,6 @@ int32_t mm_jpeg_release_workbuffer(mm_jpeg_obj *my_obj,
 int32_t mm_jpeg_init(mm_jpeg_obj *my_obj)
 {
   int32_t rc = 0;
-  uint32_t work_buf_size;
   unsigned int initial_workbufs_cnt = 1;
 #ifdef LIB2D_ROTATION_ENABLE
   char  prop[PROPERTY_VALUE_MAX];
@@ -2363,7 +2408,7 @@ int32_t mm_jpeg_init(mm_jpeg_obj *my_obj)
   }
 
   /* set work buf size from max picture size */
-  if (my_obj->max_pic_w <= 0 || my_obj->max_pic_h <= 0) {
+  if (my_obj->max_pic_w == 0 || my_obj->max_pic_h == 0) {
     LOGE("Width and height are not valid "
       "dimensions, cannot calc work buf size");
     mm_jpeg_jobmgr_thread_release(my_obj);
@@ -2374,25 +2419,28 @@ int32_t mm_jpeg_init(mm_jpeg_obj *my_obj)
 
   /* allocate work buffer if reproc source buffer is not supposed to be used */
   if (!my_obj->reuse_reproc_buffer) {
-    work_buf_size = CEILING64((uint32_t)my_obj->max_pic_w) *
-     CEILING64((uint32_t)my_obj->max_pic_h) * 3U / 2U;
-    rc = mm_jpeg_alloc_workbuffer(my_obj, initial_workbufs_cnt, work_buf_size);
+    rc = mm_jpeg_alloc_workbuffer(my_obj, initial_workbufs_cnt);
     if (rc == -1) {
       LOGE("Work buffer allocation failure");
+      mm_jpeg_jobmgr_thread_release(my_obj);
+      mm_jpeg_queue_deinit(&my_obj->ongoing_job_q);
+      pthread_mutex_destroy(&my_obj->job_lock);
       return rc;
     }
   }
 
   /* load OMX */
-  if (OMX_ErrorNone != OMX_Init()) {
+  const OMX_ERRORTYPE omx_rc = OMX_Init();
+  if (OMX_ErrorNone != omx_rc) {
     /* roll back in error case */
-    LOGE("OMX_Init failed (%d)", rc);
+    LOGE("OMX_Init failed (%d)", omx_rc);
     if (!my_obj->reuse_reproc_buffer) {
       mm_jpeg_release_workbuffer(my_obj, initial_workbufs_cnt);
     }
     mm_jpeg_jobmgr_thread_release(my_obj);
     mm_jpeg_queue_deinit(&my_obj->ongoing_job_q);
     pthread_mutex_destroy(&my_obj->job_lock);
+    return -1;
   }
 
 #ifdef LOAD_ADSP_RPC_LIB
@@ -2429,6 +2477,9 @@ int32_t mm_jpeg_init(mm_jpeg_obj *my_obj)
       my_obj->static_lib2d_handle = NULL;
     }
   }
+#else
+  my_obj->is_lib2d_enable = 0;
+  my_obj->static_lib2d_handle = NULL;
 #endif
 
 
@@ -2782,7 +2833,6 @@ int32_t mm_jpeg_start_job(mm_jpeg_obj *my_obj,
   mm_jpeg_job_session_t *p_session = NULL;
   mm_jpeg_encode_job_t *p_jobparams  = NULL;
   uint32_t work_bufs_need;
-  uint32_t work_buf_size;
 
   *job_id = 0;
   if (!job) {
@@ -2809,8 +2859,9 @@ int32_t mm_jpeg_start_job(mm_jpeg_obj *my_obj,
   if (my_obj->reuse_reproc_buffer) {
     p_session->work_buffer.addr           = p_jobparams->work_buf.buf_vaddr;
     p_session->work_buffer.size           = p_jobparams->work_buf.buf_size;
-    p_session->work_buffer.ion_info_fd.fd = p_jobparams->work_buf.fd;
     p_session->work_buffer.p_pmem_fd      = p_jobparams->work_buf.fd;
+    p_session->work_buffer.allocation_size = 0;
+    p_session->work_buffer.owns_buffer = false;
 
     work_bufs_need = my_obj->num_sessions + 1;
     if (work_bufs_need > MM_JPEG_CONCURRENT_SESSIONS_COUNT) {
@@ -2828,9 +2879,7 @@ int32_t mm_jpeg_start_job(mm_jpeg_obj *my_obj,
     LOGD(">>>> Work bufs need %d, %d",
       work_bufs_need, my_obj->work_buf_cnt);
     if (work_bufs_need) {
-      work_buf_size = CEILING64(my_obj->max_pic_w) *
-        CEILING64(my_obj->max_pic_h) * 3 / 2;
-      rc = mm_jpeg_alloc_workbuffer(my_obj, work_bufs_need, work_buf_size);
+      rc = mm_jpeg_alloc_workbuffer(my_obj, work_bufs_need);
       if (rc == -1) {
         LOGE("Work buffer allocation failure");
         return rc;
@@ -3030,7 +3079,6 @@ int32_t mm_jpeg_create_session(mm_jpeg_obj *my_obj,
   uint32_t j = 0;
 #endif
   uint32_t num_omx_sessions = 1;
-  uint32_t work_buf_size;
   mm_jpeg_queue_t *p_session_handle_q, *p_out_buf_q;
   uint32_t work_bufs_need;
   char trace_tag[32];
@@ -3059,9 +3107,7 @@ int32_t mm_jpeg_create_session(mm_jpeg_obj *my_obj,
       work_bufs_need = MM_JPEG_CONCURRENT_SESSIONS_COUNT;
     }
     LOGD(">>>> Work bufs need %d", work_bufs_need);
-    work_buf_size = CEILING64(my_obj->max_pic_w) *
-      CEILING64(my_obj->max_pic_h) * 3 / 2;
-    rc = mm_jpeg_alloc_workbuffer(my_obj, work_bufs_need, work_buf_size);
+    rc = mm_jpeg_alloc_workbuffer(my_obj, work_bufs_need);
     if (rc == -1) {
       LOGE("Work buffer allocation failure");
       return rc;
@@ -3123,7 +3169,8 @@ int32_t mm_jpeg_create_session(mm_jpeg_obj *my_obj,
     } else {
       LOGE("Invalid Index, Setting buffer add to null");
       p_session->work_buffer.addr = NULL;
-      p_session->work_buffer.ion_fd = -1;
+      p_session->work_buffer.allocation_size = 0;
+      p_session->work_buffer.owns_buffer = false;
       p_session->work_buffer.p_pmem_fd = -1;
     }
 
@@ -3212,6 +3259,10 @@ int32_t mm_jpeg_create_session(mm_jpeg_obj *my_obj,
         }
       }
     }
+#else
+    p_session->lib2d_rotation_flag = 0;
+    p_session->lib2d_handle = NULL;
+    p_session->num_src_rot_bufs = 0;
 #endif
 
     p_session->client_hdl = client_hdl;

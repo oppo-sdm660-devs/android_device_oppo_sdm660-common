@@ -53,6 +53,9 @@ public:
     /* This call will put queue into uninitialized state.
      * Need to call init() in order to use the queue again */
     void flush();
+    // Detach and deactivate atomically, then release data without the queue
+    // lock so a releaser can safely take its owner's locks or inspect queues.
+    void flushOutsideLock();
     void flushNodes(match_fn match);
     void flushNodes(match_fn_data match, void *spec_data);
     void* dequeue(bool bFromHead = true);

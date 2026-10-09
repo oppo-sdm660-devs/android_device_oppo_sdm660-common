@@ -3,17 +3,6 @@ bt.max.hfpclient.connections=1
 ro.bluetooth.emb_wp_mode=false
 ro.bluetooth.wipower=false
 
-# Camera
-persist.camera.aifb=1
-persist.camera.expose.aux=1
-persist.camera.preview.ubwc=0
-ro.camera.dualcam.type=2
-ro.camera.filter.version=1
-ro.camera.temperature.limit=480
-persist.camera.eis.enable=0
-persist.camera.is_type=2
-persist.camera.is_type_preview=2
-
 # Media
 media.settings.xml=/vendor/etc/media_profiles_vendor.xml
 

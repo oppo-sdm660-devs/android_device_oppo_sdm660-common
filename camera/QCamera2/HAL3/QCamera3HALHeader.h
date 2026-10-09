@@ -34,6 +34,7 @@
 
 // Camera dependencies
 #include "cam_types.h"
+#include "QCamera3AlgoTrace.h"
 
 extern "C" {
 #include "mm_jpeg_interface.h"
@@ -69,6 +70,17 @@ class QCamera3ProcessingChannel;
        REPROCESS_TYPE_RAW
     } reprocess_type_t;
 
+    // Written by the channel that owns the engine; read by select().
+    typedef struct {
+        uint8_t valid;
+        int32_t enabled;
+        int32_t configured;
+        int32_t coreStatus;
+        int32_t gyroValid;
+        int64_t gyroPeriodNs;
+        int32_t version;
+    } native_eis_state_t;
+
     typedef struct {
         uint32_t out_buf_index;
         int32_t jpeg_orientation;
@@ -82,6 +94,8 @@ class QCamera3ProcessingChannel;
         char gps_processing_method[GPS_PROCESSING_METHOD_SIZE];
         uint8_t image_desc_valid;
         char image_desc[EXIF_IMAGE_DESCRIPTION_SIZE];
+        QCamera3AlgoTrace native_trace;
+        uint8_t native_trace_valid;
         bool hdr_snapshot;
         bool multiframe_snapshot;
         cam_hal3_JPEG_type_t image_type;
@@ -97,6 +111,9 @@ class QCamera3ProcessingChannel;
         bool zsl_snapshot;
         uint32_t frame_number;
         bool raw_mfc_snapshot;
+        int32_t native_still_mode;
+        uint32_t framework_frame_number;
+        bool framework_frame_number_valid;
     } jpeg_settings_t;
 
     typedef struct {
