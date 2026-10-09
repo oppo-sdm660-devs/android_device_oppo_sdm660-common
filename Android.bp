@@ -10,7 +10,10 @@ soong_namespace {
         "hardware/google/pixel",
         "hardware/lineage/interfaces/power-libperfmgr",
         "hardware/qcom-caf/common/libqti-perfd-client",
+        "hardware/qcom-caf/sdm660",
         "vendor/oppo/sdm660-common",
+        "vendor/qcom/opensource/commonsys-intf/display",
+        "vendor/qcom/opensource/display",
     ],
 }
 
