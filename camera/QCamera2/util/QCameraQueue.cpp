@@ -340,6 +340,30 @@ void* QCameraQueue::dequeue(match_fn_data match, void *match_data){
  *
  * RETURN     : None
  *==========================================================================*/
+void QCameraQueue::flushOutsideLock()
+{
+    camera_q_node detached;
+    cam_list_init(&detached.list);
+    pthread_mutex_lock(&m_lock);
+    m_active = false;
+    while (m_head.list.next != &m_head.list) {
+        struct cam_list *node = m_head.list.next;
+        cam_list_del_node(node);
+        cam_list_add_tail_node(node, &detached.list);
+    }
+    m_size = 0;
+    pthread_mutex_unlock(&m_lock);
+    while (detached.list.next != &detached.list) {
+        camera_q_node *node = member_of(detached.list.next, camera_q_node, list);
+        cam_list_del_node(&node->list);
+        if (node->data) {
+            if (m_dataFn) m_dataFn(node->data, m_userData);
+            free(node->data);
+        }
+        free(node);
+    }
+}
+
 void QCameraQueue::flush(){
     camera_q_node* node = NULL;
     struct cam_list *head = NULL;

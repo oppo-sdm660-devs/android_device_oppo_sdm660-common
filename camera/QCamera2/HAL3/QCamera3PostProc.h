@@ -36,7 +36,10 @@
 #include "QCameraCmdThread.h"
 #include "QCameraQueue.h"
 #include "QCameraPerf.h"
-#include "QCameraPprocManager.h"
+#include "QCamera3HdrAlgo.h"
+#include <map>
+#include <memory>
+#include <mutex>
 
 extern "C" {
 #include "mm_camera_interface.h"
@@ -71,10 +74,6 @@ typedef struct {
     metadata_buffer_t *metadata;
     mm_camera_super_buf_t *src_metadata;
     jpeg_settings_t *jpeg_settings;
-    bool halPPAllocatedBuf;
-    mm_camera_buf_def_t *hal_pp_bufs;  // bufs allocates for HAL PP
-    QCameraHeapMemory *snapshot_heap; // heap memory of snapshot buffer
-    QCameraHeapMemory *metadata_heap; // heap memory of metadata buffer
 } qcamera_hal3_jpeg_data_t;
 
 typedef struct {
@@ -146,6 +145,7 @@ public:
     virtual ~QCamera3PostProcessor();
 
     int32_t init(QCamera3StreamMem *mMemory);
+    void markStopPending();
     int32_t initJpeg(jpeg_encode_callback_t jpeg_cb,
                      mpo_encode_callback_t mpo_cb,
                      cam_dimension_t *m_max_pic_dim,
@@ -159,7 +159,26 @@ public:
             buffer_handle_t *output, uint32_t frameNumber);
     int32_t processData(mm_camera_super_buf_t *input);
     int32_t cancelFramePProc(uint32_t framenum);
-    int32_t processPPData(mm_camera_super_buf_t *frame, const metadata_buffer_t *p_metadata = NULL);
+    int32_t cancelQueuedFrame(uint32_t frameNumber);
+    int32_t processPPData(mm_camera_super_buf_t *frame,
+            const metadata_buffer_t *p_metadata = NULL, uint32_t frameNumber = UINT32_MAX);
+    int32_t beginHdrCapture(const uint32_t frameIds[3], uint32_t baseId, bool frontCamera);
+    int32_t beginLowLightCapture(const uint32_t frameIds[5], uint32_t baseId, bool frontCamera);
+    int32_t beginStillCapture(const uint32_t frameIds[4], uint32_t baseId,
+            bool frontCamera, bool enhanceDetail);
+    void abortHdrCapture();
+    int32_t beginDualCapture(uint32_t frameNumber, uint64_t token);
+    void notifyDualFrameReady();
+    bool cancelHdrCapture(uint32_t frameNumber);
+    void retireHdrFrame(uint32_t frameNumber);
+    void completeHdrOutput(uint32_t frameNumber);
+    bool isHdrCaptureFrame(uint32_t frameNumber);
+    bool hasPendingHdrCapture(uint32_t frameNumber);
+    bool fallbackDualCapture(uint32_t frameNumber);
+    bool isHdrCaptureCancelled() const {
+        const auto state = std::atomic_load(&mHdrCaptureState);
+        return state && state->cancelled.load();
+    }
     int32_t processPPMetadata(mm_camera_super_buf_t *reproc_meta,uint32_t framenum, bool dropFrame);
     int32_t processJpegSettingData(jpeg_settings_t *jpeg_settings);
     static void processJpegData(jpeg_job_status_t status,
@@ -173,11 +192,10 @@ public:
     qcamera_hal3_jpeg_data_t *findJpegJobByJobId(uint32_t jobId);
     void releaseJpegJobData(qcamera_hal3_jpeg_data_t *job);
     int32_t releaseOfflineBuffers(bool all);
+    int32_t releaseOfflineBuffersForFrame(uint32_t frameNumber);
     void releasePPJobData(qcamera_hal3_pp_data_t *job);
     int32_t timeoutFrame(uint32_t frameNumber);
     bool releaseReprocMetaBuffer(uint32_t);
-    static void processHalPPDataCB(qcamera_hal_pp_data_t *pOutput, void* pUserData);
-    static void releaseSuperBufCb(mm_camera_super_buf_t *super_buf, void* pUserData);
     void setMpoMode(bool enable) {m_bMpoEnabled = enable;}
     bool isMpoEnabled() { return m_bMpoEnabled; }
     int releaseFreeJpegSessions();
@@ -208,18 +226,32 @@ private:
     static void releasePPInputData(void *data, void *user_data);
     static void releaseMetadata(void *data, void *user_data);
     static void releaseOngoingPPData(void *data, void *user_data);
+    void cancelQueuedFrames();
+    void clearPostprocQueues();
+    void stopPostproc();
+    bool finishLifecycleOperation();
+    bool isQueuedFrameCancelled(uint32_t frameNumber);
     static bool matchMetaFrameNum(void *data, void *user_data, void *match_data);
     static bool matchReprocessFrameNum(void *data, void *user_data, void *match_data);
     static bool matchJpegSetting(void *data, void *user_data, void *match_data);
+    static bool matchPPJob(void *data, void *user_data, void *match_data);
+    bool isDiscardedHdrFrame(uint32_t frameNumber);
+    bool collectHdrFrame(qcamera_hal3_pp_data_t *&job, mm_camera_super_buf_t *&frame);
+    bool getHdrImage(mm_camera_super_buf_t *frame, QCamera3HdrAlgo::Image &image,
+            QCamera3StreamMem *&memory);
+    void discardHdrFrame(qcamera_hal3_pp_data_t *job, mm_camera_super_buf_t *frame);
+    void finishHdrGroupLocked();
+    void processDualCapture();
+    int32_t queueJpegFrame(qcamera_hal3_pp_data_t *job,
+            mm_camera_super_buf_t *frame, const metadata_buffer_t *metadata);
+    int32_t beginBurstCapture(const uint32_t *frameIds, unsigned count,
+            uint32_t baseId, bool frontCamera, bool lowLight,
+            bool still = false, bool enhanceDetail = false, uint64_t dualToken = 0,
+            int32_t nativeMode = 0);
     static void *dataProcessRoutine(void *data);
     qcamera_hal3_meta_pp_buffer_t * isMetaMatched(uint32_t resultFrameNumber);
     qcamera_hal3_pp_buffer_t * isFrameMatched(uint32_t resultFrameNumber);
     bool needsReprocess(qcamera_fwk_input_pp_data_t *frame);
-    int32_t processHalPPData(qcamera_hal_pp_data_t *pData);
-    void createHalPPManager();
-    int32_t initHalPPManager();
-    bool isHalPPEnabled() { return (m_pHalPPManager != NULL);}
-    QCamera3Channel *getChannelByHandle(uint32_t channelHandle);
 
 private:
     QCamera3ProcessingChannel  *m_parent;
@@ -232,8 +264,17 @@ private:
     uint32_t                   mJpegSessionId;
     cam_jpeg_metadata_t        mJpegMetadata;
 
+    // Bound of one still burst. The contract's PicBest range is 2..8 frames;
+    // this is the single array bound every collector array above uses.
+    static const uint32_t kMaxBurstFrames = 8;
+
     uint32_t                   m_bThumbnailNeeded;
     QCamera3StreamMem          *mOutputMem;
+    std::atomic<bool>          mDeinitialized;
+    std::mutex                 mLifecycleLock;
+    bool                       mStopCommandQueued; // Protected by mHDRJobLock.
+    bool                       mLifecycleOperationActive; // Protected by mHDRJobLock.
+    bool                       mStopDeferred; // Protected by mHDRJobLock.
     int8_t                      m_ppChannelCnt;
     QCamera3ReprocessChannel *  m_pReprocChannel[2];
     bool                        m_bMpoEnabled;
@@ -253,10 +294,60 @@ private:
 
     QCameraPerfLockMgr mPerfLockMgr;
     pthread_mutex_t mReprocJobLock;
+    pthread_mutex_t mCancelJobLock;
     pthread_mutex_t mHDRJobLock;
+    pthread_mutex_t mHdrCaptureLock;
+    pthread_cond_t mHdrCaptureCond;
+    struct HdrCaptureState {
+        enum Stage { COLLECTING, READY, HANDED_OFF, FAILED };
+        explicit HdrCaptureState(const uint32_t *ids, unsigned imageCount,
+                bool isLowLight, bool isStill = false, bool detail = false,
+                uint64_t pairToken = 0, int32_t nativeMode = 0) :
+                cancelled(false), stage(COLLECTING), outputPending(true),
+                count(imageCount), lowLight(isLowLight), still(isStill),
+                enhanceDetail(detail), dualToken(pairToken),
+                nativeMode(nativeMode) {
+            for (unsigned i = 0; i < kMaxBurstFrames; ++i) {
+                if (i >= count) { frameIds[i] = 0; pending[i] = false; continue; }
+                frameIds[i] = ids[i];
+                pending[i] = true;
+            }
+        }
+        uint32_t frameIds[kMaxBurstFrames]; // Immutable after publication.
+        std::atomic<bool> cancelled;
+        Stage stage; // Protected by mHdrCaptureLock.
+        bool pending[kMaxBurstFrames]; // PP ownership, including a callback not yet received.
+        bool outputPending; // The framework JPEG has not been returned.
+        const unsigned count;
+        const bool lowLight;
+        const bool still;
+        const bool enhanceDetail;
+        const uint64_t dualToken;
+        // The requested native still mode (0 = the round-1 HDR/MFNR/dual path).
+        const int32_t nativeMode;
+    };
+    std::shared_ptr<HdrCaptureState> mHdrCaptureState;
+    // Unlike recent duplicate tombstones, entries persist while a real PP or
+    // framework output owner can still arrive, irrespective of newer captures.
+    std::map<uint32_t, std::shared_ptr<HdrCaptureState>> mHdrFrameStates;
+    bool mHdrActive;
+    bool mHdrFrontCamera;
+    uint32_t mHdrFrameIds[kMaxBurstFrames];
+    bool mHdrReceived[kMaxBurstFrames];
+    QCamera3HdrAlgo::Image mHdrImages[kMaxBurstFrames];
+    double mHdrExposure[kMaxBurstFrames];
+    int32_t mHdrSensitivity[kMaxBurstFrames];
+    float mHdrDrcGain[kMaxBurstFrames];
+    // Real per-frame capture timestamps of the collected burst, filled by the
+    // collector from each frame's own metadata record.
+    int64_t mHdrTimestamps[kMaxBurstFrames];
+    qcamera_hal3_pp_data_t *mHdrBaseJob;
+    mm_camera_super_buf_t *mHdrBaseFrame;
+    List<uint32_t> mHdrDiscardFrames;
+    List<uint32_t> mHdrFailedFrames;
     pthread_cond_t mProcChStopCond;
-    QCameraHALPPManager *m_pHalPPManager; // HAL Post process block
     mm_dimension max_pic_size;
+
 public:
     bool mChannelStop;
     static List<qcamera_hal3_mpo_data_t> mMpoInputData;

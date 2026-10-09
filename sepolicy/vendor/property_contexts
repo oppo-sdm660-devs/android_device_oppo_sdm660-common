@@ -1,0 +1,15 @@
+# Camera property labels.
+#
+# Labels mirror the stock R11/R11s vendor_property_contexts (line 429
+# "ro.camera.dualcam.type", line 406 "persist.camera.") so that the in-process
+# stock camera modules this device ships (libmmcamera2_q3a_core.so and
+# libmmcamera_imglib.so read ro.camera.dualcam.type; the HAL1 modules read
+# persist.camera.expose.aux) can read the properties the port defines.
+#
+# Only names that stock really labelled are listed, and exact matches are used
+# so that no unrelated property is pulled in. ro.camera.temperature.limit
+# (stock: exported_default_prop) and ro.camera.filter.version (unlabelled in
+# stock) are intentionally not listed; see camera/docs/BLOB_PACKAGING.md.
+persist.camera.aifb        u:object_r:exported_system_prop:s0 exact bool
+persist.camera.expose.aux  u:object_r:exported_system_prop:s0 exact bool
+ro.camera.dualcam.type     u:object_r:exported_system_prop:s0 exact int

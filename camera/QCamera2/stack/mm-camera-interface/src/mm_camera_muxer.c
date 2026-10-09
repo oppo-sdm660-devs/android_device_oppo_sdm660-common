@@ -1666,7 +1666,7 @@ int32_t mm_camera_muxer_reg_frame_sync(mm_camera_obj_t *cam_obj,
 int32_t mm_camera_muxer_set_dual_cam_cmd(uint32_t camera_handle,
         mm_camera_obj_t *cam_obj)
 {
-    int32_t rc = 0;
+    int32_t rc = -1;
     mm_camera_obj_t * my_obj = NULL;
     my_obj = mm_muxer_util_get_camera_by_obj(camera_handle, cam_obj);
 
@@ -1746,6 +1746,7 @@ void mm_camera_muxer_stream_frame_sync(mm_camera_super_buf_t *super_buf,
 void mm_camera_muxer_channel_frame_sync(mm_camera_super_buf_t *super_buf,
         void *user_data)
 {
+    int32_t rc = 0;
     mm_channel_t *ch_obj = (mm_channel_t *)user_data;
     mm_channel_t *m_obj = ch_obj;
 
@@ -1757,8 +1758,12 @@ void mm_camera_muxer_channel_frame_sync(mm_camera_super_buf_t *super_buf,
         m_obj = m_obj->master_ch_obj;
     }
 
-    mm_camera_muxer_do_frame_sync(&m_obj->frame_sync.superbuf_queue,
+    rc = mm_camera_muxer_do_frame_sync(&m_obj->frame_sync.superbuf_queue,
             super_buf, NULL);
+    if (rc < 0) {
+        LOGE("channel frame sync failed");
+        return;
+    }
     mm_camera_muxer_channel_req_data_cb(NULL,
                 ch_obj);
 }

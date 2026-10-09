@@ -34,6 +34,7 @@
 
 // Camera dependencies
 #include "cam_types.h"
+#include "QCamera3AlgoTrace.h"
 
 extern "C" {
 #include "mm_jpeg_interface.h"
@@ -69,6 +70,43 @@ class QCamera3ProcessingChannel;
        REPROCESS_TYPE_RAW
     } reprocess_type_t;
 
+    // Round-2 stage request snapshot (docs/HAL3_PORT_PLATFORM.md section 3.1).
+    // Captured inside the HWI request mutex when the JPEG settings are queued,
+    // because still processing runs after the framework metadata was released.
+    // Every field keeps the request value verbatim; validation has already
+    // bounded it, and the owning stage validates it again.
+    typedef struct {
+        // Round-2 controls whose real consumer now exists: the automatic
+        // HDR/night policy on the standard AUTO path and the JPEG postprocess
+        // assets.
+        int32_t auto_hdr_enable;
+        int32_t auto_night_enable;
+        uint8_t auto_capture_valid;
+        int32_t face_preview_param[4];
+        uint8_t face_preview_param_valid;
+        int32_t mirror_preview;
+        float sticker_rect[4];
+        uint8_t sticker_rect_valid;
+        int32_t exif_comment_length;
+        char exif_comment[256];
+        int32_t watermark_asset_length;
+        char watermark_asset[256];
+        int32_t sticker_asset_length;
+        char sticker_asset[256];
+    } native_stage_request_t;
+
+    // Real EIS state of the MMS/EIS seam, published by the channel that owns
+    // the engine. QCamera3EisSnapshot::select() consumes exactly this record.
+    typedef struct {
+        uint8_t valid;
+        int32_t enabled;
+        int32_t configured;
+        int32_t coreStatus;
+        int32_t gyroValid;
+        int64_t gyroPeriodNs;
+        int32_t version;
+    } native_eis_state_t;
+
     typedef struct {
         uint32_t out_buf_index;
         int32_t jpeg_orientation;
@@ -82,6 +120,12 @@ class QCamera3ProcessingChannel;
         char gps_processing_method[GPS_PROCESSING_METHOD_SIZE];
         uint8_t image_desc_valid;
         char image_desc[EXIF_IMAGE_DESCRIPTION_SIZE];
+        // Joined execution trace for org.lineageos.camera.algorithms.nativeTrace.
+        // EXIF ImageDescription is only 100 bytes, so the multi-stage trace is
+        // carried separately and published as a result key. See
+        // docs/HAL3_PORT_PLATFORM.md section 3.4.
+        QCamera3AlgoTrace native_trace;
+        uint8_t native_trace_valid;
         bool hdr_snapshot;
         bool multiframe_snapshot;
         cam_hal3_JPEG_type_t image_type;
@@ -97,6 +141,17 @@ class QCamera3ProcessingChannel;
         bool zsl_snapshot;
         uint32_t frame_number;
         bool raw_mfc_snapshot;
+        int32_t native_still_mode;
+        int32_t native_beauty_strength;
+        // Mode 9 (semantic scene) tuning strength, snapshotted at submission and
+        // consumed by the still post-processor. Restored 2026-10-17: the stage was
+        // deleted with the B2-b/B2-c batch and is brought back because Aperture's
+        // AUTO stills really do reach it.
+        int32_t native_scene_strength;
+        uint32_t framework_frame_number;
+        bool framework_frame_number_valid;
+        // Round-2 controls that the still path rebuilds its stage Options from.
+        native_stage_request_t native_stages;
     } jpeg_settings_t;
 
     typedef struct {

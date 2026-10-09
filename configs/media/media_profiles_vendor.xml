@@ -93,6 +93,48 @@
      on an android-powered device.
 -->
 <MediaSettings>
+    <!--
+         WS2 (video grades) evidence notes - 2026-10-16. This file is the one the
+         platform actually loads: media.settings.xml=/vendor/etc/media_profiles_vendor.xml
+         (android_device_oppo_sdm660-common/system.prop:7) and it is installed from
+         this path by common.mk:171.
+
+         What it does and does not gate:
+         * It is the legacy MediaProfiles / android.media.CamcorderProfile surface
+           consumed by MediaRecorder-based apps (quality -> codec, size, bitrate,
+           frame rate, duration, audio profile).
+         * Aperture does NOT read it. CameraX derives the offered video qualities
+           from the camera's advertised output streams and the frame-rate chips
+           from android.control.aeAvailableTargetFpsRanges
+           (Aperture models/Camera.kt:87-118). Adding a 2160p profile here can
+           therefore never make a 4K chip appear in Aperture; that needs the HAL to
+           advertise a 3840x2160 output stream for the same camera id
+           (camera/QCamera2/HAL3/QCamera3HWI.cpp:16129-16150, from the decoded
+           cam_capability_t::picture_sizes_tbl). Conversely a HAL that does
+           advertise it needs no change here for Aperture to use it.
+
+         Current 4K state (unchanged, deliberately):
+         * cameraId 0/1: the qhd/2k/4kdci/2160p block is commented out for camera 0
+           with the vendor note "Remove for not support 4K recording"
+           (see the block below); cameraId 1 has no 4K entries at all.
+         * cameraId 2/3: 2160p (3840x2160@30, 42 Mbps H.264) and 4kdci
+           (4096x2160@24) are enabled. They are only meaningful if the HAL
+           advertises those sizes for those camera ids; 4kdci additionally exceeds
+           the encoders' declared maximum size of 3840x2160
+           (configs/media/media_codecs_vendor.xml:138 hevc, :152 avc), so it must
+           not be widened or copied to other camera ids.
+         * No HLG/HDR10/P010/10-bit video profile exists anywhere in this file or
+           on this platform and none may be added: the copied stock HAL carries no
+           10-bit camera record (device-tree-nonsource-20261017/camera/docs/DYNAMIC_RANGE.md:36-47) and the HAL
+           keeps org.lineageos.camera.algorithms.hlgVideoSupported at 0
+           (QCamera3HWI.cpp:1743-1750).
+
+         Before adding any profile for a camera id, read the device back:
+           adb shell dumpsys media.camera | grep -A60 'availableStreamConfigurations'
+           adb shell dumpsys media.camera | grep -A20 'availableMinFrameDurations'
+         and only then add an EncoderProfile whose width/height/frameRate the HAL
+         really advertises for that id.
+    -->
     <!-- Each camcorder profile defines a set of predefined configuration parameters -->
     <!-- Back Camera -->
 <!-- #ifndef VENDOR_EDIT -->
@@ -102,7 +144,16 @@
 -->
 <!-- #else  //VENDOR_EDIT -->
     <CamcorderProfiles cameraId="0" startOffsetMs="300">
-<!-- #endif //VENDOR_EDIT -->
+<!-- WS2: camera 0 (back main) 4K stays disabled, see the commented qhd/2k/4kdci/2160p
+     block below. OPPO removed 4K for this camera ("Remove for not support 4K
+     recording", 2016), the Qualcomm sdm660 reference set
+     (vendor/etc/media_profiles_sdm660_v1.xml, cameraId 0-3) tops out at 1080p, and the
+     encoders' declared 4K performance point is 24 fps
+     (configs/media/media_codecs_vendor.xml:146,161) with a block-rate ceiling of
+     3840x2160@30 (ibid.:141,155). Enable ONLY if the flashed device reports 3840x2160 in
+     camera 0's availableStreamConfigurations with a >=30 fps min frame duration for that
+     size; then uncomment the 2160p profile only (not 4kdci, whose 4096 width exceeds the
+     declared 3840 maximum). Do not enable it on the strength of this file alone. --><!-- #endif //VENDOR_EDIT -->
 
     <EncoderProfile quality="low" fileFormat="3gp" duration="30">
       <Video codec="h264"
@@ -839,6 +890,25 @@
              channels="2" />
     </EncoderProfile>
 
+    <!--
+         Aperture-facing correction (2026-10-17): this tree exposes camera id 2 to the
+         app (overlays/CameraApertureOverlay sets config_enableAuxCameras=true and keeps
+         the logical pairing), and Aperture derives its video-quality list from
+         CamcorderProfile / EncoderProfiles, i.e. from this file. Two consequences:
+           * a "qhd" (2560x1440) profile makes CameraX report Quality.QHD, which the app
+             does not map and rejects with "Unknown video quality" when it renders or
+             cycles the quality button (CameraActivity.kt, PreferencesRepository.kt map
+             only sd/hd/fhd/uhd);
+           * "2k"/"4kdci"/"2160p" would offer grades this module cannot record (the aux
+             sensors have no 2560x1440/3840x2160 mode; the largest sensor mode in the
+             dumps is the main camera's 4096x2160, and camera 0 has no 3840x2160 either).
+         OPPO commented the same qualities out for camera 0 with the note "Remove for not
+         support 4K recording."; this applies the same treatment to ids 2/3. Disabled
+         here: qhd, 2k, 4kdci, 2160p, timelapseqhd, timelapse2k, timelapse4kdci, timelapse2160p.
+         Evidence: camera/aperture-hal-trim/WS6_STOCK_VIDEO_EVIDENCE.md,
+         WS6_CAMERAX_CONTRACT.md section 2, camera/docs/VIDEO_GRADES.md.
+    -->
+<!--
     <EncoderProfile quality="qhd" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="42000000"
@@ -851,7 +921,9 @@
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="2k" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="20000000"
@@ -864,7 +936,9 @@
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="4kdci" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -877,7 +951,9 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="2160p" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -890,6 +966,7 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
+-->
 
     <EncoderProfile quality="qcif" fileFormat="3gp" duration="30">
       <Video codec="h264"
@@ -1044,6 +1121,7 @@
              channels="2" />
     </EncoderProfile>
 
+<!--
     <EncoderProfile quality="timelapseqhd" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="42000000"
@@ -1051,13 +1129,15 @@
              height="1440"
              frameRate="30" />
 
-      <!-- audio setting is ignored -->
+      audio setting is ignored
       <Audio codec="aac"
              bitRate="156000"
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="timelapse2k" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="20000000"
@@ -1065,13 +1145,15 @@
              height="1080"
              frameRate="30" />
 
-      <!-- audio setting is ignored -->
+      audio setting is ignored
       <Audio codec="aac"
              bitRate="156000"
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="timelapse4kdci" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1084,7 +1166,9 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="timelapse2160p" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1097,6 +1181,7 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
+-->
 
         <ImageEncoding quality="95" />
         <ImageEncoding quality="80" />
@@ -1198,6 +1283,25 @@
              channels="2" />
     </EncoderProfile>
 
+    <!--
+         Aperture-facing correction (2026-10-17): this tree exposes camera id 3 to the
+         app (overlays/CameraApertureOverlay sets config_enableAuxCameras=true and keeps
+         the logical pairing), and Aperture derives its video-quality list from
+         CamcorderProfile / EncoderProfiles, i.e. from this file. Two consequences:
+           * a "qhd" (2560x1440) profile makes CameraX report Quality.QHD, which the app
+             does not map and rejects with "Unknown video quality" when it renders or
+             cycles the quality button (CameraActivity.kt, PreferencesRepository.kt map
+             only sd/hd/fhd/uhd);
+           * "2k"/"4kdci"/"2160p" would offer grades this module cannot record (the aux
+             sensors have no 2560x1440/3840x2160 mode; the largest sensor mode in the
+             dumps is the main camera's 4096x2160, and camera 0 has no 3840x2160 either).
+         OPPO commented the same qualities out for camera 0 with the note "Remove for not
+         support 4K recording."; this applies the same treatment to ids 2/3. Disabled
+         here: qhd, 2k, 4kdci, 2160p, timelapseqhd, timelapse2k, timelapse4kdci, timelapse2160p.
+         Evidence: camera/aperture-hal-trim/WS6_STOCK_VIDEO_EVIDENCE.md,
+         WS6_CAMERAX_CONTRACT.md section 2, camera/docs/VIDEO_GRADES.md.
+    -->
+<!--
     <EncoderProfile quality="qhd" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="42000000"
@@ -1210,7 +1314,9 @@
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="2k" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="20000000"
@@ -1223,7 +1329,9 @@
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="4kdci" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1236,7 +1344,9 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="2160p" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1249,6 +1359,7 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
+-->
 
     <EncoderProfile quality="qcif" fileFormat="3gp" duration="30">
       <Video codec="h264"
@@ -1403,6 +1514,7 @@
              channels="2" />
     </EncoderProfile>
 
+<!--
     <EncoderProfile quality="timelapseqhd" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="42000000"
@@ -1410,13 +1522,15 @@
              height="1440"
              frameRate="30" />
 
-      <!-- audio setting is ignored -->
+      audio setting is ignored
       <Audio codec="aac"
              bitRate="156000"
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="timelapse2k" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="20000000"
@@ -1424,13 +1538,15 @@
              height="1080"
              frameRate="30" />
 
-      <!-- audio setting is ignored -->
+      audio setting is ignored
       <Audio codec="aac"
              bitRate="156000"
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="timelapse4kdci" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1443,7 +1559,9 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
+-->
 
+<!--
     <EncoderProfile quality="timelapse2160p" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1456,6 +1574,7 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
+-->
 
         <ImageEncoding quality="95" />
         <ImageEncoding quality="80" />
@@ -1472,6 +1591,12 @@
          In other words, the applications won't be able to use the codec
          or query the capabilities of the codec at all if it is disabled
     -->
+    <!-- WS2 note: h264/hevc maxFrameWidth="4096" below is the legacy MediaProfiles
+         bound; the encoders this device really declares are limited to 3840x2160
+         (configs/media/media_codecs_vendor.xml:138 hevc, :152 avc), so the 4kdci
+         (4096x2160) camcorder profiles are outside the declared encoder envelope.
+         Kept as stock; do not widen, and prefer the 2160p profiles if a 4K grade is
+         ever enabled. -->
     <VideoEncoderCap name="h264" enabled="true"
         minBitRate="64000" maxBitRate="42000000"
         minFrameWidth="176" maxFrameWidth="4096"

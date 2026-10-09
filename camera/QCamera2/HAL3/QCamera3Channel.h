@@ -33,6 +33,7 @@
 // System dependencies
 #include <utils/List.h>
 #include <utils/Mutex.h>
+#include <utils/Condition.h>
 #include <utils/Vector.h>
 #include "gralloc_priv.h"
 #include <sys/stat.h>
@@ -43,6 +44,7 @@
 #include "QCamera3HALHeader.h"
 #include "QCamera3Mem.h"
 #include "QCamera3PostProc.h"
+#include "QCamera3DualCapture.h"
 #include "QCamera3Stream.h"
 #include "QCamera3StreamMem.h"
 
@@ -112,8 +114,6 @@ public:
 
     virtual int32_t start();
     virtual int32_t stop();
-    virtual int32_t setBatchSize(uint32_t);
-    virtual int32_t queueBatchBuf();
     virtual int32_t setPerFrameMapUnmap(bool enable);
     int32_t bufDone(mm_camera_super_buf_t *recvd_frame);
     virtual int32_t setBundleInfo(const cam_bundle_config_t &bundleInfo,
@@ -141,6 +141,12 @@ public:
     virtual QCamera3StreamMem *getStreamBufs(uint32_t len) = 0;
     virtual void putStreamBufs() = 0;
     virtual int32_t flush();
+    virtual bool usesMmsVstab() const { return false; }
+    // The continuous-effect hooks (usesVideoEffects / setVideoEffectsEnabled /
+    // setVideoEffects) were removed with the B6 batch.
+    // Real EIS/MMS state of this channel's stabilisation seam, consumed by
+    // QCamera3EisSnapshot. False when the channel owns no stabilisation engine.
+    virtual bool getEisState(native_eis_state_t & /*state*/) { return false; }
     virtual int32_t getStreamSize(cam_dimension_t &dim);
 
     QCamera3Stream *getStreamByHandle(uint32_t streamHandle);
@@ -163,7 +169,12 @@ public:
     virtual int32_t timeoutFrame(__unused uint32_t frameNumber) = 0;
     virtual void switchMaster(uint32_t masterCam);
     virtual void overridePPConfig(cam_feature_mask_t pp_mask);
+    cam_feature_mask_t getPPConfig() const { return mPostProcMask; }
     virtual uint32_t getAuxStreamID() {return 0;};
+    // Sensor-origin metadata, before logical-camera selection or CPP mutation.
+    // Invoked under the HWI lock: implementations may copy bounded state only.
+    virtual void queueSensorMetadata(uint32_t /*frameNumber*/, uint32_t /*cameraHandle*/,
+            const metadata_buffer_t * /*metadata*/) {}
     virtual void setDualChannelMode(bool bMode) {m_bDualChannel = bMode;}
     virtual bool isZSLChannel() {return false;};
 
@@ -180,7 +191,6 @@ protected:
                       uint8_t minStreamBufnum,
                       cam_feature_mask_t postprocessMask,
                       cam_is_type_t isType,
-                      uint32_t batchSize = 0,
                       bool bNeedStreamCb = true,
                       bool bNeedBundling = false);
 
@@ -227,6 +237,9 @@ class QCamera3ProcessingChannel : public QCamera3Channel, public QCamera3ZSLChan
 {
 
 public:
+    virtual QCamera3DualCapture *dualCapture() { return nullptr; }
+    virtual QCamera3PostProcessor *dualPostprocessor() { return nullptr; }
+
    QCamera3ProcessingChannel(uint32_t cam_handle,
            uint32_t channel_handle,
            mm_camera_ops_t *cam_ops,
@@ -328,7 +341,7 @@ protected:
     int mLastFrameCount;
     nsecs_t mLastFpsTime;
     bool isWNREnabled() {return m_bWNROn;};
-    void startPostProc(const reprocess_config_t &reproc_cfg);
+    int32_t startPostProc(const reprocess_config_t &reproc_cfg);
     void issueChannelCb(buffer_handle_t *resultBuffer,
             uint32_t resultFrameNumber,
             camera3_buffer_status status=CAMERA3_BUFFER_STATUS_OK);
@@ -341,7 +354,7 @@ protected:
     cam_format_t mStreamFormat;
     uint8_t mIntent;
 
-    bool mPostProcStarted;
+    std::atomic<bool> mPostProcStarted;
     bool mInputBufferConfig;   // Set when the processing channel is configured
                                // for processing input(framework) buffers
 
@@ -398,9 +411,7 @@ public:
 
     virtual ~QCamera3RegularChannel();
 
-    virtual int32_t setBatchSize(uint32_t batchSize);
     virtual uint32_t getStreamTypeMask();
-    virtual int32_t queueBatchBuf();
     virtual int32_t initialize(cam_is_type_t isType);
     using QCamera3ProcessingChannel::request;
     virtual int32_t request(buffer_handle_t *buffer, uint32_t frameNumber,
@@ -411,12 +422,10 @@ public:
                                            uint32_t cam_type = CAM_TYPE_MAIN);
     virtual void overridePPConfig(cam_feature_mask_t pp_mask);
     virtual void setDualChannelMode(bool bMode);
-    int32_t mNumDepthPoints;
 
 private:
     int32_t initialize(struct private_handle_t *priv_handle);
 
-    uint32_t mBatchSize;
     cam_rotation_t mRotation;
 public:
     QCamera3RegularChannel *mAuxChannel;
@@ -459,35 +468,6 @@ private:
     bool m_bZSL;
 };
 
-/* QCamera3DepthChannel is for depth stream containing
- * depth data from a depth sensor */
-class QCamera3DepthChannel : public QCamera3RegularChannel
-{
-public:
-    QCamera3DepthChannel(uint32_t cam_handle,
-                    uint32_t channel_handle,
-                    mm_camera_ops_t *cam_ops,
-                    channel_cb_routine cb_routine,
-                    channel_cb_buffer_err cb_buffer_err,
-                    cam_padding_info_t *paddingInfo,
-                    void *userData,
-                    camera3_stream_t *stream,
-                    cam_feature_mask_t postprocess_mask,
-                    QCamera3Channel *metadataChannel,
-                    int32_t depthPoints,
-                    uint32_t numBuffers = MAX_INFLIGHT_REQUESTS);
-
-    virtual ~QCamera3DepthChannel();
-
-    virtual int32_t initialize(cam_is_type_t isType);
-
-    virtual void streamCbRoutine(mm_camera_super_buf_t *super_frame,
-                            QCamera3Stream *stream);
-
-    virtual reprocess_type_t getReprocessType();
-
-};
-
 /* QCamera3RawChannel is for opaqueu/cross-platform raw stream containing
  * vendor specific bayer data or 16-bit unpacked bayer data */
 class QCamera3RawChannel : public QCamera3RegularChannel
@@ -521,8 +501,8 @@ private:
     bool mIsRaw16;
 
     void dumpRawSnapshot(mm_camera_buf_def_t *frame);
-    void convertLegacyToRaw16(mm_camera_buf_def_t *frame);
-    void convertMipiToRaw16(mm_camera_buf_def_t *frame);
+    bool convertLegacyToRaw16(mm_camera_buf_def_t *frame);
+    bool convertMipiToRaw16(mm_camera_buf_def_t *frame);
 };
 
 /*
@@ -819,6 +799,8 @@ public:
     QCamera3Exif *getExifData(metadata_buffer_t *metadata,
             jpeg_settings_t *jpeg_settings);
     void overrideYuvSize(uint32_t width, uint32_t height);
+    void overrideDualYuvSizes(uint32_t wideWidth, uint32_t wideHeight,
+            uint32_t teleWidth, uint32_t teleHeight);
     static void jpegEvtHandle(jpeg_job_status_t status,
             uint32_t /*client_hdl*/,
             uint32_t jobId,
@@ -828,6 +810,42 @@ public:
             void *userdata);
 
     void freeBufferForFrame(mm_camera_super_buf_t *frame);
+    virtual QCamera3DualCapture *dualCapture() { return &getDualCapture(); }
+    virtual QCamera3PostProcessor *dualPostprocessor() { return &getDualPostprocessor(); }
+    QCamera3PicChannel *getDualCaptureOwner() { return mDualOwner ? mDualOwner : this; }
+    QCamera3DualCapture &getDualCapture() { return getDualCaptureOwner()->mDualCapture; }
+    QCamera3PostProcessor &getDualPostprocessor() { return getDualCaptureOwner()->m_postprocessor; }
+    // Internal geometry binds installed calibration, actual sensor output modes
+    // and the independent source sizes. Applications select only strength/mode.
+    int32_t configureDualCapture(const QCamera3DualCapture::Config &config);
+    int32_t configureDualCapture(const QCamera3DualCapture::Config &config,
+            const QCamera3DualCapture::Calibration &calibration);
+    int32_t beginDualCapture(uint32_t frameNumber, int32_t activeFocusX,
+            int32_t activeFocusY,
+            int32_t blurLevel = QCamera3DualBokehAlgo::kDefaultBlurLevel);
+    bool isDualCaptureFrame(uint32_t frameNumber) {
+        return getDualCapture().tokenFor(m_camHandle, frameNumber) != 0;
+    }
+    virtual void queueSensorMetadata(uint32_t frameNumber, uint32_t cameraHandle,
+            const metadata_buffer_t *metadata);
+    int32_t beginHdrCapture(const uint32_t frameIds[3], uint32_t baseId, bool frontCamera) {
+        return m_postprocessor.beginHdrCapture(frameIds, baseId, frontCamera);
+    }
+    int32_t beginLowLightCapture(const uint32_t frameIds[5], uint32_t baseId, bool frontCamera) {
+        return m_postprocessor.beginLowLightCapture(frameIds, baseId, frontCamera);
+    }
+    void abortHdrCapture() { m_postprocessor.abortHdrCapture(); }
+    int32_t beginStillCapture(const uint32_t frameIds[4], uint32_t baseId,
+            bool frontCamera, bool enhanceDetail) {
+        return m_postprocessor.beginStillCapture(frameIds, baseId, frontCamera, enhanceDetail);
+    }
+    bool cancelHdrCapture(uint32_t frameNumber) {
+        return m_postprocessor.cancelHdrCapture(frameNumber);
+    }
+    int32_t waitForSnapshotBuffer();
+    bool isHdrCaptureFrame(uint32_t frameNumber) {
+        return m_postprocessor.isHdrCaptureFrame(frameNumber);
+    }
     void freeBufferForJpeg(int &index);
     uint32_t getAuxStreamID() { return mAuxPicChannel->getStreamID(getStreamTypeMask());};
     virtual int32_t queueReprocMetadata(mm_camera_super_buf_t * metadata,
@@ -889,12 +907,17 @@ private:
     QCamera3StreamMem *mYuvMemory;
     // Keep a list of free buffers
     Mutex mFreeBuffersLock;
+    Condition mSnapshotBufferCond;
     List<uint32_t> mFreeBufferList;
     //Keep a list of free jpeg buffers;
     Mutex mFreeJpegBufferLock;
     List<uint32_t> mFreeJpegBufferList;
     uint32_t mFrameLen;
     QCamera3PicChannel* mAuxPicChannel;
+    QCamera3PicChannel *mDualOwner = nullptr;
+    QCamera3DualCapture mDualCapture;
+    QCamera3DualCapture::Config mDualConfig = {};
+    QCamera3DualCapture::Calibration mDualCalibration;
     bool mNeedPPUpscale;
     bool m_bMpoEnabled;
     bool mLiveShot;
@@ -938,6 +961,7 @@ public:
     void putMetaStreamBufs();
     virtual int32_t initialize(cam_is_type_t isType);
     int32_t unmapOfflineBuffers(bool all);
+    int32_t unmapOfflineFrame(uint32_t frameNumber);
     int32_t bufDone(mm_camera_super_buf_t *recvd_frame);
     virtual void streamCbRoutine(mm_camera_super_buf_t *super_frame,
                             QCamera3Stream *stream);
@@ -965,6 +989,7 @@ private:
         QCamera3Stream *stream;
         cam_mapping_buf_type type;
         uint32_t index;
+        uint32_t frameNumber;
     } OfflineBuffer;
 
     int32_t resetToCamPerfNormal(uint32_t frameNumber);

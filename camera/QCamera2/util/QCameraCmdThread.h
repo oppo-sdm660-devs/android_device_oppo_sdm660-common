@@ -32,6 +32,7 @@
 
 // System dependencies
 #include <pthread.h>
+#include <atomic>
 
 // Camera dependencies
 #include "cam_semaphore.h"
@@ -50,6 +51,7 @@ typedef enum
     CAMERA_CMD_TYPE_EXIT,
     CAMERA_CMD_TYPE_TIMEOUT,
     CAMERA_CMD_TYPE_CANCEL_PP_FRAME,
+    CAMERA_CMD_TYPE_PAUSE_DATA_PROC,
     CAMERA_CMD_TYPE_MAX
 } camera_cmd_type_t;
 
@@ -74,6 +76,11 @@ public:
     pthread_t cmd_pid;           /* cmd thread ID */
     cam_semaphore_t cmd_sem;               /* semaphore for cmd thread */
     cam_semaphore_t sync_sem;              /* semaphore for synchronized call signal */
+private:
+    std::atomic<bool> mExitRequested;
+    std::atomic<bool> mStopRequested;
+    pthread_mutex_t mSyncCommandLock;
+    pthread_mutex_t mThreadLock;
 };
 
 }; // namespace qcamera

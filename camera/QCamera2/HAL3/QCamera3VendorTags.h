@@ -38,17 +38,13 @@ namespace qcamera {
 enum qcamera3_ext_section {
     QCAMERA3_PRIVATEDATA = VENDOR_SECTION,
     QCAMERA3_CDS,
-    QCAMERA3_OPAQUE_RAW,
     QCAMERA3_CROP,
-    QCAMERA3_TUNING_META_DATA,
     QCAMERA3_TEMPORAL_DENOISE,
     QCAMERA3_ISO_EXP_PRIORITY,
     QCAMERA3_SATURATION,
     QCAMERA3_EXPOSURE_METERING_MODE,
     QCAMERA3_AV_TIMER,
-    QCAMERA3_SENSOR_META_DATA,
     QCAMERA3_DUALCAM_LINK_META_DATA,
-    QCAMERA3_DUALCAM_CALIB_META_DATA,
     QCAMERA3_HAL_PRIVATEDATA,
     QCAMERA3_JPEG_ENCODE_CROP,
     QCAMERA3_VIDEO_HDR,
@@ -62,31 +58,32 @@ enum qcamera3_ext_section {
     QCAMERA3_STATS,
     QCAMERA3_SIMULTANEOUS_CAMERA,
     QCAMERA3_QUADRA_CFA_DATA,
-    QCAMERA3_HFR,
     QCAMERA3_BOKEH,
-    QCAMERA3_FUSION,
     QCAMERA3_LOGICAL_CAM,
     QCAMERA3_MANUAL_WB,
     QCAMERA3_SAT_MODE,
     QCAMERA3_EIS_FLUSH,
     QCAMERA3_SWMFNR,
+    QCAMERA3_NATIVE_ALGORITHMS,
+    QCAMERA3_POSTPROCESS,
+    // Round-2 sections. Appended after POSTPROCESS so no existing section
+    // number moves. See docs/HAL3_PORT_PLATFORM.md section 3.
+    QCAMERA3_STREAM,
+    QCAMERA3_DIAGNOSTICS,
+    QCAMERA3_AR,
     QCAMERA3_SECTIONS_END,
 };
 
 enum qcamera3_ext_section_ranges {
     QCAMERA3_PRIVATEDATA_START = QCAMERA3_PRIVATEDATA << 16,
     QCAMERA3_CDS_START = QCAMERA3_CDS << 16,
-    QCAMERA3_OPAQUE_RAW_START = QCAMERA3_OPAQUE_RAW << 16,
     QCAMERA3_CROP_START = QCAMERA3_CROP << 16,
-    QCAMERA3_TUNING_META_DATA_START = QCAMERA3_TUNING_META_DATA << 16,
     QCAMERA3_TEMPORAL_DENOISE_START = QCAMERA3_TEMPORAL_DENOISE << 16,
     QCAMERA3_ISO_EXP_PRIORITY_START = QCAMERA3_ISO_EXP_PRIORITY << 16,
     QCAMERA3_SATURATION_START = QCAMERA3_SATURATION << 16,
     QCAMERA3_EXPOSURE_METER_START = QCAMERA3_EXPOSURE_METERING_MODE << 16,
     QCAMERA3_AV_TIMER_START = QCAMERA3_AV_TIMER << 16,
-    QCAMERA3_SENSOR_META_DATA_START = QCAMERA3_SENSOR_META_DATA << 16,
     QCAMERA3_DUALCAM_LINK_META_DATA_START = QCAMERA3_DUALCAM_LINK_META_DATA << 16,
-    QCAMERA3_DUALCAM_CALIB_META_DATA_START = QCAMERA3_DUALCAM_CALIB_META_DATA << 16,
     QCAMERA3_HAL_PRIVATEDATA_START = QCAMERA3_HAL_PRIVATEDATA << 16,
     QCAMERA3_JPEG_ENCODE_CROP_START = QCAMERA3_JPEG_ENCODE_CROP << 16,
     QCAMERA3_VIDEO_HDR_START = QCAMERA3_VIDEO_HDR << 16,
@@ -100,14 +97,17 @@ enum qcamera3_ext_section_ranges {
     QCAMERA3_STATS_START = QCAMERA3_STATS << 16,
     QCAMERA3_SIMULTANEOUS_CAMERA_START = QCAMERA3_SIMULTANEOUS_CAMERA << 16,
     QCAMERA3_QUADRA_CFA_DATA_START = QCAMERA3_QUADRA_CFA_DATA << 16,
-    QCAMERA3_HFR_START = QCAMERA3_HFR << 16,
     QCAMERA3_BOKEH_START = QCAMERA3_BOKEH << 16,
-    QCAMERA3_FUSION_START = QCAMERA3_FUSION << 16,
     QCAMERA3_LOGICAL_CAM_START = QCAMERA3_LOGICAL_CAM << 16,
     QCAMERA3_MANUAL_WB_START = QCAMERA3_MANUAL_WB << 16,
     QCAMERA3_SAT_MODE_START = QCAMERA3_SAT_MODE << 16,
     QCAMERA3_EIS_FLUSH_START = QCAMERA3_EIS_FLUSH << 16,
     QCAMERA3_SWMFNR_START = QCAMERA3_SWMFNR << 16,
+    QCAMERA3_NATIVE_ALGORITHMS_START = QCAMERA3_NATIVE_ALGORITHMS << 16,
+    QCAMERA3_POSTPROCESS_START = QCAMERA3_POSTPROCESS << 16,
+    QCAMERA3_STREAM_START = QCAMERA3_STREAM << 16,
+    QCAMERA3_DIAGNOSTICS_START = QCAMERA3_DIAGNOSTICS << 16,
+    QCAMERA3_AR_START = QCAMERA3_AR << 16,
 };
 
 enum qcamera3_ext_tags {
@@ -117,65 +117,10 @@ enum qcamera3_ext_tags {
     QCAMERA3_CDS_INFO,
     QCAMERA3_CDS_END,
 
-    //Property Name:  org.codeaurora.qcamera3.opaque_raw.opaque_raw_strides
-    //
-    //Type: int32 * n * 3 [public]
-    //
-    //Description: Distance in bytes from the beginning of one row of opaque
-    //raw image data to the beginning of next row.
-    //
-    //Details: The strides are listed as (raw_width, raw_height, stride)
-    //triplets. For each supported raw size, there will be a stride associated
-    //with it.
-    QCAMERA3_OPAQUE_RAW_STRIDES = QCAMERA3_OPAQUE_RAW_START,
-
-    //Property Name: org.codeaurora.qcamera3.opaque_raw.opaque_raw_format
-    //
-    //Type: byte(enum) [public]
-    //  * LEGACY - The legacy raw format where 8, 10, or 12-bit
-    //    raw data is packed into a 64-bit word.
-    //  * MIPI - raw format matching the data packing described
-    //    in MIPI CSI-2 specification. In memory, the data
-    //    is constructed by packing sequentially received pixels
-    //    into least significant parts of the words first.
-    //    Within each pixel, the least significant bits are also
-    //    placed towards the least significant part of the word.
-    //
-    //Details: Lay out of opaque raw data in memory is decided by two factors:
-    //         opaque_raw_format and bit depth (implied by whiteLevel). Below
-    //         list illustrates their relationship:
-    //  LEGACY8:  P7(7:0) P6(7:0) P5(7:0) P4(7:0) P3(7:0) P2(7:0) P1(7:0) P0(7:0)
-    //            8 pixels occupy 8 bytes, no padding needed
-    //            min_stride = CEILING8(raw_width)
-    // LEGACY10:  0000 P5(9:0) P4(9:0) P3(9:0) P2(9:0) P1(9:0) P0(9:0)
-    //            6 pixels occupy 8 bytes, 4 bits padding at MSB
-    //            min_stride = (raw_width+5)/6 * 8
-    // LEGACY12:  0000 P4(11:0) P3(11:0) P2(11:0) P1(11:0) P0(11:0)
-    //            5 pixels occupy 8 bytes, 4 bits padding at MSB
-    //            min_stride = (raw_width+4)/5 * 8
-    //    MIPI8:  P0(7:0)
-    //            1 pixel occupy 1 byte
-    //            min_stride = raw_width
-    //   MIPI10:  P3(1:0) P2(1:0) P1(1:0) P0(1:0) P3(9:2) P2(9:2) P1(9:2) P0(9:2)
-    //            4 pixels occupy 5 bytes
-    //            min_stride = (raw_width+3)/4 * 5
-    //   MIPI12:  P1(3:0) P0(3:0) P1(11:4) P0(11:4)
-    //            2 pixels occupy 3 bytes
-    //            min_stride = (raw_width+1)/2 * 3
-    //Note that opaque_raw_stride needs to be at least the required minimum
-    //stride from the table above. ISP hardware may need more generous stride
-    //setting. For example, for LEGACY8, the actual stride may be
-    //CEILING16(raw_width) due to bus burst length requirement.
-    QCAMERA3_OPAQUE_RAW_FORMAT,
-    QCAMERA3_OPAQUE_RAW_END,
-
     QCAMERA3_CROP_COUNT_REPROCESS = QCAMERA3_CROP_START,
     QCAMERA3_CROP_REPROCESS,
     QCAMERA3_CROP_ROI_MAP_REPROCESS,
     QCAMERA3_CROP_END,
-
-    QCAMERA3_TUNING_META_DATA_BLOB = QCAMERA3_TUNING_META_DATA_START,
-    QCAMERA3_TUNING_META_DATA_END,
 
     QCAMERA3_TEMPORAL_DENOISE_ENABLE = QCAMERA3_TEMPORAL_DENOISE_START,
     QCAMERA3_TEMPORAL_DENOISE_PROCESS_TYPE,
@@ -235,17 +180,10 @@ enum qcamera3_ext_tags {
     QCAMERA3_USE_AV_TIMER = QCAMERA3_AV_TIMER_START,
     QCAMERA3_AV_TIMER_END,
 
-    QCAMERA3_SENSOR_DYNAMIC_BLACK_LEVEL_PATTERN = QCAMERA3_SENSOR_META_DATA_START,
-    QCAMERA3_SENSOR_IS_MONO_ONLY,
-    QCAMERA3_SENSOR_META_DATA_END,
-
     QCAMERA3_DUALCAM_LINK_ENABLE = QCAMERA3_DUALCAM_LINK_META_DATA_START,
     QCAMERA3_DUALCAM_LINK_IS_MAIN,
     QCAMERA3_DUALCAM_LINK_RELATED_CAMERA_ID,
     QCAMERA3_DUALCAM_LINK_META_DATA_END,
-
-    QCAMERA3_DUALCAM_CALIB_META_DATA_BLOB = QCAMERA3_DUALCAM_CALIB_META_DATA_START,
-    QCAMERA3_DUALCAM_CALIB_META_DATA_END,
 
     QCAMERA3_HAL_PRIVATEDATA_REPROCESS_FLAGS = QCAMERA3_HAL_PRIVATEDATA_START,
     QCAMERA3_HAL_PRIVATEDATA_REPROCESS_DATA_BLOB,
@@ -372,16 +310,10 @@ enum qcamera3_ext_tags {
     QCAMERA3_SUPPORT_QUADRA_CFA_DIM,
     QCAMERA3_QUADRA_CFA_DATA_END,
 
-    QCAMERA3_HFR_SIZES = QCAMERA3_HFR_START,
-    QCAMERA3_HFR_END,
-
     QCAMERA3_BOKEH_ENABLE = QCAMERA3_BOKEH_START,
     QCAMERA3_BOKEH_BLURLEVEL,
     QCAMERA3_BOKEH_STATUS,
     QCAMERA3_BOKEH_END,
-
-    QCAMERA3_FUSION_STATUS = QCAMERA3_FUSION_START,
-    QCAMERA3_FUSION_END,
 
     QCAMERA3_LOGICAL_CAM_MODE = QCAMERA3_LOGICAL_CAM_START,
     QCAMERA3_LOGICAL_CAM_END,
@@ -400,15 +332,120 @@ enum qcamera3_ext_tags {
     QCAMERA3_EIS_FLUSH_END,
 
     QCAMERA3_SWMFNR_ENABLE = QCAMERA3_SWMFNR_START,
-    QCAMERA3_SWMFNR_END
+    QCAMERA3_SWMFNR_END,
+    QCAMERA3_NATIVE_ALGORITHM_MODE = QCAMERA3_NATIVE_ALGORITHMS_START,
+    QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH,
+    QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_MODES,
+    QCAMERA3_NATIVE_ALGORITHM_FILTER_TYPE,
+    QCAMERA3_NATIVE_ALGORITHM_FILTER_FLIP_MODE,
+    QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_FILTER_TYPES,
+    // The continuous-effect tags (continuousEnabled / *BeautyStrength /
+    // *FilterType / *ToneStrength / *AvailableEffects / *MaxPixels /
+    // *SceneStrength / *SceneResult) were deleted with the B6 batch: effect 3 was
+    // the last advertised one and no in-tree client ever enabled it.
+    QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH,
+    QCAMERA3_NATIVE_ALGORITHM_RELIGHT_STRENGTH,
+    QCAMERA3_NATIVE_ALGORITHM_RELIGHT_AZIMUTH,
+    QCAMERA3_NATIVE_ALGORITHM_RELIGHT_ELEVATION,
+    // Round-2 HAL3 stages. Wire schemas in docs/HAL3_PORT_PLATFORM.md section 3.1.
+    QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH,      // int32 0..100
+    QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_FEATURES,      // int32[7] per-feature levels
+    QCAMERA3_NATIVE_ALGORITHM_PICBEST_FRAMES,              // int32 2..8
+    QCAMERA3_NATIVE_ALGORITHM_PICBEST_STRENGTH,            // int32 0..100
+    QCAMERA3_NATIVE_ALGORITHM_PICBEST_OPEN_EYE_ONLY,       // int32 0/1
+    QCAMERA3_NATIVE_ALGORITHM_BLURLESS_THRESHOLD,          // int32 0..1000
+    QCAMERA3_NATIVE_ALGORITHM_FACE_INFO_MODE,              // int32 0/1/2
+    QCAMERA3_NATIVE_ALGORITHM_IMAGE_ADJUST,                // int32[6] -100..100
+    QCAMERA3_NATIVE_ALGORITHM_SINGLE_BOKEH_STRENGTH,       // int32 0..100
+    QCAMERA3_NATIVE_ALGORITHM_SINGLE_BOKEH_SPOT_MODE,      // int32 0/1/2
+    QCAMERA3_NATIVE_ALGORITHM_SINGLE_BOKEH_SPOT,           // float[2] 0..1
+    QCAMERA3_NATIVE_ALGORITHM_PORTRAIT_LIGHT_MODE,         // int32 0..9
+    QCAMERA3_NATIVE_ALGORITHM_PORTRAIT_LIGHT_STRENGTH,     // int32 0..100
+    QCAMERA3_NATIVE_ALGORITHM_DOC_MODE,                    // int32 0..3
+    QCAMERA3_NATIVE_ALGORITHM_DOC_STRENGTH,                // int32 0..100
+    QCAMERA3_NATIVE_ALGORITHM_AUTO_HDR_ENABLE,             // int32 0/1
+    QCAMERA3_NATIVE_ALGORITHM_AUTO_NIGHT_ENABLE,           // int32 0/1
+    QCAMERA3_NATIVE_ALGORITHM_DOUBLE_EXPOSURE_MODE,        // int32 0/1/2
+    QCAMERA3_NATIVE_ALGORITHM_DOUBLE_EXPOSURE_STRENGTH,    // int32 0..100
+    QCAMERA3_NATIVE_ALGORITHM_DOUBLE_EXPOSURE_TIME_NS,     // int64
+    QCAMERA3_NATIVE_ALGORITHM_LONG_EXPOSURE_ENABLE,        // int32 0/1
+    QCAMERA3_NATIVE_ALGORITHM_REMOSAIC_ENABLE,             // int32 0/1
+    QCAMERA3_NATIVE_ALGORITHM_EXIF_COMMENT,                // byte UTF-8 <=256
+    QCAMERA3_NATIVE_ALGORITHM_WATERMARK_ASSET,             // byte UTF-8 <=256
+    QCAMERA3_NATIVE_ALGORITHM_STICKER_ASSET,               // byte UTF-8 <=256
+    QCAMERA3_NATIVE_ALGORITHM_STICKER_RECT,                // float[4] 0..1
+    QCAMERA3_NATIVE_ALGORITHM_MIRROR_PREVIEW,              // int32 0/1
+    QCAMERA3_NATIVE_ALGORITHM_APP_POLICY_MODE,             // int32 0/1
+    QCAMERA3_NATIVE_ALGORITHM_APP_MASK,                    // int32 bitmask
+    QCAMERA3_NATIVE_ALGORITHM_FACE_PREVIEW_PARAM,          // int32[4]
+    QCAMERA3_NATIVE_ALGORITHM_DEPTH_QUALITY,               // int32 0..3
+    QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_DOC_MODES,         // int32[] static
+    QCAMERA3_NATIVE_ALGORITHM_MAX_LONG_EXPOSURE_NS,        // int64 static
+    QCAMERA3_NATIVE_ALGORITHM_LONG_EXPOSURE_RANGE_NS,      // int64[2] static
+    QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_REMOSAIC_SIZES,    // int32[] static
+    QCAMERA3_NATIVE_ALGORITHM_REMOSAIC_SUPPORTED,          // byte static
+    QCAMERA3_NATIVE_ALGORITHM_DEPTH_SUPPORTED,             // byte static
+    QCAMERA3_NATIVE_ALGORITHM_AR_TRACKING_SUPPORTED,       // byte static
+    QCAMERA3_NATIVE_ALGORITHM_PROFESSIONAL_VER,            // int32 static
+    QCAMERA3_NATIVE_ALGORITHM_HLG_VIDEO_SUPPORTED,         // byte static
+    QCAMERA3_NATIVE_ALGORITHM_NATIVE_TRACE,                // byte UTF-8 result
+    QCAMERA3_NATIVE_ALGORITHM_FACE_ATTRIBUTES,             // int32[4*N] result
+    QCAMERA3_NATIVE_ALGORITHM_ESTIMATED_SNAPSHOT_EXP_TIME, // int64 result
+    QCAMERA3_NATIVE_ALGORITHM_HOT_PIXEL_MAP_AVAILABLE,     // byte result
+    QCAMERA3_NATIVE_ALGORITHM_APPLIED_NATIVE_MODE,         // int32 result
+    QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH,      // int32 0..100, effect 8
+    QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_TEMPORAL_SMOOTHING, // int32 0..95
+    QCAMERA3_NATIVE_ALGORITHM_AUTO_CAPTURE_REASON,         // int32 result
+    QCAMERA3_NATIVE_ALGORITHMS_END,
+    // Extension provider consumes and removes these before submitting to HAL.
+    // The wire schemas are documented in extensions/POSTPROCESS_CONTROLS.md.
+    QCAMERA3_POSTPROCESS_SETTINGS = QCAMERA3_POSTPROCESS_START,
+    QCAMERA3_POSTPROCESS_WARP_REGIONS,
+    QCAMERA3_POSTPROCESS_OVERLAY,
+    QCAMERA3_POSTPROCESS_WATERMARK,
+    QCAMERA3_POSTPROCESS_FACE_TRACKING,
+    QCAMERA3_POSTPROCESS_WATERMARK_LAYOUT,   // int32[4] normalized layout
+    QCAMERA3_POSTPROCESS_MIRROR,             // int32 0/1
+    QCAMERA3_POSTPROCESS_EXIF_USER_COMMENT,  // byte UTF-8 <=256
+    QCAMERA3_POSTPROCESS_END,
+
+    // org.lineageos.camera.stream - stream/pipeline controls.
+    QCAMERA3_STREAM_SLOW_MOTION_RATIO = QCAMERA3_STREAM_START, // int32 0=off
+    QCAMERA3_STREAM_AVAILABLE_SLOW_MOTION_RATIOS,              // int32[] static
+    QCAMERA3_STREAM_VIDEO_HDR_PROFILE,                         // int32 0 SDR/1 HLG10
+    QCAMERA3_STREAM_VSTAB_CROP_FACTOR,                         // float result
+    QCAMERA3_STREAM_VSTAB_OFFSET,                              // float[2] result
+    QCAMERA3_STREAM_LOGICAL_ZOOM_HINT,                         // float
+    QCAMERA3_STREAM_LOW_POWER_MODE,                            // int32 0/1
+    QCAMERA3_STREAM_DEPTH_STREAM_ENABLED,                      // int32 0/1
+    QCAMERA3_STREAM_IR_STREAM_MODE,                            // int32 0/1/2
+    QCAMERA3_STREAM_ACTIVE_PHYSICAL_ID,                        // byte result UTF-8
+    QCAMERA3_STREAM_END,
+
+    // org.lineageos.camera.diagnostics - execution evidence.
+    QCAMERA3_DIAGNOSTICS_VIDEO_SCENE_TIMELINE = QCAMERA3_DIAGNOSTICS_START, // int64[2N]
+    QCAMERA3_DIAGNOSTICS_STAGE_RECORDS,                                     // int32[4N]
+    QCAMERA3_DIAGNOSTICS_HARDWARE_LEVEL_ADVERTISED,                         // int32
+    QCAMERA3_DIAGNOSTICS_OCCLUSION_OCCLUDED,                                // int32 0/1
+    QCAMERA3_DIAGNOSTICS_OCCLUSION_CONFIDENCE,                              // int32 0..100
+    QCAMERA3_DIAGNOSTICS_OCCLUSION_REASON,                                  // int32
+    QCAMERA3_DIAGNOSTICS_OCCLUSION_CORE,                                    // int32
+    QCAMERA3_DIAGNOSTICS_VSTAB_PATH,                                        // int32
+    QCAMERA3_DIAGNOSTICS_VSTAB_REASON,                                      // int32
+    QCAMERA3_DIAGNOSTICS_VSTAB_GYRO_COUNT,                                  // int32
+    QCAMERA3_DIAGNOSTICS_VSTAB_CORE_STATUS,                                 // int32
+    QCAMERA3_DIAGNOSTICS_END,
+
+    // org.lineageos.camera.ar - bounded orientation/AR tracking.
+    QCAMERA3_AR_TRACKING_ENABLE = QCAMERA3_AR_START,   // int32 0/1
+    QCAMERA3_AR_TRACKING_MODE,                         // int32 0/1
+    QCAMERA3_AR_POSE,                                  // float[7] result
+    QCAMERA3_AR_POSE_CONFIDENCE,                       // float result
+    QCAMERA3_AR_TRACKING_SUPPORTED,                    // byte static
+    QCAMERA3_AR_TRACKING_STATUS,                       // int32 result errno
+    QCAMERA3_AR_GRAVITY_AIDED,                         // byte result 0/1
+    QCAMERA3_AR_END
 };
-
-// QCAMERA3_OPAQUE_RAW_FORMAT
-typedef enum qcamera3_ext_opaque_raw_format {
-    QCAMERA3_OPAQUE_RAW_FORMAT_LEGACY,
-    QCAMERA3_OPAQUE_RAW_FORMAT_MIPI
-} qcamera3_ext_opaque_raw_format_t;
-
 
 // QCAMERA3_VIDEO_HDR_MODE
 typedef enum camera_metadata_enum_android_video_hdr_mode {
@@ -498,6 +535,14 @@ class QCamera3VendorTags {
 
 public:
     static void get_vendor_tag_ops(vendor_tag_ops_t* ops);
+    // Registers this module's own vendor tag table with libcamera_metadata for
+    // the current process. Must be called before any camera characteristics are
+    // built: the legacy HIDL provider registers its VendorTagDescriptor only
+    // after camera_module->get_number_of_cameras() has returned, while the
+    // dual/SAT/logical publication probes build characteristics from the
+    // factory constructor, i.e. earlier. The provider's descriptor (built from
+    // these same tables) replaces this registration afterwards.
+    static void registerWithMetadata();
     static int get_tag_count(
             const vendor_tag_ops_t *ops);
     static void get_all_tags(

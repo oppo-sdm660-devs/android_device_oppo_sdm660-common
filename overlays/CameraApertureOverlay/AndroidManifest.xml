@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     SPDX-FileCopyrightText: The LineageOS Project
+     SPDX-License-Identifier: Apache-2.0
+-->
+<!--
+     The package name is the resource-lookup key Aperture uses
+     (OverlaysRepository.kt:34-39). Aperture declares no <overlayable> policy
+     (grep "overlayable" over the Aperture repo: 0 hits), so no android:targetName
+     is set and the overlay is a plain (non-static) RRO: Aperture reads the
+     overlay APK's own resources through getResourcesForApplication(), it does not
+     require the overlay to be enabled.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          package="org.lineageos.aperture.auto_generated_rro_product__">
+    <overlay android:targetPackage="org.lineageos.aperture"
+             android:priority="0" />
+</manifest>

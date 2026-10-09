@@ -48,8 +48,13 @@
 #include "QCamera3VendorTags.h"
 #include "QCameraDualCamSettings.h"
 #include "QCameraFOVControl.h"
+#include "QCamera3DualGeometry.h"
 #include "QCameraThermalAdapter.h"
 #include "QCameraPerfTranslator.h"
+// Logical multi-camera publication/request model and the SAT admission policy
+// this session applies (docs/LOGICAL_MULTICAM.md, docs/SAT_POLICY.md).
+#include "QCamera3LogicalMultiCam.h"
+#include "QCamera3SatPolicy.h"
 
 extern "C" {
 #include "mm_camera_interface.h"
@@ -166,6 +171,8 @@ typedef struct {
     buffer_handle_t *buffer;
     // Buffer status
     camera3_buffer_status_t bufStatus = CAMERA3_BUFFER_STATUS_OK;
+    // Per-output capture budget recorded at submission, without PP locks.
+    nsecs_t captureTimeoutNs = 0;
 } PendingBufferInfo;
 
 typedef struct {
@@ -245,11 +252,13 @@ public:
             uint32_t cam_handle);
     static int initCapabilities(uint32_t cameraId);
     static int initStaticMetadata(uint32_t cameraId);
+    // Real decoded reference illuminant -> framework camera_metadata id, 0 when
+    // the decoded value has no framework mapping. Used by the RAW/DNG admission
+    // decision (QCamera3RawCapability) instead of a private table copy.
+    static int32_t frameworkIlluminant(cam_illuminat_t illuminant);
      static uint8_t convertIdToUTF8(uint32_t id);
     static void makeTable(cam_dimension_t *dimTable, size_t size,
             size_t max_size, int32_t *sizeTable);
-    static void makeFPSTable(cam_fps_range_t *fpsTable, size_t size,
-            size_t max_size, int32_t *fpsRangesTable);
     static void makeOverridesList(cam_scene_mode_overrides_t *overridesTable,
             size_t size, size_t max_size, uint8_t *overridesList,
             uint8_t *supported_indexes, uint32_t camera_id);
@@ -285,10 +294,61 @@ public:
     void orchestrateNotify(camera3_notify_msg_t *notify_msg);
 
     int32_t orchestrateHDRCapture(camera3_capture_request_t *request);
+    int32_t orchestrateLowLightCapture(camera3_capture_request_t *request);
+    int32_t orchestrateBurstCapture(camera3_capture_request_t *request, bool lowLight);
+    int32_t orchestrateAutoCapturePolicy(camera3_capture_request_t *request,
+            const CameraMetadata &settings);
+    bool isLowLightSnapshotRequest(camera3_capture_request_t *request);
+    bool isStillSnapshotRequest(camera3_capture_request_t *request);
+    // Real automatic HDR/night decision record published as autoCaptureReason.
+    int32_t mAutoCaptureReason = 0;
+    // Framework frame number the record above really belongs to; UINT32_MAX
+    // until the policy has decided for a frame, so a stale code is never
+    // published for another frame.
+    uint32_t mAutoCaptureReasonFrame = UINT32_MAX;
+    int32_t orchestrateStillCapture(camera3_capture_request_t *request);
+    bool isDualSnapshotRequest(camera3_capture_request_t *request);
+    int32_t orchestrateDualCapture(camera3_capture_request_t *request);
+    static bool dualGeometryAvailable(uint32_t mainId, uint32_t auxId);
+    static bool dualSessionAvailable(uint32_t mainId, uint32_t auxId);
+    bool isVerifiedPairedSession();
+    // ---- Standard logical multi-camera surface (factory-owned publication) ---
+    // The factory decides with QCamera3LogicalMultiCam::publish() and installs
+    // the accepted plan here. The HWI then reports the standard logical keys for
+    // the paired session that really streams the plan's two physical cameras and
+    // applies the per-request rules (zoom/SAT/low-power/per-physical settings).
+    // Without an installed plan every path keeps its previous behaviour.
+    static int32_t installLogicalMultiCamPlan(const QCamera3LogicalMultiCam::Plan &plan,
+            uint32_t backendCameraId);
+    static bool logicalMultiCamPlan(QCamera3LogicalMultiCam::Plan &plan);
+    // Real per-physical overridable request keys this HAL can route to a
+    // physical camera's own request parameters; 0 when none can be honoured.
+    static size_t logicalPhysicalRequestKeys(uint32_t physicalCameraId, uint32_t *keys,
+            size_t capacity);
+    int32_t beginVerifiedDualRequest(uint32_t frameNumber, const CameraMetadata &settings);
+    int32_t configureVerifiedDualCapture();
     int32_t orchestrateMultiFrameCapture(camera3_capture_request_t *request);
     int32_t orchestrateMFCRawCapture(camera3_capture_request_t *request);
     int32_t orchestrateAdvancedCapture(camera3_capture_request_t *request, bool &isAdvancedCapture);
     int32_t createDeferredWork(DeferredTask task);
+
+    // Logical session state: the plan matches this session's paired backend
+    // camera. satInput() derives the real SAT admission input, validate*() are
+    // the per-request admission rules and applyLogicalSat() is their only
+    // consumer (the existing dual-camera master/low-power path).
+    bool logicalSessionPlan(QCamera3LogicalMultiCam::Plan &plan);
+    bool satInput(const QCamera3LogicalMultiCam::Plan &plan,
+            QCamera3SatPolicy::Input &input, QCamera3SatPolicy::Thresholds &thresholds);
+    int32_t validateLogicalRequest(const camera_metadata_t *settings);
+    int32_t validateLogicalPhysicalRequests(const camera3_capture_request_t *request);
+    int32_t admitLogicalPhysicalSettings(const camera3_capture_request_t *request,
+            camera_metadata_t *&wideSettings, camera_metadata_t *&teleSettings);
+    int32_t applyLogicalSat(const camera3_capture_request_t *request);
+    // Active physical sensor of this session (QCamera3SatPolicy roles), valid
+    // once the SAT policy admitted a request for it. Published as the active
+    // physical id result keys; never inferred from the request.
+    int32_t mSatRole = QCamera3SatPolicy::ROLE_WIDE;
+    bool mSatRoleValid = false;
 
     void dump(int fd);
     int flushPerf();
@@ -308,7 +368,8 @@ public:
                             nsecs_t timestamp, int32_t request_id,
                             const CameraMetadata& jpegMetadata, uint8_t pipeline_depth,
                             uint8_t capture_intent, bool pprocDone, uint8_t fwk_cacMode,
-                            bool firstMetadataInBatch, bool enableZSL, uint8_t fwkFlashMode);
+                            bool enableZSL, uint8_t fwkFlashMode,
+                            uint8_t fwkFaceDetectMode);
     camera_metadata_t* saveRequestSettings(const CameraMetadata& jpegMetadata,
                             camera3_capture_request_t *request);
     int initParameters();
@@ -318,6 +379,31 @@ public:
     bool needRotationReprocess();
     bool needJpegExifRotation();
     bool useExifRotation();
+    // Joined per-request stage trace for the nativeTrace result key. PostProc
+    // records with the internal frame number; the result path looks it up with
+    // the same internal number. Bounded, lock protected, never inferred from a
+    // request. See docs/HAL3_PORT_PLATFORM.md section 3.4.
+    void noteNativeTrace(uint32_t internalFrame, const char *trace, int32_t appliedMode);
+    // Per-stage record of a stage that really ran, published as the
+    // org.lineageos.camera.diagnostics.stageRecords result key in the same
+    // registry slot as the joined trace. Bounded by QCamera3AlgoTrace::kMaxStages.
+    void noteNativeStage(uint32_t internalFrame, int32_t stageId, int32_t status,
+            int32_t applied);
+    // Copies the bounded stageRecords of one frame; false when the frame has no
+    // record (normal: the JPEG can finish after its frame was reported).
+    bool getNativeStageRecords(uint32_t internalFrame, int32_t *records,
+            size_t capacity, int32_t &count);
+    bool getNativeTrace(uint32_t internalFrame, char *trace, size_t traceLength,
+            int32_t &appliedMode);
+    // Real occlusion analysis result of the still frame the stage analysed
+    // (analysis-only, from QCamera3Occlusion::Result). Recorded with that
+    // frame's registry slot and published as the diagnostics.occlusion* result
+    // keys; the request is never the source and a miss is normal.
+    void noteOcclusionResult(uint32_t internalFrame, int32_t occluded,
+            int32_t confidence, int32_t reason, int32_t coreStatus);
+    // Copies {occluded, confidence, reason, coreStatus}; false when the frame
+    // has no occlusion record.
+    bool getOcclusionResult(uint32_t internalFrame, int32_t *values, size_t count);
     bool needReprocess(cam_feature_mask_t postprocess_mask);
     bool needJpegRotation();
     cam_denoise_process_type_t getWaveletDenoiseProcessPlate();
@@ -371,6 +457,17 @@ public:
 
     uint32_t getCameraID() {return mCameraId;}
     bool isDualCamera() { return mDualCamera; };
+    int32_t getNativeStillMode() { return mNativeStillMode; }
+    int32_t getNativeDualBindStatus() { return mNativeDualBindStatus; }
+    int32_t getNativeBeautyStrength() { return mNativeBeautyStrength; }
+    int32_t getNativeSceneStrength() { return mNativeSceneStrength; }
+    // Round-2 request snapshot, taken under the same request mutex as the
+    // fields above. The still processor rebuilds each stage's Options from it.
+    const native_stage_request_t &getNativeStageRequest() { return mNativeStages; }
+    int32_t getFrameworkFrameNumber(uint32_t internalFrame, uint32_t &frameworkFrame) {
+        return _orchestrationDb.getFrameworkFrameNumber(internalFrame, frameworkFrame);
+    }
+    const char *getOppoSensorName() const;
     int32_t bundleRelatedCameras(bool enable_sync);
     cam_hal_pp_type_t getHalPPType() {return m_halPPType;}
     bool isDimSupportedbyCamType(const cam_dimension_t &dim, const cam_sync_type_t &type);
@@ -441,10 +538,7 @@ private:
     int64_t getMinFrameDuration(const camera3_capture_request_t *request);
     void handleMetadataWithLock(mm_camera_super_buf_t *metadata_buf,
             bool free_and_bufdone_meta_buf,
-            bool firstMetadataInBatch,
             bool *p_is_metabuf_queued);
-    void handleBatchMetadata(mm_camera_super_buf_t *metadata_buf,
-            bool free_and_bufdone_meta_buf);
     void handleBufferWithLock(camera3_stream_buffer_t *buffer,
             uint32_t frame_number);
     void handleInputBufferWithLock(uint32_t frame_number);
@@ -496,7 +590,6 @@ private:
             camera3_error_msg_code_t errorCode);
     int32_t getReprocessibleOutputStreamId(uint32_t &id);
     int32_t handleCameraDeviceError();
-    bool checkFrameInPendingList(const uint32_t frame_number);
 
     bool isOnEncoder(const cam_dimension_t max_viewfinder_size,
             uint32_t width, uint32_t height);
@@ -553,6 +646,8 @@ private:
     uint32_t           mBlurLevel;
     cam_hal_pp_type_t m_halPPType;
     mm_camera_vtbl_t  *mCameraHandle;
+    bool               mFlashReserved;
+    bool               mDisplaySessionActive;
     bool               mCameraInitialized;
     camera_metadata_t *mDefaultMetadata[CAMERA3_TEMPLATE_COUNT];
     const camera3_callback_ops_t *mCallbackOps;
@@ -563,10 +658,9 @@ private:
     QCamera3SupportChannel *mSupportChannel;
     QCamera3SupportChannel *mAnalysisChannel;
     QCamera3RawDumpChannel *mRawDumpChannel;
-    QCamera3RegularChannel *mDummyBatchChannel;
-    QCamera3DepthChannel *mDepthChannel;
     QCameraPerfLockMgr mPerfLockMgr;
     QCameraThermalAdapter &m_thermalAdapter;
+    bool mThermalInitialized;
     uint32_t mChannelHandle;
     void saveExifParams(metadata_buffer_t *metadata);
     mm_jpeg_exif_params_t mExifParams;
@@ -592,6 +686,11 @@ private:
     bool m_bIs4KVideo;
     bool m_bEisSupportedSize;
     bool m_bEisEnable;
+    bool mMmsVideoConfigured = false;
+    bool mSensorVideoHdrChosen = false;
+    int32_t mSensorVideoHdrMode = 0;
+    uint8_t mMmsRequestedMode = ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF;
+    float mMmsRequestZoom = 1.0f;
     bool m_bEis3PropertyEnabled;
     bool m_bEisSupported;
     bool m_bLPMEnabled;
@@ -651,6 +750,8 @@ private:
         mm_camera_super_buf_t*aux_meta;
         bool enableZSL;
         uint8_t fwkFlashMode;
+        uint8_t fwkFaceDetectMode;
+        uint8_t fwkVideoStabMode;
     } PendingRequestInfo;
     typedef struct {
         uint32_t frame_number;
@@ -675,8 +776,6 @@ private:
     List<PendingFrameDropInfo> mPendingFrameDropList;
     /* Use last frame number of the batch as key and first frame number of the
      * batch as value for that key */
-    KeyedVector<uint32_t, uint32_t> mPendingBatchMap;
-    cam_stream_ID_t mBatchedStreamsArray;
     pthread_cond_t mRequestCond;
     pthread_cond_t mHdrRequestCond;
     uint32_t mPendingLiveRequest;
@@ -705,14 +804,9 @@ private:
     uint8_t mCaptureIntent;
     uint8_t mAuxCaptureIntent;
     uint8_t mCacMode;
+    uint8_t mFaceDetectMode;
     uint8_t mAuxCacMode;
     metadata_buffer_t mReprocMeta; //scratch meta buffer
-    /* 0: Not batch, non-zero: Number of image buffers in a batch */
-    uint8_t mBatchSize;
-    // Used only in batch mode
-    uint8_t mToBeQueuedVidBufs;
-    // Fixed video fps
-    float mHFRVideoFps;
 public:
     uint32_t mOpMode;
     bool mStreamConfig;
@@ -730,9 +824,6 @@ public:
     QCamera3MultiRawChannel *mMultiRawChannel;
     bool m_bMultiRawRequest;
 private:
-    uint32_t mFirstFrameNumberInBatch;
-    camera3_stream_t mDummyBatchStream;
-    bool mNeedSensorRestart;
     bool mPreviewStarted;
     uint32_t mMinInFlightRequests;
     uint32_t mMaxInFlightRequests;
@@ -754,7 +845,6 @@ private:
     bool mLdafCalibExist;
     uint32_t mLdafCalib[2];
     int32_t mLastCustIntentFrmNum;
-    CameraMetadata  mCachedMetadata;
 
     bool cacheMetaIfNeeded(
              mm_camera_super_buf_t *metadata_buf, uint32_t frame_number);
@@ -803,8 +893,6 @@ private:
             cam_video_hdr_mode_t> VIDEO_HDR_MODES_MAP[];
     static const QCameraMap<camera_metadata_enum_android_sensor_reference_illuminant1_t,
             cam_illuminat_t> REFERENCE_ILLUMINANT_MAP[];
-    static const QCameraMap<int32_t,
-            cam_hfr_mode_t> HFR_MODE_MAP[];
     static const QCameraMap<camera_metadata_enum_android_ir_mode_t,
             cam_ir_mode_type_t> IR_MODES_MAP[];
     static const QCameraMap<qcamera3_ext_instant_aec_mode_t,
@@ -876,7 +964,6 @@ private:
     bool mFlashNeeded;
     cam_perf_info_t mSettingInfo[CONFIG_INDEX_MAX];
     uint8_t mSessionId;
-    cam_hfr_mode_t mHFRMode;
 
     //for multi frame raw capture
     uint8_t mMultiFrameRAWCaptureCount;
@@ -885,7 +972,42 @@ private:
     camera3_capture_request_t **quad_req;
     bool m_bRecoveryDone;
     CameraMetadata mSavedParams;
+    // Framework settings never contain our private exposure-bracket requests.
+    CameraMetadata mLastFrameworkSettings;
+    int32_t mNativeStillMode = 0;
+    int32_t mNativeDualBindStatus = 0;
+    QCamera3DualGeometry::Profile mPairedProfile;
+    bool mPairedProfileValid = false;
+    int32_t mNativeBeautyStrength = 0;
+    int32_t mNativeSceneStrength = 0;
+    native_stage_request_t mNativeStages = {};
+    bool mRestoreFrameworkSettings = false;
+    uint32_t mSubmittingBurstFrameNumber = UINT32_MAX;
     uint32_t sync_counter;
+
+    // Joined native stage trace, keyed by the internal (daemon) frame number of
+    // the frame the stage produced. Fixed-size ring: a still JPEG can complete
+    // after its frame's metadata was already reported, so a miss is normal and
+    // the EXIF ImageDescription remains the JPEG-path carrier.
+    static const size_t kNativeTraceSlots = 8;
+    struct NativeTraceEntry {
+        uint32_t frame = 0;
+        int32_t appliedMode = 0;
+        bool valid = false;
+        char trace[QCamera3AlgoTrace::kMaxLength + 1] = {};
+        // stageRecords layout: int32[4*N] = {stageId, status, applied, frame},
+        // appended in execution order for every stage that really ran.
+        int32_t records[QCamera3AlgoTrace::kMaxStages * 4] = {};
+        int32_t recordCount = 0;
+        // Real occlusion analysis of the still frame the stage analysed:
+        // {occluded, confidence, reason, coreStatus}. valid only when the stage
+        // really produced a result for this frame.
+        int32_t occlusion[4] = {};
+        bool occlusionValid = false;
+    };
+    NativeTraceEntry mNativeTrace[kNativeTraceSlots];
+    size_t mNativeTraceNext = 0;
+    Mutex mNativeTraceLock;
 };
 
 }; // namespace qcamera

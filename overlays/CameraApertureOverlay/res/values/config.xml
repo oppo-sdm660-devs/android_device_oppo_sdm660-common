@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     SPDX-FileCopyrightText: The LineageOS Project
+     SPDX-License-Identifier: Apache-2.0
+-->
+<!--
+     Aperture video-configuration overlay for oppo sdm660 (R11 / R11s).
+
+     Resource names and types must match the app keys one-for-one, because
+     Aperture looks them up by entry name + type in the overlay package
+     (OverlaysRepository.kt:22-31, 133-143).
+
+     How a video grade reaches Aperture (the three sources are independent):
+
+     1. Quality (SD/HD/FHD/UHD) - CameraX `Recorder.getVideoCapabilities()` with its
+        default `VIDEO_CAPABILITIES_SOURCE_CAMCORDER_PROFILE`, i.e. the legacy
+        `CamcorderProfile` / `EncoderProfiles` surface, i.e. `configs/media/
+        media_profiles_vendor.xml` for this product (not the HAL stream sizes!). A
+        `2160p` profile is what makes a UHD chip appear; without one CameraX tops out
+        at FHD. This overlay cannot add a quality (it only carries frame rates for
+        qualities that already exist) - the lever for a quality is that XML, and it is
+        also a hard constraint: a `qhd` (1440p) profile makes CameraX report
+        `Quality.QHD`, which Aperture does not map and rejects with "Unknown video
+        quality" when it renders or cycles the quality button. This tree disables
+        qhd/2k/4kdci/2160p for camera ids 2/3 (the aux/paired devices the RRO exposes)
+        for exactly that reason.
+     2. Frame rate (24/30/60/120) - CameraX `CameraInfo.supportedFrameRateRanges`
+        = `android.control.aeAvailableTargetFpsRanges`, filtered through
+        `FrameRate.fromRange()` (a chip needs a *fixed* range: [n,n]) and then
+        added/removed by this array.
+        That list is now derived in the HAL from the device's decoded capability
+        (`QCamera2/HAL3/QCamera3VideoGrades.h`): the vendor pairs verbatim, the
+        fixed endpoints of every pair, and [60,60] when a 60 fps HFR sensor tier
+        at 1080p or larger exists. `QCamera3HWI.cpp` accepts a request whose range
+        is one of those pairs or a sub-range of one.
+        Consequence for this overlay: an *addition* would be both unnecessary and
+        unsafe - the decisive fact (does this unit's fps table really carry 60 fps,
+        and at which size?) is only known on the device, and a chip whose range the
+        HAL refuses breaks the recording session instead of degrading. The HAL
+        publishes exactly what the sensor declares, so nothing here has to guess.
+        This array therefore only *removes* grades.
+     3. Dynamic range (SDR/HLG10/HDR10) - no 10-bit camera record exists on this
+        platform (camera/docs/DYNAMIC_RANGE.md), so SDR stays the only value and
+        nothing is claimed here.
+
+     Encoder envelope behind the removals:
+       - `configs/media/media_codecs_vendor.xml` AVC :150-161 / HEVC :134-146 declare
+         `max 3840x2160` and `blocks-per-second max 972000`; those two limits are
+         identical in the stock R11s file, i.e. they are the real R11/R11s envelope.
+         972000 = ceil(3840/16) * ceil(2160/16) * 30, exactly 4K30; 4K60 would need
+         1944000 and 1080p120 needs 979200, so both are removed where they apply.
+         (The `performance-point-3840x2160` limits in the shipped file are NOT stock
+         R11/R11s: `grep -c performance-point stock/R11s/vendor/etc/media_codecs_vendor.xml`
+         is 0, they exist only in the PAAM00 variant this tree copies. The R11/R11s
+         measured row is `configs/media/media_codecs_performance.xml` HEVC
+         `measured-frame-rate-3840x2160 range="6-24"`.)
+       - No R11/R11s sensor declares a 3840x2160 mode (the imx398 mode table has
+         4096x2160 and 4608x3456, all <=30 fps), and CameraX maps Quality.UHD to
+         exactly 3840x2160, so the UHD removals below are expected to be no-ops on
+         this hardware; they stay as a fail-closed guard.
+-->
+<resources>
+    <!-- Keep high-resolution output sizes enabled. This is already the app
+         default (Aperture res/values/config.xml:86); the entry is explicit so a
+         future change of the default cannot silently downgrade still capture. -->
+    <bool name="config_enableHighResolution">true</bool>
+
+    <!-- Triplets: (camera id, qualities, frame rates). A '-' prefix removes a
+         rate for those qualities (OverlaysRepository.kt:75-79).
+         Only removals, never additions - see the header for why:
+           - sd/hd/fhd @ 120 fps: 1080p120 needs 979200 blocks/s > 972000, and
+             Aperture never opens a constrained-high-speed session, which is the
+             only session type this HAL admits >=120 fps in.
+           - uhd @ 60/120 fps: above the same ceiling. Expected to be a no-op: none
+             of the camera ids this tree exposes has a 2160p profile any more, so
+             there is no UHD quality to attach a rate to. Kept as a fail-closed guard
+             in case a profile is added later.
+         60 fps is deliberately not touched: after the HAL derivation it appears
+         exactly when the decoded table (or a 1080p+ 60 fps HFR tier) supports it
+         and disappears otherwise, so nothing here can make a wrong chip appear.
+         Ids 3/4 (paired / logical) carry the same guards as 0/1/2 so a future
+         publication of those devices cannot expose an unencodable grade. -->
+    <string-array name="config_additionalVideoConfigurations">
+        <!-- Back main camera. -->
+        <item>0</item> <item>uhd</item> <item>-60|-120</item>
+        <item>0</item> <item>sd|hd|fhd</item> <item>-120</item>
+        <!-- Front camera. -->
+        <item>1</item> <item>uhd</item> <item>-60|-120</item>
+        <item>1</item> <item>sd|hd|fhd</item> <item>-120</item>
+        <!-- Back auxiliary camera. -->
+        <item>2</item> <item>uhd</item> <item>-60|-120</item>
+        <item>2</item> <item>sd|hd|fhd</item> <item>-120</item>
+        <!-- Paired device (published only when the pair succeeds). -->
+        <item>3</item> <item>uhd</item> <item>-60|-120</item>
+        <item>3</item> <item>sd|hd|fhd</item> <item>-120</item>
+        <!-- Logical device on top of the pair. -->
+        <item>4</item> <item>uhd</item> <item>-60|-120</item>
+        <item>4</item> <item>sd|hd|fhd</item> <item>-120</item>
+    </string-array>
+
+    <!--
+    Multi-camera. Aperture always keeps ids 0 and 1 and drops everything else unless
+    config_enableAuxCameras is true (CameraRepository.kt:119,151 and :128), and it
+    additionally drops every camera whose physicalCameraInfos.size > 1 unless
+    config_ignoreLogicalAuxCameras is false (CameraRepository.kt:125-126) - that is
+    exactly the logical device QCamera2Factory publishes (public id 4 = backend
+    paired device, physical ids 0 and 2). Both switches are therefore required for
+    the multi-lens surface to exist at all on this unit. To revert: false/true.
+    -->
+    <bool name="config_enableAuxCameras">true</bool>
+    <bool name="config_ignoreLogicalAuxCameras">false</bool>
+
+    <!-- No id is ignored: 0/1 main, 2 standalone rear aux, 3 paired device (published
+         only when the paired publication succeeds), 4 logical (published on top of 3).
+         Add "3" only after a device read-back shows it duplicates the pair in
+         Aperture's lens selector. -->
+    <string-array name="config_ignoredAuxCameraIds" />
+
+    <!-- Not needed on this port and therefore absent: CameraX drops any camera whose
+         characteristics lack REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE
+         unless it is listed here, and `applyOppoBasicMetadataPolicy()` adds that
+         capability unconditionally (QCamera3HWI.cpp), so ids 2/3/4 are admitted
+         without an exemption. Add an id here only if a future change makes the
+         capability conditional. -->
+
+    <!-- Deliberately empty. Aperture's lens selector only uses these entries when
+         at least one ratio pair is present (LensSelectorLayout.kt:55): a pair makes
+         the selector call smoothZoom(exactZoomRatio) on that camera instead of
+         switching device, and every label claims a real optical ratio. No
+         defect-free value is available for this unit from the tree or from the
+         stock camera app (the ColorOS app ships a continuous zoom seek bar -
+         "Zoom" / "變焦" - not a per-lens button), so nothing is invented here. The
+         raw per-unit numbers to read back before filling this in: the logical
+         camera's ZOOM_RATIO_RANGE and its physical cameras'
+         LENS_INFO_AVAILABLE_FOCAL_LENGTHS. -->
+    <string-array name="config_logicalZoomRatios" />
+</resources>

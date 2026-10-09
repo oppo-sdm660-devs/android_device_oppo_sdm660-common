@@ -57,6 +57,10 @@ public:
 private:
     int getNumberOfCameras();
     int getCameraInfo(int camera_id, struct camera_info *info);
+    // Admission/publication of the standard logical multi-camera surface
+    // (QCamera3LogicalMultiCam). NO_ERROR only when one extra logical public id
+    // was appended on top of the existing standalone ids.
+    int publishHal3LogicalCamera();
     int setCallbacks(const camera_module_callbacks_t *callbacks);
     int cameraDeviceOpen(int camera_id, struct hw_device_t **hw_device);
     static int camera_device_open(const struct hw_module_t *module, const char *id,
