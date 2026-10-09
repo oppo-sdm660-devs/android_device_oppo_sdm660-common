@@ -52,7 +52,8 @@
 #define MM_CAMERA_DEV_NAME_LEN 32
 #define MM_CAMERA_DEV_OPEN_TRIES 20
 #define MM_CAMERA_DEV_OPEN_RETRY_SLEEP 20
-#define THREAD_NAME_SIZE 15
+// PR_SET_NAME accepts 15 visible bytes plus the terminating NUL.
+#define THREAD_NAME_SIZE 16
 
 /* Future frame idx, large enough to make sure capture
 * settings can be applied and small enough to still capture an image */

@@ -2,6 +2,7 @@ cc_library_shared {
     name: "libmmcamera_interface",
     defaults: [
         "oppo_camera_defaults",
+        "oppo_camera_logging_defaults",
         "oppo_camera_leak_defaults",
     ],
     c_std: "gnu11",
@@ -19,6 +20,9 @@ cc_library_shared {
         "-DUSE_4_9_DEFS",
     ],
     shared_libs: [
+        // mm_camera.h includes camera_common.h, whose system camera headers
+        // are exported by libcamera_metadata rather than libhardware_headers.
+        "libcamera_metadata",
         "libdl",
         "libcutils",
         "liblog",
@@ -27,7 +31,10 @@ cc_library_shared {
 
 cc_library_shared {
     name: "libmmjpeg_interface",
-    defaults: ["oppo_camera_defaults"],
+    defaults: [
+        "oppo_camera_defaults",
+        "oppo_camera_logging_defaults",
+    ],
     c_std: "gnu11",
     srcs: [
         "mm-jpeg-interface/src/mm_jpeg_queue.c",

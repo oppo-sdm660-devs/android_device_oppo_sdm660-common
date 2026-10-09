@@ -34,7 +34,6 @@
 #include <utils/Errors.h>
 
 // Camera dependencies
-#include "QCamera2HWI.h"
 #include "QCameraThermalAdapter.h"
 
 extern "C" {

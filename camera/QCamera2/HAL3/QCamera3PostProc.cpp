@@ -4004,10 +4004,7 @@ QCamera3Exif *QCamera3PostProcessor::getExifData(metadata_buffer_t *metadata,
         LOGE("No memory for QCamera3Exif");
         return NULL;
     }
-    QCamera3HardwareInterface* hal_obj = NULL;
-    if (m_parent != NULL) {
-        hal_obj = (QCamera3HardwareInterface*)m_parent->mUserData;
-    } else {
+    if (m_parent == NULL) {
         LOGE("m_parent is NULL, Error");
         delete exif;
         return NULL;
@@ -4022,17 +4019,17 @@ QCamera3Exif *QCamera3PostProcessor::getExifData(metadata_buffer_t *metadata,
     rc = getExifDateTime(dateTime, subsecTime);
     if (rc == NO_ERROR) {
         exif->addEntry(EXIFTAGID_DATE_TIME, EXIF_ASCII,
-                (uint32_t)(dateTime.length() + 1), (void *)dateTime.string());
+                (uint32_t)(dateTime.length() + 1), (void *)dateTime.c_str());
         exif->addEntry(EXIFTAGID_EXIF_DATE_TIME_ORIGINAL, EXIF_ASCII,
-                (uint32_t)(dateTime.length() + 1), (void *)dateTime.string());
+                (uint32_t)(dateTime.length() + 1), (void *)dateTime.c_str());
         exif->addEntry(EXIFTAGID_EXIF_DATE_TIME_DIGITIZED, EXIF_ASCII,
-                (uint32_t)(dateTime.length() + 1), (void *)dateTime.string());
+                (uint32_t)(dateTime.length() + 1), (void *)dateTime.c_str());
         exif->addEntry(EXIFTAGID_SUBSEC_TIME, EXIF_ASCII,
-                (uint32_t)(subsecTime.length() + 1), (void *)subsecTime.string());
+                (uint32_t)(subsecTime.length() + 1), (void *)subsecTime.c_str());
         exif->addEntry(EXIFTAGID_SUBSEC_TIME_ORIGINAL, EXIF_ASCII,
-                (uint32_t)(subsecTime.length() + 1), (void *)subsecTime.string());
+                (uint32_t)(subsecTime.length() + 1), (void *)subsecTime.c_str());
         exif->addEntry(EXIFTAGID_SUBSEC_TIME_DIGITIZED, EXIF_ASCII,
-                (uint32_t)(subsecTime.length() + 1), (void *)subsecTime.string());
+                (uint32_t)(subsecTime.length() + 1), (void *)subsecTime.c_str());
     } else {
         LOGW("getExifDateTime failed");
     }

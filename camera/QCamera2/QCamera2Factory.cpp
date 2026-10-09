@@ -498,6 +498,9 @@ struct hw_module_methods_t QCamera2Factory::mModuleMethods = {
 int QCamera2Factory::openLegacy(
         int32_t cameraId, uint32_t halVersion, struct hw_device_t** hw_device)
 {
+#ifndef QCAMERA_HAL1_SUPPORT
+    (void)hw_device;
+#endif
     int rc = NO_ERROR;
 
     LOGI("openLegacy halVersion: %d cameraId = %d", halVersion, cameraId);
@@ -610,6 +613,7 @@ int QCamera2Factory::setTorchMode(const char* camera_id, bool on)
  *==========================================================================*/
 bool QCamera2Factory::isDualCamAvailable(int hal3Enabled)
 {
+#ifdef QCAMERA_HAL1_SUPPORT
     bool rc = false;
     int i = 0;
     camera_info info;
@@ -617,9 +621,7 @@ bool QCamera2Factory::isDualCamAvailable(int hal3Enabled)
 
     for (i = 0; i < mNumOfCameras; i++) {
         if (!hal3Enabled) {
-#ifdef QCAMERA_HAL1_SUPPORT
             QCamera2HardwareInterface::getCapabilities(i, &info, &cam_type);
-#endif
         }
 
         if(cam_type == CAM_TYPE_AUX) {
@@ -628,9 +630,9 @@ bool QCamera2Factory::isDualCamAvailable(int hal3Enabled)
             break;
         }
     }
-#ifdef QCAMERA_HAL1_SUPPORT
     return rc;
 #else
+    (void)hal3Enabled;
     return false;
 #endif
 }
