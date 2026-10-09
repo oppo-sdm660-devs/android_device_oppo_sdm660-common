@@ -970,6 +970,11 @@ uint8_t get_num_of_cameras();
 
 /* return number of cameras to expose*/
 uint8_t get_num_of_cameras_to_expose();
+/* Factory-only append of the R11 paired HAL3 ID after unit geometry AND the
+ * standard paired session/stream contract pass admission. Call before public
+ * enumeration, with all physical capability-query handles already closed.
+ * Repeating a successful publication is harmless; this is not an enable knob. */
+int32_t publish_hal3_dual_camera(void);
 
 /* return reference pointer of camera vtbl */
 int32_t camera_open(uint8_t camera_idx, mm_camera_vtbl_t **camera_obj);

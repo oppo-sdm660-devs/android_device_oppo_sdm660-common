@@ -278,6 +278,8 @@ typedef struct mm_jpeg_job_session {
   mm_jpeg_encode_params_t params; /* encode params */
   mm_jpeg_decode_params_t dec_params; /* encode params */
   mm_jpeg_encode_job_t encode_job;             /* job description */
+  void *oppo_metadata;            /* session-owned stock metadata */
+  uint8_t oppo_static_metadata[0x1c4]; /* stock flip/mount and dual OTP layout */
   mm_jpeg_decode_job_t decode_job;
   pthread_t encode_pid;          /* encode thread handler*/
 
@@ -540,5 +542,3 @@ typedef enum {
 } mm_jpeg_exif_flash_mode;
 
 #endif /* MM_JPEG_H_ */
-
-

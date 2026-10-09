@@ -69,7 +69,6 @@ enum qcamera3_ext_tags qcamera3_ext3_section_bounds[QCAMERA3_SECTIONS_END -
         QCAMERA3_STATS_END,
         QCAMERA3_SIMULTANEOUS_CAMERA_END,
         QCAMERA3_QUADRA_CFA_DATA_END,
-        QCAMERA3_HFR_END,
         QCAMERA3_BOKEH_END,
         QCAMERA3_FUSION_END,
         QCAMERA3_LOGICAL_CAM_END,
@@ -77,6 +76,11 @@ enum qcamera3_ext_tags qcamera3_ext3_section_bounds[QCAMERA3_SECTIONS_END -
         QCAMERA3_SAT_MODE_END,
         QCAMERA3_EIS_FLUSH_END,
         QCAMERA3_SWMFNR_END,
+        QCAMERA3_NATIVE_ALGORITHMS_END,
+        QCAMERA3_POSTPROCESS_END,
+        QCAMERA3_STREAM_END,
+        QCAMERA3_DIAGNOSTICS_END,
+        QCAMERA3_AR_END,
 };
 
 typedef struct vendor_tag_info {
@@ -112,14 +116,18 @@ const char *qcamera3_ext_section_names[QCAMERA3_SECTIONS_END -
     "org.codeaurora.qcamera3.stats",
     "org.codeaurora.qcamera3.simultaneous_camera",
     "org.codeaurora.qcamera3.quadra_cfa",
-    "org.codeaurora.qcamera3.hfr",
     "org.codeaurora.qcamera3.bokeh",
     "org.codeaurora.qcamera3.fusion",
     "org.codeaurora.qcamera3.logical",
     "org.codeaurora.qcamera3.manualWB",
     "org.codeaurora.qcamera3.sat",
     "org.quic.camera.recording",
-    "org.codeaurora.qcamera3.swmfnr"
+    "org.codeaurora.qcamera3.swmfnr",
+    "org.lineageos.camera.algorithms",
+    "org.lineageos.camera.postprocess",
+    "org.lineageos.camera.stream",
+    "org.lineageos.camera.diagnostics",
+    "org.lineageos.camera.ar"
 };
 
 vendor_tag_info_t qcamera3_privatedata[QCAMERA3_PRIVATEDATA_END - QCAMERA3_PRIVATEDATA_START] = {
@@ -291,11 +299,6 @@ vendor_tag_info_t qcamera3_quadra_cfa[QCAMERA3_QUADRA_CFA_DATA_END -
     { "qcfa_dimension", TYPE_INT32 },
 };
 
-vendor_tag_info_t qcamera3_hfr[QCAMERA3_HFR_END -
-        QCAMERA3_HFR_START] = {
-    { "sizes", TYPE_INT32 }
-};
-
 vendor_tag_info_t qcamera3_bokeh[QCAMERA3_BOKEH_END -
         QCAMERA3_BOKEH_START] = {
     { "enable", TYPE_BYTE },
@@ -325,6 +328,127 @@ vendor_tag_info qcamera3_manual_wb[QCAMERA3_MANUAL_WB_END -
 vendor_tag_info qcamera3_swmfnr[QCAMERA3_SWMFNR_END -
                                   QCAMERA3_SWMFNR_START] = {
     { "enable", TYPE_BYTE }
+};
+
+vendor_tag_info_t qcamera3_native_algorithms[QCAMERA3_NATIVE_ALGORITHMS_END -
+        QCAMERA3_NATIVE_ALGORITHMS_START] = {
+    { "stillMode", TYPE_INT32 },
+    { "beautyStrength", TYPE_INT32 },
+    { "availableModes", TYPE_INT32 },
+    { "filterType", TYPE_INT32 },
+    { "filterFlipMode", TYPE_INT32 },
+    { "availableFilterTypes", TYPE_INT32 },
+    { "continuousEnabled", TYPE_INT32 },
+    { "continuousBeautyStrength", TYPE_INT32 },
+    { "continuousFilterType", TYPE_INT32 },
+    { "continuousToneStrength", TYPE_INT32 },
+    { "continuousAvailableEffects", TYPE_INT32 },
+    { "continuousMaxPixels", TYPE_INT32 },
+    { "sceneStrength", TYPE_INT32 },
+    { "continuousSceneStrength", TYPE_INT32 },
+    { "continuousSceneResult", TYPE_INT32 },
+    { "relightStrength", TYPE_INT32 },
+    { "relightAzimuth", TYPE_INT32 },
+    { "relightElevation", TYPE_INT32 },
+    { "frontBeautyStrength", TYPE_INT32 },
+    { "frontBeautyFeatures", TYPE_INT32 },
+    { "picBestFrames", TYPE_INT32 },
+    { "picBestStrength", TYPE_INT32 },
+    { "picBestOpenEyeOnly", TYPE_INT32 },
+    { "blurlessThreshold", TYPE_INT32 },
+    { "faceInfoMode", TYPE_INT32 },
+    { "imageAdjust", TYPE_INT32 },
+    { "singleBokehStrength", TYPE_INT32 },
+    { "singleBokehSpotMode", TYPE_INT32 },
+    { "singleBokehSpot", TYPE_FLOAT },
+    { "portraitLightMode", TYPE_INT32 },
+    { "portraitLightStrength", TYPE_INT32 },
+    { "docMode", TYPE_INT32 },
+    { "docStrength", TYPE_INT32 },
+    { "autoHdrEnable", TYPE_INT32 },
+    { "autoNightEnable", TYPE_INT32 },
+    { "doubleExposureMode", TYPE_INT32 },
+    { "doubleExposureStrength", TYPE_INT32 },
+    { "doubleExposureTimeNs", TYPE_INT64 },
+    { "longExposureEnable", TYPE_INT32 },
+    { "remosaicEnable", TYPE_INT32 },
+    { "exifComment", TYPE_BYTE },
+    { "watermarkAsset", TYPE_BYTE },
+    { "stickerAsset", TYPE_BYTE },
+    { "stickerRect", TYPE_FLOAT },
+    { "mirrorPreview", TYPE_INT32 },
+    { "appPolicyMode", TYPE_INT32 },
+    { "appMask", TYPE_INT32 },
+    { "facePreviewParam", TYPE_INT32 },
+    { "depthQuality", TYPE_INT32 },
+    { "availableDocModes", TYPE_INT32 },
+    { "maxLongExposureNs", TYPE_INT64 },
+    { "longExposureRangeNs", TYPE_INT64 },
+    { "availableRemosaicSizes", TYPE_INT32 },
+    { "remosaicSupported", TYPE_BYTE },
+    { "depthSupported", TYPE_BYTE },
+    { "arTrackingSupported", TYPE_BYTE },
+    { "professionalVer", TYPE_INT32 },
+    { "hlgVideoSupported", TYPE_BYTE },
+    { "nativeTrace", TYPE_BYTE },
+    { "faceAttributes", TYPE_INT32 },
+    { "estimatedSnapshotExpTime", TYPE_INT64 },
+    { "hotPixelMapAvailable", TYPE_BYTE },
+    { "appliedNativeMode", TYPE_INT32 },
+    { "previewBokehStrength", TYPE_INT32 },
+    { "previewBokehTemporalSmoothing", TYPE_INT32 },
+    { "autoCaptureReason", TYPE_INT32 },
+};
+
+vendor_tag_info_t qcamera3_postprocess[QCAMERA3_POSTPROCESS_END -
+        QCAMERA3_POSTPROCESS_START] = {
+    { "settings", TYPE_INT32 },
+    { "warpRegions", TYPE_FLOAT },
+    { "overlay", TYPE_INT32 },
+    { "watermark", TYPE_BYTE },
+    { "faceTracking", TYPE_INT32 },
+    { "watermarkLayout", TYPE_INT32 },
+    { "mirror", TYPE_INT32 },
+    { "exifUserComment", TYPE_BYTE },
+};
+
+vendor_tag_info_t qcamera3_stream[QCAMERA3_STREAM_END -
+        QCAMERA3_STREAM_START] = {
+    { "slowMotionRatio", TYPE_INT32 },
+    { "availableSlowMotionRatios", TYPE_INT32 },
+    { "videoHdrProfile", TYPE_INT32 },
+    { "logicalZoomHint", TYPE_FLOAT },
+    { "lowPowerMode", TYPE_INT32 },
+    { "depthStreamEnabled", TYPE_INT32 },
+    { "irStreamMode", TYPE_INT32 },
+    { "activePhysicalId", TYPE_BYTE },
+    { "vstabCropFactor", TYPE_FLOAT },
+    { "vstabOffset", TYPE_FLOAT },
+};
+
+vendor_tag_info_t qcamera3_diagnostics[QCAMERA3_DIAGNOSTICS_END -
+        QCAMERA3_DIAGNOSTICS_START] = {
+    { "videoSceneTimeline", TYPE_INT64 },
+    { "stageRecords", TYPE_INT32 },
+    { "hardwareLevelAdvertised", TYPE_INT32 },
+    { "occlusionOccluded", TYPE_INT32 },
+    { "occlusionConfidence", TYPE_INT32 },
+    { "occlusionReason", TYPE_INT32 },
+    { "occlusionCore", TYPE_INT32 },
+    { "vstabPath", TYPE_INT32 },
+    { "vstabReason", TYPE_INT32 },
+    { "vstabGyroCount", TYPE_INT32 },
+    { "vstabCoreStatus", TYPE_INT32 },
+};
+
+vendor_tag_info_t qcamera3_ar[QCAMERA3_AR_END - QCAMERA3_AR_START] = {
+    { "arTrackingEnable", TYPE_INT32 },
+    { "arTrackingMode", TYPE_INT32 },
+    { "arPose", TYPE_FLOAT },
+    { "arPoseConfidence", TYPE_FLOAT },
+    { "arTrackingSupported", TYPE_BYTE },
+    { "arTrackingStatus", TYPE_INT32 },
+    { "arGravityAided", TYPE_BYTE },
 };
 
 vendor_tag_info_t qcamera3_sat_cam[QCAMERA3_SAT_MODE_END -
@@ -365,7 +489,6 @@ vendor_tag_info_t *qcamera3_tag_info[QCAMERA3_SECTIONS_END -
     qcamera3_stats,
     qcamera3_simultaneous_camera,
     qcamera3_quadra_cfa,
-    qcamera3_hfr,
     qcamera3_bokeh,
     qcamera3_fusion,
     qcamera3_logical_cam,
@@ -373,6 +496,11 @@ vendor_tag_info_t *qcamera3_tag_info[QCAMERA3_SECTIONS_END -
     qcamera3_sat_cam,
     qcamera3_eis_flush,
     qcamera3_swmfnr,
+    qcamera3_native_algorithms,
+    qcamera3_postprocess,
+    qcamera3_stream,
+    qcamera3_diagnostics,
+    qcamera3_ar,
 };
 
 uint32_t qcamera3_all_tags[] = {
@@ -472,7 +600,9 @@ uint32_t qcamera3_all_tags[] = {
 
     // QCAMERA3_STATS
     (uint32_t)QCAMERA3_STATS_IS_HDR_SCENE,
+    (uint32_t)QCAMERA3_STATS_IS_HDR_SCENE_VALUES,
     (uint32_t)QCAMERA3_STATS_IS_HDR_SCENE_CONFIDENCE,
+    (uint32_t)QCAMERA3_STATS_IS_HDR_SCENE_CONFIDENCE_RANGE,
     (uint32_t)QCAMERA3_STATS_BSGC_AVAILABLE,
     (uint32_t)QCAMERA3_STATS_BLINK_DETECTED,
     (uint32_t)QCAMERA3_STATS_BLINK_DEGREE,
@@ -488,9 +618,6 @@ uint32_t qcamera3_all_tags[] = {
     // QCAMERA3_QUADRA_CFA_DATA
     (uint32_t)QCAMERA3_IS_QUADRA_CFA_SENSOR,
     (uint32_t)QCAMERA3_SUPPORT_QUADRA_CFA_DIM,
-
-    //QCAMERA3_HFR
-    (uint32_t)QCAMERA3_HFR_SIZES,
 
     //QCAMERA3_BOKEH
     (uint32_t)QCAMERA3_BOKEH_ENABLE,
@@ -513,7 +640,109 @@ uint32_t qcamera3_all_tags[] = {
     (uint32_t)QCAMERA3_SAT_MODE_ON,
     (uint32_t)QCAMERA3_EIS_FLUSH_ON,
     //QCAMERA3 SWMFNR
-    (uint32_t)QCAMERA3_SWMFNR_ENABLE
+    (uint32_t)QCAMERA3_SWMFNR_ENABLE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_MODE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_MODES,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_FILTER_TYPE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_FILTER_FLIP_MODE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_FILTER_TYPES,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_ENABLED,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_BEAUTY_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_FILTER_TYPE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_TONE_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_AVAILABLE_EFFECTS,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_MAX_PIXELS,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_SCENE_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_SCENE_RESULT,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_RELIGHT_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_RELIGHT_AZIMUTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_RELIGHT_ELEVATION,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_FEATURES,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_PICBEST_FRAMES,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_PICBEST_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_PICBEST_OPEN_EYE_ONLY,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_BLURLESS_THRESHOLD,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_FACE_INFO_MODE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_IMAGE_ADJUST,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_SINGLE_BOKEH_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_SINGLE_BOKEH_SPOT_MODE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_SINGLE_BOKEH_SPOT,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_PORTRAIT_LIGHT_MODE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_PORTRAIT_LIGHT_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_DOC_MODE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_DOC_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_AUTO_HDR_ENABLE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_AUTO_NIGHT_ENABLE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_DOUBLE_EXPOSURE_MODE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_DOUBLE_EXPOSURE_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_DOUBLE_EXPOSURE_TIME_NS,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_LONG_EXPOSURE_ENABLE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_REMOSAIC_ENABLE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_EXIF_COMMENT,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_WATERMARK_ASSET,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_STICKER_ASSET,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_STICKER_RECT,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_MIRROR_PREVIEW,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_APP_POLICY_MODE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_APP_MASK,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_FACE_PREVIEW_PARAM,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_DEPTH_QUALITY,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_DOC_MODES,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_MAX_LONG_EXPOSURE_NS,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_LONG_EXPOSURE_RANGE_NS,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_REMOSAIC_SIZES,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_REMOSAIC_SUPPORTED,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_DEPTH_SUPPORTED,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_AR_TRACKING_SUPPORTED,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_PROFESSIONAL_VER,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_HLG_VIDEO_SUPPORTED,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_NATIVE_TRACE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_FACE_ATTRIBUTES,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_ESTIMATED_SNAPSHOT_EXP_TIME,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_HOT_PIXEL_MAP_AVAILABLE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_APPLIED_NATIVE_MODE,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_TEMPORAL_SMOOTHING,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_AUTO_CAPTURE_REASON,
+    (uint32_t)QCAMERA3_POSTPROCESS_SETTINGS,
+    (uint32_t)QCAMERA3_POSTPROCESS_WARP_REGIONS,
+    (uint32_t)QCAMERA3_POSTPROCESS_OVERLAY,
+    (uint32_t)QCAMERA3_POSTPROCESS_WATERMARK,
+    (uint32_t)QCAMERA3_POSTPROCESS_FACE_TRACKING,
+    (uint32_t)QCAMERA3_POSTPROCESS_WATERMARK_LAYOUT,
+    (uint32_t)QCAMERA3_POSTPROCESS_MIRROR,
+    (uint32_t)QCAMERA3_POSTPROCESS_EXIF_USER_COMMENT,
+    (uint32_t)QCAMERA3_STREAM_SLOW_MOTION_RATIO,
+    (uint32_t)QCAMERA3_STREAM_AVAILABLE_SLOW_MOTION_RATIOS,
+    (uint32_t)QCAMERA3_STREAM_VIDEO_HDR_PROFILE,
+    (uint32_t)QCAMERA3_STREAM_VSTAB_CROP_FACTOR,
+    (uint32_t)QCAMERA3_STREAM_VSTAB_OFFSET,
+    (uint32_t)QCAMERA3_STREAM_LOGICAL_ZOOM_HINT,
+    (uint32_t)QCAMERA3_STREAM_LOW_POWER_MODE,
+    (uint32_t)QCAMERA3_STREAM_DEPTH_STREAM_ENABLED,
+    (uint32_t)QCAMERA3_STREAM_IR_STREAM_MODE,
+    (uint32_t)QCAMERA3_STREAM_ACTIVE_PHYSICAL_ID,
+    (uint32_t)QCAMERA3_DIAGNOSTICS_VIDEO_SCENE_TIMELINE,
+    (uint32_t)QCAMERA3_DIAGNOSTICS_STAGE_RECORDS,
+    (uint32_t)QCAMERA3_DIAGNOSTICS_HARDWARE_LEVEL_ADVERTISED,
+    (uint32_t)QCAMERA3_DIAGNOSTICS_OCCLUSION_OCCLUDED,
+    (uint32_t)QCAMERA3_DIAGNOSTICS_OCCLUSION_CONFIDENCE,
+    (uint32_t)QCAMERA3_DIAGNOSTICS_OCCLUSION_REASON,
+    (uint32_t)QCAMERA3_DIAGNOSTICS_OCCLUSION_CORE,
+    (uint32_t)QCAMERA3_DIAGNOSTICS_VSTAB_PATH,
+    (uint32_t)QCAMERA3_DIAGNOSTICS_VSTAB_REASON,
+    (uint32_t)QCAMERA3_DIAGNOSTICS_VSTAB_GYRO_COUNT,
+    (uint32_t)QCAMERA3_DIAGNOSTICS_VSTAB_CORE_STATUS,
+    (uint32_t)QCAMERA3_AR_TRACKING_ENABLE,
+    (uint32_t)QCAMERA3_AR_TRACKING_MODE,
+    (uint32_t)QCAMERA3_AR_POSE,
+    (uint32_t)QCAMERA3_AR_POSE_CONFIDENCE,
+    (uint32_t)QCAMERA3_AR_TRACKING_SUPPORTED,
+    (uint32_t)QCAMERA3_AR_TRACKING_STATUS,
+    (uint32_t)QCAMERA3_AR_GRAVITY_AIDED
 };
 
 const vendor_tag_ops_t* QCamera3VendorTags::Ops = NULL;
@@ -545,6 +774,22 @@ void QCamera3VendorTags::get_vendor_tag_ops(
 
     LOGL("X");
     return;
+}
+
+/* libcamera_metadata exports this entry point, but the public
+ * system/camera_metadata.h does not declare it (AOSP declares it in the
+ * private camera_metadata_hidden.h and the provider registers its
+ * VendorTagDescriptor through it). Declared locally so this vendor module
+ * does not need the private header. */
+extern "C" int set_camera_metadata_vendor_ops(const vendor_tag_ops_t *ops);
+
+void QCamera3VendorTags::registerWithMetadata()
+{
+    // Process-lifetime storage: libcamera_metadata keeps the pointer.
+    static vendor_tag_ops_t sOps;
+    if (Ops == &sOps) return; // already registered by this module
+    get_vendor_tag_ops(&sOps);
+    set_camera_metadata_vendor_ops(&sOps);
 }
 
 /*===========================================================================

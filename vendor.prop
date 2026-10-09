@@ -103,6 +103,42 @@ bluetooth.profile.sap.server.enabled=true
 
 # Camera
 persist.vendor.camera.HAL3.enabled=1
+persist.vendor.camera.dual.camera=0
+# Aux camera enumeration gate. The only reader in this ROM is the HAL's own
+# stack (camera/QCamera2/stack/mm-camera-interface/src/mm_camera_interface.c:2484
+# property_get("persist.vendor.camera.expose.aux", prop, "0"); the value decides
+# whether sort_camera_info() appends the rear/front aux ids, :2526-2556).
+# persist.camera.expose.aux (non-vendor name) has no reader in this ROM and no
+# packaged stock blob contains the string either; it stays for stock parity
+# (stock sets it in system/build.prop). The host packaging gate that used to
+# require it was moved out of the device tree on request (archive:
+# device-tree-nonsource-20261017/camera/tools/check_blob_packaging.py).
+persist.camera.expose.aux=1
+persist.vendor.camera.expose.aux=1
+# Aux/logical camera visibility for camera clients. Reader: Camera.shouldExposeAuxCamera(),
+# a LineageOS framework addition (NOT in AOSP: verified absent from
+# android.googlesource.com/platform/frameworks/base/+/refs/tags/android-16.0.0_r4/
+# core/java/android/hardware/{Camera.java,camera2/CameraManager.java}):
+# https://raw.githubusercontent.com/LineageOS/android_frameworks_base/lineage-23.2/core/java/android/hardware/Camera.java
+#   :277 shouldExposeAuxCamera(), :286 SystemProperties.get("vendor.camera.aux.packagelist", packageName)
+#   (split(","), no trim), :311 truncates numberOfCameras to 2 when the package is unlisted
+# https://raw.githubusercontent.com/LineageOS/android_frameworks_base/lineage-23.2/core/java/android/hardware/camera2/CameraManager.java
+#   :2489 calls it, :3076 skips every id >= 2 for unlisted packages.
+# Aperture (org.lineageos.aperture) and Google Camera must therefore be listed,
+# otherwise every camera id >= 2 - aux id 2, the paired id and any published
+# logical id - is invisible to them. Adding a package to this grant list can
+# only widen exposure, never reduce it, so it is safe when the property is not
+# readable (see the note in device-tree-nonsource-20261017/camera/docs/MULTICAM_STATUS.md).
+# Label note: AOSP system/sepolicy private/property_contexts:282 maps the
+# `vendor.` prefix to vendor_default_prop
+# (https://android.googlesource.com/platform/system/sepolicy/+/refs/tags/android-16.0.0_r4/private/property_contexts),
+# and LineageOS' sepolicy does not label vendor.camera.aux.packagelist either, so a
+# coredomain reader is denied it under enforcing SELinux and SystemProperties.get()
+# falls back to the package name (= exposed). This ROM runs permissive; the optional
+# label fix belongs in sepolicy/vendor/property_contexts and needs device verification.
+vendor.camera.aux.packagelist=org.codeaurora.snapcam,com.oppo.camera,com.oppo.engineermode,com.coloros.healthcheck,org.lineageos.aperture,com.google.android.GoogleCamera
+# Stock disables UBWC for camera (stock R11/R11s system/build.prop).
+persist.vendor.camera.preview.ubwc=0
 persist.vendor.qti.telephony.vt_cam_interface=1
 vidc.enc.dcvs.extra-buff-count=2
 

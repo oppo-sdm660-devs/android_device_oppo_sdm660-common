@@ -1,0 +1,4 @@
+# Placeholder: the vendor watermark/sticker pack root (/vendor/etc/camera/postprocess)
+# has no assets in the stock dump or in this tree. Any file dropped here as
+# <id>_<W>x<H>.argb or <id>_<W>x<H>.nv21 is installed by common.mk and accepted
+# by QCamera3PostprocessAssets::loadAsset().

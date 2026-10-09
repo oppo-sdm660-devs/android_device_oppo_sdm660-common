@@ -1,0 +1,15 @@
+//
+// SPDX-FileCopyrightText: The LineageOS Project
+// SPDX-License-Identifier: Apache-2.0
+//
+
+// Device-side RRO read by Aperture's OverlaysRepository, which resolves the
+// resource *entry names* from the packages
+//   org.lineageos.aperture.auto_generated_rro_product__   (queried first)
+//   org.lineageos.aperture.auto_generated_rro_vendor__
+// (Aperture: app/src/main/java/org/lineageos/aperture/repositories/OverlaysRepository.kt:34-39).
+// The package name below is therefore not cosmetic: it is the lookup key.
+runtime_resource_overlay {
+    name: "CameraApertureOverlay",
+    product_specific: true,
+}

@@ -30,17 +30,17 @@
 // System dependencies
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
-#include <linux/msm_ion.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 #define MMAN_H <SYSTEM_HEADER_PREFIX/mman.h>
 #include MMAN_H
 
 // JPEG dependencies
 #include "mm_jpeg_ionbuf.h"
-#if TARGET_ION_ABI_VERSION >= 2
-#include <ion/ion.h>
-#include <linux/dma-buf.h>
+
 #ifndef CAM_CACHE_OPS
 #define CAM_CACHE_OPS
 enum {
@@ -51,231 +51,135 @@ enum {
 #define ION_IOC_CLEAN_CACHES CAM_CLEAN_CACHE
 #define ION_IOC_INV_CACHES CAM_INV_CACHE
 #define ION_IOC_CLEAN_INV_CACHES CAM_CLEAN_INV_CACHE
-#endif //CAM_CACHE_OPS
-#endif //TARGET_ION_ABI_VERSION
+#endif
 
-/** buffer_allocate:
- *
- *  Arguments:
- *     @p_buffer: ION buffer
- *
- *  Return:
- *     buffer address
- *
- *  Description:
- *      allocates ION buffer
- *
- **/
+/* The dma-buf fd is owned separately from the allocator fd. */
 void *buffer_allocate(buffer_t *p_buffer, int cached)
 {
-  void *l_buffer = NULL;
+    const size_t alignment = 4096;
+    if (p_buffer == NULL || p_buffer->owns_buffer || p_buffer->size == 0 ||
+            p_buffer->size > (size_t)SSIZE_MAX - (alignment - 1)) {
+        return NULL;
+    }
+    const size_t allocation_size =
+            (p_buffer->size + alignment - 1) & ~(alignment - 1);
+    p_buffer->p_pmem_fd = -1;
+    p_buffer->addr = NULL;
+    p_buffer->allocation_size = 0;
+    p_buffer->owns_buffer = false;
 
-  int lrc = 0;
-
-   p_buffer->alloc.len = p_buffer->size;
-   p_buffer->alloc.align = 4096;
-   p_buffer->alloc.flags = (cached) ? ION_FLAG_CACHED : 0;
-#ifndef TARGET_ION_ABI_VERSION
-  struct ion_handle_data lhandle_data;
-   p_buffer->alloc.heap_id_mask = 0x1 << ION_IOMMU_HEAP_ID;
-#else
-   p_buffer->alloc.heap_id_mask = 0x1 << ION_SYSTEM_HEAP_ID;
-#endif //TARGET_ION_ABI_VERSION
-
-#ifndef TARGET_ION_ABI_VERSION
-   p_buffer->ion_fd = open("/dev/ion", O_RDONLY);
-#else
-   p_buffer->ion_fd = ion_open();
-#endif //TARGET_ION_ABI_VERSION
-   if(p_buffer->ion_fd < 0) {
-    LOGE("Ion open failed");
-    goto ION_ALLOC_FAILED;
-  }
-
-  /* Make it page size aligned */
-  p_buffer->alloc.len = (p_buffer->alloc.len + 4095U) & (~4095U);
-#ifndef TARGET_ION_ABI_VERSION
-  lrc = ioctl(p_buffer->ion_fd, ION_IOC_ALLOC, &p_buffer->alloc);
-#else
-  lrc = ion_alloc_fd(p_buffer->ion_fd, p_buffer->alloc.len, p_buffer->alloc.align,
-                 p_buffer->alloc.heap_id_mask, p_buffer->alloc.flags,
-                 &p_buffer->ion_info_fd.fd);
-#endif //TARGET_ION_ABI_VERSION
-  if (lrc < 0) {
-    LOGE("ION allocation failed len %zu",
-      p_buffer->alloc.len);
-    goto ION_ALLOC_FAILED;
-  }
-
-  p_buffer->ion_info_fd.handle = p_buffer->alloc.handle;
-#ifndef TARGET_ION_ABI_VERSION
-  lrc = ioctl(p_buffer->ion_fd, ION_IOC_SHARE,
-    &p_buffer->ion_info_fd);
-  if (lrc < 0) {
-    LOGE("ION map failed %s", strerror(errno));
-    goto ION_MAP_FAILED;
-  }
-#else
-  p_buffer->ion_info_fd.handle = p_buffer->ion_info_fd.fd;
-#endif //TARGET_ION_ABI_VERSION
-
-  p_buffer->p_pmem_fd = p_buffer->ion_info_fd.fd;
-
-  l_buffer = mmap(NULL, p_buffer->alloc.len, PROT_READ  | PROT_WRITE,
-    MAP_SHARED,p_buffer->p_pmem_fd, 0);
-
-  if (l_buffer == MAP_FAILED) {
-    LOGE("ION_MMAP_FAILED: %s (%d)",
-      strerror(errno), errno);
-    goto ION_MAP_FAILED;
-  }
-
-  return l_buffer;
-
-ION_MAP_FAILED:
-#ifndef TARGET_ION_ABI_VERSION
-  lhandle_data.handle = p_buffer->ion_info_fd.handle;
-  ioctl(p_buffer->ion_fd, ION_IOC_FREE, &lhandle_data);
-#else
-  close(p_buffer->ion_info_fd.fd);
-  ion_close(p_buffer->ion_fd);
-#endif //TARGET_ION_ABI_VERSION
-  return NULL;
-ION_ALLOC_FAILED:
-if (p_buffer->ion_fd > 0) {
-#ifndef TARGET_ION_ABI_VERSION
-  close(p_buffer->ion_fd);
-#else
-  ion_close(p_buffer->ion_fd);
-#endif //TARGET_ION_ABI_VERSION
-}
-  return NULL;
-
+    const int allocator_fd = open("/dev/ion", O_RDONLY | O_CLOEXEC);
+    if (allocator_fd < 0) {
+        LOGE("Ion open failed: %s", strerror(errno));
+        return NULL;
+    }
+    struct ion_allocation_data allocation = {0};
+    allocation.len = allocation_size;
+    allocation.heap_id_mask = ION_HEAP(ION_SYSTEM_HEAP_ID);
+    allocation.flags = cached ? ION_FLAG_CACHED : 0;
+    int rc;
+    do {
+        rc = ioctl(allocator_fd, ION_IOC_ALLOC, &allocation);
+    } while (rc < 0 && errno == EINTR);
+    const int allocation_error = errno;
+    close(allocator_fd);
+    if (rc < 0) {
+        LOGE("ION allocation failed for len %zu: %s", allocation_size,
+                strerror(allocation_error));
+        return NULL;
+    }
+    if (allocation.fd > (uint32_t)INT_MAX) {
+        LOGE("ION returned an invalid dma-buf descriptor");
+        return NULL;
+    }
+    const int dma_fd = (int)allocation.fd;
+    void *mapping = mmap(NULL, allocation_size, PROT_READ | PROT_WRITE,
+            MAP_SHARED, dma_fd, 0);
+    if (mapping == MAP_FAILED) {
+        const int mapping_error = errno;
+        close(dma_fd);
+        LOGE("ION mmap failed: %s", strerror(mapping_error));
+        return NULL;
+    }
+    p_buffer->p_pmem_fd = dma_fd;
+    p_buffer->addr = mapping;
+    p_buffer->allocation_size = allocation_size;
+    p_buffer->owns_buffer = true;
+    return mapping;
 }
 
-/** buffer_deallocate:
- *
- *  Arguments:
- *     @p_buffer: ION buffer
- *
- *  Return:
- *     buffer address
- *
- *  Description:
- *      deallocates ION buffer
- *
- **/
 int buffer_deallocate(buffer_t *p_buffer)
 {
-  int lrc = 0;
-  size_t lsize = (p_buffer->size + 4095U) & (~4095U);
-
-  struct ion_handle_data lhandle_data;
-
-  lrc = munmap(p_buffer->addr, lsize);
-
-  lhandle_data.handle = p_buffer->ion_info_fd.handle;
-#ifndef TARGET_ION_ABI_VERSION
-  close(p_buffer->ion_info_fd.fd);
-  ioctl(p_buffer->ion_fd, ION_IOC_FREE, &lhandle_data);
-  close(p_buffer->ion_fd);
-#else
-  close(lhandle_data.handle);
-  ion_close(p_buffer->ion_fd);
-#endif //TARGET_ION_ABI_VERSION
-
-  return lrc;
+    if (p_buffer == NULL) {
+        return -EINVAL;
+    }
+    if (!p_buffer->owns_buffer) {
+        return 0;
+    }
+    int result = 0;
+    if (p_buffer->addr != NULL && p_buffer->allocation_size != 0 &&
+            munmap(p_buffer->addr, p_buffer->allocation_size) < 0) {
+        result = -errno;
+    }
+    if (p_buffer->p_pmem_fd >= 0 && close(p_buffer->p_pmem_fd) < 0 && result == 0) {
+        result = -errno;
+    }
+    p_buffer->addr = NULL;
+    p_buffer->p_pmem_fd = -1;
+    p_buffer->allocation_size = 0;
+    p_buffer->owns_buffer = false;
+    return result;
 }
 
-/** buffer_invalidate:
- *
- *  Arguments:
- *     @p_buffer: ION buffer
- *
- *  Return:
- *     error val
- *
- *  Description:
- *      Invalidates the cached buffer
- *
- **/
 int buffer_invalidate(buffer_t *p_buffer)
 {
-  return buffer_cache_ops(p_buffer, ION_IOC_INV_CACHES);
+    return buffer_cache_ops(p_buffer, CAM_INV_CACHE);
 }
 
-/** buffer_clean:
- *
- *  Arguments:
- *     @p_buffer: ION buffer
- *
- *  Return:
- *     error val
- *
- *  Description:
- *      Clean the cached buffer
- *
- **/
 int buffer_clean(buffer_t *p_buffer)
 {
-  return buffer_cache_ops(p_buffer, ION_IOC_CLEAN_CACHES);
+    return buffer_cache_ops(p_buffer, CAM_CLEAN_CACHE);
 }
 
 int buffer_cache_ops(buffer_t *p_buffer, uint32_t cmd)
 {
-  int lrc = 0;
-#ifndef TARGET_ION_ABI_VERSION
-  struct ion_flush_data cache_clean_data;
-  struct ion_custom_data custom_data;
-
-  memset(&cache_clean_data, 0, sizeof(cache_clean_data));
-  memset(&custom_data, 0, sizeof(custom_data));
-  cache_clean_data.vaddr = p_buffer->addr;
-  cache_clean_data.fd = p_buffer->ion_info_fd.fd;
-  cache_clean_data.handle = p_buffer->ion_info_fd.handle;
-  cache_clean_data.length = (unsigned int)p_buffer->size;
-  custom_data.cmd = (unsigned int)cmd;
-  custom_data.arg = (unsigned long)&cache_clean_data;
-
-  lrc = ioctl(p_buffer->ion_fd, ION_IOC_CUSTOM, &custom_data);
-  if (lrc < 0)
-    LOGW("Cache clean failed: %s\n", strerror(errno));
-#else
-    struct dma_buf_sync buf_sync_start;
-    struct dma_buf_sync buf_sync_end;
-
-    /* ION_IOC_CLEAN_CACHES-->call the DMA_BUF_IOCTL_SYNC IOCTL with flags DMA_BUF_SYNC_START
-       and DMA_BUF_SYNC_WRITE and then call the DMA_BUF_IOCTL_SYNC IOCTL with flags DMA_BUF_SYNC_END
-       and DMA_BUF_SYNC_WRITE
-       ION_IOC_INV_CACHES-->call the DMA_BUF_IOCTL_SYNC IOCT with flags DMA_BUF_SYNC_START and
-       DMA_BUF_SYNC_WRITE and then call the DMA_BUF_IOCTL_SYNC IOCT with flags DMA_BUF_SYNC_END
-       and DMA_BUF_SYNC_READ
-    */
-
+    if (p_buffer == NULL || p_buffer->p_pmem_fd < 0) {
+        return -EINVAL;
+    }
+    uint64_t access;
     switch (cmd) {
     case CAM_INV_CACHE:
-      buf_sync_start.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE;
-      buf_sync_end.flags   = DMA_BUF_SYNC_END   | DMA_BUF_SYNC_READ;
-      break;
+        access = DMA_BUF_SYNC_READ;
+        break;
     case CAM_CLEAN_CACHE:
-      buf_sync_start.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE;
-      buf_sync_end.flags   = DMA_BUF_SYNC_END   | DMA_BUF_SYNC_WRITE;
-      break;
-    default:
+        access = DMA_BUF_SYNC_WRITE;
+        break;
     case CAM_CLEAN_INV_CACHE:
-      buf_sync_start.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW;
-      buf_sync_end.flags   = DMA_BUF_SYNC_END   | DMA_BUF_SYNC_RW;
-      break;
+        access = DMA_BUF_SYNC_RW;
+        break;
+    default:
+        return -EINVAL;
     }
 
-    lrc = ioctl(p_buffer->ion_info_fd.fd, DMA_BUF_IOCTL_SYNC, &buf_sync_start.flags);
-    if (lrc) {
-        LOGE("Failed first DMA_BUF_IOCTL_SYNC start\n");
+    struct dma_buf_sync sync = {0};
+    sync.flags = DMA_BUF_SYNC_START | access;
+    int rc;
+    do {
+        rc = ioctl(p_buffer->p_pmem_fd, DMA_BUF_IOCTL_SYNC, &sync);
+    } while (rc < 0 && (errno == EINTR || errno == EAGAIN));
+    if (rc < 0) {
+        const int sync_error = errno;
+        LOGE("DMA_BUF_IOCTL_SYNC start failed: %s", strerror(sync_error));
+        return -sync_error;
     }
-    lrc = ioctl(p_buffer->ion_info_fd.fd, DMA_BUF_IOCTL_SYNC, &buf_sync_end.flags);
-    if (lrc) {
-        LOGE("Failed first DMA_BUF_IOCTL_SYNC End\n");
+    sync.flags = DMA_BUF_SYNC_END | access;
+    do {
+        rc = ioctl(p_buffer->p_pmem_fd, DMA_BUF_IOCTL_SYNC, &sync);
+    } while (rc < 0 && (errno == EINTR || errno == EAGAIN));
+    if (rc < 0) {
+        const int sync_error = errno;
+        LOGE("DMA_BUF_IOCTL_SYNC end failed: %s", strerror(sync_error));
+        return -sync_error;
     }
-#endif //TARGET_ION_ABI_VERSION
-    return lrc;
+    return 0;
 }

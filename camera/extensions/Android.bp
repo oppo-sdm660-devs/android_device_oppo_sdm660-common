@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+// The permissions XML registers this JAR under the standard runtime library name.
+java_library {
+    name: "oppo_camera_extensions_impl",
+    installable: true,
+    srcs: ["src/**/*.java"],
+    sdk_version: "current",
+    vendor: true,
+    visibility: ["//visibility:public"],
+}
+
+// Loaded by the system CameraExtensionsProxy, as in the AOSP advanced sample.
+cc_library_shared {
+    name: "liboppo_camera_extensions_jni",
+    system_ext_specific: true,
+    compile_multilib: "both",
+    srcs: ["jni/JpegBlobWriter.cpp"],
+    header_libs: ["jni_headers"],
+    cflags: ["-Wall", "-Wextra", "-Werror"],
+    stl: "none",
+}
+
+prebuilt_etc {
+    name: "oppo_camera_extensions.xml",
+    vendor: true,
+    sub_dir: "permissions",
+    src: "camera_extensions.xml",
+}

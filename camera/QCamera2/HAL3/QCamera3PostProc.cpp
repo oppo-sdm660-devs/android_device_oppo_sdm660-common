@@ -34,15 +34,29 @@
 
 // System dependencies
 #include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <vector>
 
 // Camera dependencies
 #include "QCamera3Channel.h"
 #include "QCamera3HWI.h"
 #include "QCamera3PostProc.h"
+#include "QCamera3LowLightHdrAlgo.h"
+#include "QCamera3HdrDenoise.h"
+#include "QCamera3StillAlgo.h"
+#include "QCamera3StockBeauty.h"
+#include "QCamera3StockSuperPhoto.h"
+#include "QCamera3EisSnapshot.h"
+#include "QCamera3FlashSequence.h"
+#include "QCamera3SceneBrightness.h"
+#include "QCamera3Occlusion.h"
+#include "QCamera3PostprocessAssets.h"
+#include "QCamera3NativeAlgorithms.h"
 #include "QCamera3Stream.h"
 #include "QCameraTrace.h"
-#include "QCameraPprocManager.h"
-#include "QCameraMem.h"
+#include <errno.h>
+#include <time.h>
 
 extern "C" {
 #include "mm_camera_dbg.h"
@@ -51,6 +65,42 @@ extern "C" {
 #define ENABLE_MODEL_INFO_EXIF
 
 namespace qcamera {
+
+static void nativeAlgorithmTrace(jpeg_settings_t *settings, const char *algorithm,
+        int32_t status, uint32_t frame, uint32_t inputs,
+        QCamera3HardwareInterface *hardware, int32_t applied = 0)
+{
+    if (!settings) return;
+    uint32_t frameworkFrame = settings->framework_frame_number_valid ?
+            settings->framework_frame_number : UINT32_MAX;
+    // Snapshot the mapping at request submission: long processing may outlive
+    // the registry's 256-entry LRU while preview continues to submit frames.
+    if ((!settings->framework_frame_number_valid && (!hardware ||
+            hardware->getFrameworkFrameNumber(frame, frameworkFrame) != NO_ERROR)) ||
+            frameworkFrame == UINT32_MAX) {
+        frameworkFrame = UINT32_MAX;
+        if (status == NO_ERROR) status = -ENOENT;
+    }
+    // Written after processing, never inferred from the requested mode. A base
+    // JPEG returned after a core failure remains distinguishable from success.
+    snprintf(settings->image_desc, sizeof(settings->image_desc),
+            "OPPO_HAL3 algorithm=%s status=%d frame=%u inputs=%u",
+            algorithm, status, frameworkFrame, inputs);
+    settings->image_desc_valid = 1;
+    // EXIF ImageDescription is only EXIF_IMAGE_DESCRIPTION_SIZE bytes, so the
+    // joined multi-stage trace is carried separately and published as the
+    // nativeTrace result key. A stage is appended only when it really ran.
+    if (settings->native_trace.add(algorithm, status, frameworkFrame, inputs)) {
+        settings->native_trace_valid = 1;
+        if (hardware) {
+            hardware->noteNativeTrace(frame, settings->native_trace.c_str(),
+                    status == NO_ERROR ? settings->native_still_mode : OPPO_NATIVE_OFF);
+            // Per-frame diagnostics record of the same really-executed stage.
+            hardware->noteNativeStage(frame, settings->native_still_mode, status, applied);
+        }
+    }
+    LOGI("%s", settings->image_desc);
+}
 
 static const char ExifAsciiPrefix[] =
     { 0x41, 0x53, 0x43, 0x49, 0x49, 0x0, 0x0, 0x0 };          // "ASCII\0\0\0"
@@ -79,17 +129,21 @@ QCamera3PostProcessor::QCamera3PostProcessor(QCamera3ProcessingChannel* ch_ctrl)
       mJpegClientHandle(0),
       mJpegSessionId(0),
       m_bThumbnailNeeded(TRUE),
+      mOutputMem(NULL),
+      mDeinitialized(false),
+      mStopCommandQueued(false),
+      mLifecycleOperationActive(false),
+      mStopDeferred(false),
       m_ppChannelCnt(1),
       m_bMpoEnabled(FALSE),
       m_inputPPQ(releasePPInputData, this),
       m_inputFWKPPQ(NULL, this),
-      m_inputMultiReprocQ(NULL, this),  // add release job data func here
+      m_inputMultiReprocQ(releaseOngoingPPData, this),
       m_ongoingPPQ(releaseOngoingPPData, this),
       m_inputJpegQ(releaseJpegData, this),
       m_ongoingJpegQ(releaseJpegData, this),
       m_inputMetaQ(releaseMetadata, this),
       m_jpegSettingsQ(NULL, this),
-      m_pHalPPManager(NULL),
       mChannelStop(TRUE)
 {
     memset(&mJpegHandle, 0, sizeof(mJpegHandle));
@@ -97,7 +151,18 @@ QCamera3PostProcessor::QCamera3PostProcessor(QCamera3ProcessingChannel* ch_ctrl)
     memset(m_pReprocChannel, 0, sizeof(m_pReprocChannel));
     mReprocessNode.clear();
     pthread_mutex_init(&mReprocJobLock, NULL);
+    pthread_mutex_init(&mCancelJobLock, NULL);
     pthread_mutex_init(&mHDRJobLock, NULL);
+    pthread_mutexattr_t hdrLockAttr;
+    pthread_mutexattr_init(&hdrLockAttr);
+    pthread_mutexattr_settype(&hdrLockAttr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&mHdrCaptureLock, &hdrLockAttr);
+    pthread_mutexattr_destroy(&hdrLockAttr);
+    pthread_cond_init(&mHdrCaptureCond, NULL);
+    mHdrActive = false;
+    mHdrBaseJob = NULL;
+    mHdrBaseFrame = NULL;
+    memset(mHdrImages, 0, sizeof(mHdrImages));
     pthread_cond_init(&mProcChStopCond, NULL);
     max_pic_size = {0,0};
     mCancelpprocReqFrameList.clear();
@@ -114,22 +179,15 @@ QCamera3PostProcessor::QCamera3PostProcessor(QCamera3ProcessingChannel* ch_ctrl)
  *==========================================================================*/
 QCamera3PostProcessor::~QCamera3PostProcessor()
 {
-    for (int8_t i = 0; i < m_ppChannelCnt; i++) {
-        QCamera3Channel *pChannel = m_pReprocChannel[i];
-        if (pChannel != NULL ) {
-            pChannel->stop();
-            delete pChannel;
-            m_pReprocChannel[i] = NULL;
-        }
-    }
-    if (m_pHalPPManager != NULL) {
-        m_pHalPPManager->release();
-        m_pHalPPManager = NULL;
-    }
-    m_ppChannelCnt = 0;
+    // The owning channel calls this before its derived buffers disappear.
+    // Keep the fallback drain ahead of mutex and queue destruction as well.
+    deinit();
 
     pthread_mutex_destroy(&mReprocJobLock);
+    pthread_mutex_destroy(&mCancelJobLock);
     pthread_mutex_destroy(&mHDRJobLock);
+    pthread_mutex_destroy(&mHdrCaptureLock);
+    pthread_cond_destroy(&mHdrCaptureCond);
     pthread_cond_destroy(&mProcChStopCond);
 }
 
@@ -147,16 +205,13 @@ QCamera3PostProcessor::~QCamera3PostProcessor()
  *==========================================================================*/
 int32_t QCamera3PostProcessor::init(QCamera3StreamMem *memory)
 {
+    std::lock_guard<std::mutex> lifecycle(mLifecycleLock);
     ATRACE_CAMSCOPE_CALL(CAMSCOPE_HAL3_PPROC_INIT);
     mOutputMem = memory;
-    m_dataProcTh.launch(dataProcessRoutine, this);
-    QCamera3HardwareInterface* hal_obj = (QCamera3HardwareInterface*)m_parent->mUserData;
-    if (hal_obj->isDualCamera()) {
-        LOGH("Check and create HAL PP manager if not present");
-        createHalPPManager();
-    }
+    mDeinitialized = false;
+    int32_t rc = m_dataProcTh.launch(dataProcessRoutine, this);
     mFreeJpegSessions.clear();
-    return NO_ERROR;
+    return rc;
 }
 
 /*===========================================================================
@@ -172,23 +227,25 @@ int32_t QCamera3PostProcessor::init(QCamera3StreamMem *memory)
  *==========================================================================*/
 int32_t QCamera3PostProcessor::deinit()
 {
+    std::lock_guard<std::mutex> lifecycle(mLifecycleLock);
+    if (mDeinitialized.load()) return NO_ERROR;
+    mDeinitialized = true;
+    pthread_mutex_lock(&mHDRJobLock);
+    pthread_cond_broadcast(&mProcChStopCond);
+    pthread_mutex_unlock(&mHDRJobLock);
     int rc = NO_ERROR;
+    abortHdrCapture();
+    // Stop submission first, then join driver callbacks while channel objects
+    // and their source/CPP memory are still available to the queue releasers.
+    bool workerPaused = m_dataProcTh.sendCmd(
+            CAMERA_CMD_TYPE_PAUSE_DATA_PROC, TRUE, TRUE) == NO_ERROR;
+    bool workerStopped = workerPaused && m_dataProcTh.sendCmd(
+            CAMERA_CMD_TYPE_STOP_DATA_PROC, TRUE, TRUE) == NO_ERROR;
     m_dataProcTh.exit();
-
-    for (int8_t i = 0; i < m_ppChannelCnt; i++) {
-        QCamera3Channel *pChannel = m_pReprocChannel[i];
-        if (pChannel != NULL ) {
-            pChannel->stop();
-            delete pChannel;
-            m_pReprocChannel[i] = NULL;
-        }
-    }
-    if (m_pHalPPManager != NULL) {
-        LOGH("DeInit PP Manager");
-        m_pHalPPManager->deinit();
-        m_pHalPPManager = NULL;
-    }
-    m_ppChannelCnt = 0;
+    if (!workerStopped) stopPostproc();
+    // Also handles an unlaunched worker or a failed STOP allocation. Closing
+    // admission and draining again captures callbacks that raced shutdown.
+    clearPostprocQueues();
 
     if(mJpegClientHandle > 0) {
         rc = mJpegHandle.close(mJpegClientHandle);
@@ -269,11 +326,27 @@ int32_t QCamera3PostProcessor::initJpeg(jpeg_encode_callback_t jpeg_cb,
 int32_t QCamera3PostProcessor::start(const reprocess_config_t &config)
 {
     int32_t rc = NO_ERROR;
-    pthread_mutex_lock(&mHDRJobLock);
+    std::unique_lock<std::mutex> lifecycle(mLifecycleLock, std::defer_lock);
+    for (;;) {
+        // A callback marks STOP pending before releasing its framework result.
+        // Do not hold the lifecycle lock while waiting for that callback to
+        // enqueue STOP or for the worker to complete its cleanup.
+        pthread_mutex_lock(&mHDRJobLock);
+        while (!mChannelStop && !mDeinitialized.load())
+            pthread_cond_wait(&mProcChStopCond, &mHDRJobLock);
+        pthread_mutex_unlock(&mHDRJobLock);
+        lifecycle.lock();
+        if (mDeinitialized.load()) return -ENODEV;
+        pthread_mutex_lock(&mHDRJobLock);
+        const bool stopped = mChannelStop;
+        if (stopped) mLifecycleOperationActive = true;
+        pthread_mutex_unlock(&mHDRJobLock);
+        if (stopped) break;
+        lifecycle.unlock();
+    }
+    auto finishStart = [this](QCamera3PostProcessor *) { finishLifecycleOperation(); };
+    std::unique_ptr<QCamera3PostProcessor, decltype(finishStart)> startGuard(this, finishStart);
     QCamera3HardwareInterface* hal_obj = (QCamera3HardwareInterface*)m_parent->mUserData;
-    if(mChannelStop == false)
-        pthread_cond_wait(&mProcChStopCond, &mHDRJobLock);
-    pthread_mutex_unlock(&mHDRJobLock);
     if (config.reprocess_type != REPROCESS_TYPE_NONE) {
         for (int8_t i = 0; i < m_ppChannelCnt; i++) {
             QCamera3Channel *pChannel = m_pReprocChannel[i];
@@ -324,28 +397,36 @@ int32_t QCamera3PostProcessor::start(const reprocess_config_t &config)
                 }
             }
         }
+    }
+    rc = m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_START_DATA_PROC, TRUE, FALSE);
+    startGuard.release();
+    const bool stoppedDuringStart = finishLifecycleOperation();
+    return rc != NO_ERROR ? rc : (stoppedDuringStart ? -ECANCELED : NO_ERROR);
+}
 
-        if (hal_obj->isDualCamera() &&
-        (hal_obj->getHalPPType() != CAM_HAL_PP_TYPE_NONE
-        && hal_obj->getHalPPType() != CAM_HAL_PP_TYPE_SAT)) {
-            // HALPP type might have changed, ensure we have right pp block
-            rc = initHalPPManager();
-            if (rc != NO_ERROR) {
-                LOGE("Initializing PP manager failed");
-                return rc;
-            }
-            if (m_pHalPPManager != NULL) {
-                LOGH("HALPP is need, call QCameraHALPPManager::start() here");
-                rc = m_pHalPPManager->start();
-                if (rc != NO_ERROR) {
-                    LOGE("start PP manager failed");
-                    return rc;
-                }
-            }
+bool QCamera3PostProcessor::finishLifecycleOperation()
+{
+    pthread_mutex_lock(&mHDRJobLock);
+    mLifecycleOperationActive = false;
+    const bool cancelled = !mChannelStop;
+    const bool deferred = mStopDeferred;
+    mStopDeferred = false;
+    if (deferred) mStopCommandQueued = true;
+    pthread_mutex_unlock(&mHDRJobLock);
+    if (deferred) {
+        // The lifecycle operation has completed before this priority STOP can
+        // be consumed, including START's synchronous acknowledgement.
+        // Async STOP is allocation independent and cannot wait on callbacks.
+        int32_t rc = m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_STOP_DATA_PROC, FALSE, TRUE);
+        if (rc != NO_ERROR) {
+            pthread_mutex_lock(&mHDRJobLock);
+            mStopCommandQueued = false;
+            mChannelStop = true;
+            pthread_cond_broadcast(&mProcChStopCond);
+            pthread_mutex_unlock(&mHDRJobLock);
         }
     }
-    m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_START_DATA_PROC, TRUE, FALSE);
-    return rc;
+    return cancelled;
 }
 
 /*===========================================================================
@@ -362,12 +443,30 @@ int32_t QCamera3PostProcessor::start(const reprocess_config_t &config)
  *==========================================================================*/
 int32_t QCamera3PostProcessor::flush()
 {
+    std::unique_lock<std::mutex> lifecycle(mLifecycleLock, std::defer_lock);
+    for (;;) {
+        pthread_mutex_lock(&mHDRJobLock);
+        while (!mChannelStop && !mDeinitialized.load())
+            pthread_cond_wait(&mProcChStopCond, &mHDRJobLock);
+        pthread_mutex_unlock(&mHDRJobLock);
+        lifecycle.lock();
+        if (mDeinitialized.load()) return -ENODEV;
+        pthread_mutex_lock(&mHDRJobLock);
+        const bool stopped = mChannelStop;
+        if (stopped) mLifecycleOperationActive = true;
+        pthread_mutex_unlock(&mHDRJobLock);
+        if (stopped) break;
+        lifecycle.unlock();
+    }
+    auto finishFlush = [this](QCamera3PostProcessor *) { finishLifecycleOperation(); };
+    std::unique_ptr<QCamera3PostProcessor, decltype(finishFlush)> flushGuard(this, finishFlush);
+    abortHdrCapture();
     int32_t rc = NO_ERROR;
     qcamera_hal3_jpeg_data_t *jpeg_job =
             (qcamera_hal3_jpeg_data_t *)m_ongoingJpegQ.dequeue();
     while (jpeg_job != NULL) {
         rc = mJpegHandle.abort_job(jpeg_job->jobId);
-        releaseJpegJobData(jpeg_job);
+        releaseJpegData(jpeg_job, this);
         free(jpeg_job);
 
         jpeg_job = (qcamera_hal3_jpeg_data_t *)m_ongoingJpegQ.dequeue();
@@ -391,27 +490,84 @@ int32_t QCamera3PostProcessor::flush()
  *==========================================================================*/
 int32_t QCamera3PostProcessor::stop(bool isHDR)
 {
-    if ((m_pHalPPManager != NULL)) {
-        m_pHalPPManager->stop();
+    // Async STOP comes from the JPEG callback. It must never wait for the
+    // lifecycle lock held by deinit/STOP while those operations join callbacks.
+    std::unique_lock<std::mutex> lifecycle(mLifecycleLock, std::defer_lock);
+    if (!isHDR) lifecycle.lock();
+    if (mDeinitialized.load()) return NO_ERROR;
+    abortHdrCapture();
+    pthread_mutex_lock(&mHDRJobLock);
+    if (isHDR && mLifecycleOperationActive) {
+        mStopDeferred = true;
+        mChannelStop = false;
+        pthread_mutex_unlock(&mHDRJobLock);
+        return NO_ERROR;
     }
+    if (mStopCommandQueued) {
+        if (!isHDR) {
+            while (mStopCommandQueued)
+                pthread_cond_wait(&mProcChStopCond, &mHDRJobLock);
+        }
+        pthread_mutex_unlock(&mHDRJobLock);
+        return NO_ERROR;
+    }
+    mStopCommandQueued = true;
+    mChannelStop = false;
+    pthread_mutex_unlock(&mHDRJobLock);
+    int32_t rc = m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_STOP_DATA_PROC, !isHDR, TRUE);
+    if (rc != NO_ERROR) {
+        if (isHDR) {
+            // Async STOP survives allocation failure in QCameraCmdThread.
+            // An unlaunched/exiting worker leaves cleanup to deinit.
+            pthread_mutex_lock(&mHDRJobLock);
+            mStopCommandQueued = false;
+            mChannelStop = true;
+            pthread_cond_broadcast(&mProcChStopCond);
+            pthread_mutex_unlock(&mHDRJobLock);
+            return rc;
+        }
+        // No worker can drain an unaccepted STOP. Join it before the fallback.
+        m_dataProcTh.exit();
+        stopPostproc();
+    }
+    return rc;
+}
 
-    if(isHDR == true)
-        m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_STOP_DATA_PROC, FALSE, TRUE);
-    else
-        m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_STOP_DATA_PROC, TRUE, TRUE);
+void QCamera3PostProcessor::markStopPending()
+{
+    pthread_mutex_lock(&mHDRJobLock);
+    if (!mDeinitialized.load()) mChannelStop = false;
+    pthread_mutex_unlock(&mHDRJobLock);
+}
 
+void QCamera3PostProcessor::stopPostproc()
+{
     for (int8_t i = 0; i < m_ppChannelCnt; i++) {
         QCamera3Channel *pChannel = m_pReprocChannel[i];
-        if (pChannel != NULL ) {
-            pChannel->stop();
-            delete pChannel;
-            m_pReprocChannel[i] = NULL;
-        }
+        if (pChannel != NULL) pChannel->stop();
+    }
+    clearPostprocQueues();
+    // Queued owners may return CPP slots through these channel objects.
+    // Keep them alive until every releaser has completed.
+    for (int8_t i = 0; i < m_ppChannelCnt; i++) {
+        delete m_pReprocChannel[i];
+        m_pReprocChannel[i] = NULL;
     }
     m_ppChannelCnt = 0;
+    pthread_mutex_lock(&mCancelJobLock);
     mCancelpprocReqFrameList.clear();
+    pthread_mutex_unlock(&mCancelJobLock);
+    pthread_mutex_lock(&mHdrCaptureLock);
+    mHdrFrameStates.clear();
+    mHdrDiscardFrames.clear();
+    mHdrFailedFrames.clear();
+    pthread_mutex_unlock(&mHdrCaptureLock);
 
-    return NO_ERROR;
+    pthread_mutex_lock(&mHDRJobLock);
+    mStopCommandQueued = false;
+    mChannelStop = true;
+    pthread_cond_broadcast(&mProcChStopCond);
+    pthread_mutex_unlock(&mHDRJobLock);
 }
 
 /*===========================================================================
@@ -708,13 +864,19 @@ int32_t QCamera3PostProcessor::processData(mm_camera_super_buf_t *input,
             sizeof(qcamera_hal3_pp_buffer_t));
     if (NULL == pp_buffer) {
         LOGE("out of memory");
+        pthread_mutex_unlock(&mReprocJobLock);
         return NO_MEMORY;
     }
     memset(pp_buffer, 0, sizeof(*pp_buffer));
     pp_buffer->input = input;
     pp_buffer->output = output;
     pp_buffer->frameNumber = frameNumber;
-    if (!(m_inputMetaQ.isEmpty())) {
+    const bool cancelled = isQueuedFrameCancelled(frameNumber);
+    bool queued = true;
+    if (cancelled) {
+        queued = m_inputPPQ.enqueue((void *)pp_buffer);
+        m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_CANCEL_PP_FRAME, FALSE, FALSE);
+    } else if (!(m_inputMetaQ.isEmpty())) {
         qcamera_hal3_meta_pp_buffer_t *meta_job = isMetaMatched(frameNumber);
         if(meta_job != NULL) {
             ReprocessBuffer reproc;
@@ -724,27 +886,17 @@ int32_t QCamera3PostProcessor::processData(mm_camera_super_buf_t *input,
             LOGD("meta queue is not empty, do next job");
             m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_DO_NEXT_JOB, FALSE, FALSE);
         } else {
-            m_inputPPQ.enqueue((void *)pp_buffer);
+            queued = m_inputPPQ.enqueue((void *)pp_buffer);
         }
     } else {
         LOGD("metadata queue is empty");
-        m_inputPPQ.enqueue((void *)pp_buffer);
+        queued = m_inputPPQ.enqueue((void *)pp_buffer);
     }
     pthread_mutex_unlock(&mReprocJobLock);
-
-    if(mCancelpprocReqFrameList.size())
-    {
-       List<uint32_t>::iterator cancel_frame = mCancelpprocReqFrameList.begin();
-        while((cancel_frame != mCancelpprocReqFrameList.end()) && ((*cancel_frame) != frameNumber))
-        {
-            cancel_frame = mCancelpprocReqFrameList.erase(cancel_frame);
-        }
-
-        if(cancel_frame != mCancelpprocReqFrameList.end() && ((*cancel_frame) == frameNumber))
-        {
-            cancelFramePProc(frameNumber);
-            mCancelpprocReqFrameList.erase(cancel_frame);
-        }
+    if (!queued) {
+        releasePPInputData(pp_buffer, this);
+        free(pp_buffer);
+        return -ECANCELED;
     }
     return NO_ERROR;
 }
@@ -948,18 +1100,11 @@ int32_t QCamera3PostProcessor::processData(qcamera_fwk_input_pp_data_t *frame)
  *==========================================================================*/
 int32_t QCamera3PostProcessor::cancelFramePProc(uint32_t framenum)
 {
-    int rc = NO_ERROR;
-    pthread_mutex_lock(&mReprocJobLock);
-    if(!m_inputPPQ.isEmpty()){
-        LOGH("pp request cancel for frame : %d", framenum);
-        m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_CANCEL_PP_FRAME, FALSE, FALSE);
-        pthread_mutex_unlock(&mReprocJobLock);
-    } else {
-        LOGH("PP Frame queue is empty. cache cancel frame request %d", framenum);
-        mCancelpprocReqFrameList.push_back(framenum);
-        pthread_mutex_unlock(&mReprocJobLock);
+    if (isHdrCaptureFrame(framenum) || isDiscardedHdrFrame(framenum)) {
+        cancelHdrCapture(framenum);
+        return NO_ERROR;
     }
-    return rc;
+    return cancelQueuedFrame(framenum);
 }
 
 /*===========================================================================
@@ -984,14 +1129,20 @@ int32_t QCamera3PostProcessor::processPPMetadata(mm_camera_super_buf_t *reproc_m
     qcamera_hal3_meta_pp_buffer_t *ppMetaBuf =
         (qcamera_hal3_meta_pp_buffer_t *)malloc(sizeof(qcamera_hal3_meta_pp_buffer_t));
 
-    // enqueue to metadata input queue
-    if (ppMetaBuf) {
-        ppMetaBuf->metabuf = reproc_meta;
-        ppMetaBuf->metaFrameNumber = framenum;
-        ppMetaBuf->dropFrame = dropFrame;
+    if (!ppMetaBuf) {
+        pthread_mutex_unlock(&mReprocJobLock);
+        return NO_MEMORY;
     }
+    ppMetaBuf->metabuf = reproc_meta;
+    ppMetaBuf->metaFrameNumber = framenum;
+    ppMetaBuf->dropFrame = dropFrame;
+    const bool cancelled = isQueuedFrameCancelled(framenum);
+    bool queued = true;
     /* Need to send notifyError before meta for Error Buffer */
-    if (!(m_inputPPQ.isEmpty())) {
+    if (cancelled) {
+        queued = m_inputMetaQ.enqueue((void *)ppMetaBuf);
+        m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_CANCEL_PP_FRAME, FALSE, FALSE);
+    } else if (!(m_inputPPQ.isEmpty())) {
         qcamera_hal3_pp_buffer_t *reproc_job = isFrameMatched(framenum);
         if(reproc_job != NULL) {
             ReprocessBuffer reproc;
@@ -1001,13 +1152,18 @@ int32_t QCamera3PostProcessor::processPPMetadata(mm_camera_super_buf_t *reproc_m
             LOGD("pp queue is not empty, do next job");
             m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_DO_NEXT_JOB, FALSE, FALSE);
         } else {
-             m_inputMetaQ.enqueue((void *)ppMetaBuf);
+             queued = m_inputMetaQ.enqueue((void *)ppMetaBuf);
         }
     } else {
-             m_inputMetaQ.enqueue((void *)ppMetaBuf);
+             queued = m_inputMetaQ.enqueue((void *)ppMetaBuf);
        LOGD("pp queue is empty, not calling do next job");
     }
     pthread_mutex_unlock(&mReprocJobLock);
+    if (!queued) {
+        releaseMetadata(ppMetaBuf, this);
+        free(ppMetaBuf);
+        return -ECANCELED;
+    }
     return NO_ERROR;
 }
 
@@ -1255,27 +1411,665 @@ void QCamera3PostProcessor::processJpegData(jpeg_job_status_t status,
  *
  * NOTE       : The frame after reprocess need to send to jpeg encoding.
  *==========================================================================*/
-int32_t QCamera3PostProcessor::processPPData(mm_camera_super_buf_t *frame,
-        const metadata_buffer_t *p_metadata)
+bool QCamera3PostProcessor::matchPPJob(void *data, void *, void *match_data)
 {
-    qcamera_hal3_pp_data_t *job = (qcamera_hal3_pp_data_t *)m_ongoingPPQ.dequeue();
+    return static_cast<qcamera_hal3_pp_data_t *>(data)->frameNumber ==
+            *static_cast<uint32_t *>(match_data);
+}
+
+int32_t QCamera3PostProcessor::beginHdrCapture(const uint32_t frameIds[3],
+        uint32_t baseId, bool frontCamera)
+{
+    return beginBurstCapture(frameIds, 3, baseId, frontCamera, false);
+}
+
+int32_t QCamera3PostProcessor::beginLowLightCapture(const uint32_t frameIds[5],
+        uint32_t baseId, bool frontCamera)
+{
+    return beginBurstCapture(frameIds, 5, baseId, frontCamera, true);
+}
+
+int32_t QCamera3PostProcessor::beginStillCapture(const uint32_t frameIds[4],
+        uint32_t baseId, bool frontCamera, bool enhanceDetail)
+{
+    return beginBurstCapture(frameIds, 4, baseId, frontCamera, false, true, enhanceDetail);
+}
+
+int32_t QCamera3PostProcessor::beginDualCapture(uint32_t frameNumber, uint64_t token)
+{
+    if (!token || !m_parent->dualCapture()) return BAD_VALUE;
+    return beginBurstCapture(&frameNumber, 1, frameNumber, false, false, false, false, token);
+}
+
+void QCamera3PostProcessor::notifyDualFrameReady()
+{
+    // Driver/metadata callbacks never enter another channel's worker or locks.
+    m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_DO_NEXT_JOB, FALSE, FALSE);
+}
+
+int32_t QCamera3PostProcessor::beginBurstCapture(const uint32_t *frameIds,
+        unsigned count, uint32_t baseId, bool frontCamera, bool lowLight,
+        bool still, bool enhanceDetail, uint64_t dualToken, int32_t nativeMode)
+{
+    if (!frameIds || frameIds[0] != baseId || (still && lowLight) ||
+            (dualToken && (still || lowLight)) ||
+            count != (dualToken ? 1U : still ? 4U : lowLight ? 5U : 3U))
+            return BAD_VALUE;
+    for (unsigned i = 0; i < count; ++i)
+        for (unsigned j = 0; j < i; ++j)
+            if (frameIds[i] == frameIds[j]) return BAD_VALUE;
+    if (!(dualToken ? m_parent->dualCapture() != nullptr :
+            still ? QCamera3StillAlgo::isAvailable() :
+            lowLight ? QCamera3LowLightHdrAlgo::isAvailable() :
+            QCamera3HdrAlgo::isAvailable())) return -ENOSYS;
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    // Full-resolution CPU merges on ARM can exceed the old five-second wait.
+    // Match the per-burst JPEG watchdog while keeping a finite submission wait.
+    deadline.tv_sec += 30;
+    pthread_mutex_lock(&mHdrCaptureLock);
+    const auto previous = std::atomic_load(&mHdrCaptureState);
+    if (mHdrActive && previous && previous->dualToken && !mHdrBaseJob &&
+            m_parent->dualPostprocessor() != this && m_parent->dualCapture() &&
+            m_parent->dualCapture()->tokenFor(m_parent->getMyCamHandle(),
+                    previous->frameIds[0]) != previous->dualToken) {
+        // A silent auxiliary source can outlive the main JPEG fallback.
+        // Retire its canceled collection before accepting the next capture;
+        // late buffers remain tracked and are returned without a second JPEG.
+        cancelHdrCapture(previous->frameIds[0]);
+    }
+    while (mHdrActive) {
+        int rc = pthread_cond_timedwait(&mHdrCaptureCond, &mHdrCaptureLock, &deadline);
+        if (rc != 0) {
+            pthread_mutex_unlock(&mHdrCaptureLock);
+            return -rc;
+        }
+    }
+    memset(mHdrFrameIds, 0, sizeof(mHdrFrameIds));
+    memcpy(mHdrFrameIds, frameIds, count * sizeof(*frameIds));
+    memset(mHdrReceived, 0, sizeof(mHdrReceived));
+    memset(mHdrExposure, 0, sizeof(mHdrExposure));
+    memset(mHdrSensitivity, 0, sizeof(mHdrSensitivity));
+    memset(mHdrDrcGain, 0, sizeof(mHdrDrcGain));
+    memset(mHdrTimestamps, 0, sizeof(mHdrTimestamps));
+    memset(mHdrImages, 0, sizeof(mHdrImages));
+    mHdrBaseJob = NULL;
+    mHdrBaseFrame = NULL;
+    mHdrFrontCamera = frontCamera;
+    const auto state = std::make_shared<HdrCaptureState>(frameIds, count, lowLight,
+            still, enhanceDetail, dualToken, nativeMode);
+    if (dualToken && m_parent->dualPostprocessor() != this) state->outputPending = false;
+    for (unsigned i = 0; i < count; ++i) mHdrFrameStates[frameIds[i]] = state;
+    std::atomic_store(&mHdrCaptureState, state);
+    mHdrActive = true;
+    pthread_mutex_unlock(&mHdrCaptureLock);
+    return NO_ERROR;
+}
+
+bool QCamera3PostProcessor::isHdrCaptureFrame(uint32_t frameNumber)
+{
+    pthread_mutex_lock(&mHdrCaptureLock);
+    const auto state = std::atomic_load(&mHdrCaptureState);
+    bool found = false;
+    for (unsigned i = 0; mHdrActive && i < state->count; ++i)
+        found |= mHdrFrameIds[i] == frameNumber;
+    pthread_mutex_unlock(&mHdrCaptureLock);
+    return found;
+}
+
+bool QCamera3PostProcessor::isDiscardedHdrFrame(uint32_t frameNumber)
+{
+    pthread_mutex_lock(&mHdrCaptureLock);
+    const auto tracked = mHdrFrameStates.find(frameNumber);
+    bool found = tracked != mHdrFrameStates.end() &&
+            tracked->second->stage != HdrCaptureState::COLLECTING;
+    for (List<uint32_t>::iterator it = mHdrDiscardFrames.begin();
+            !found && it != mHdrDiscardFrames.end(); ++it) found = *it == frameNumber;
+    pthread_mutex_unlock(&mHdrCaptureLock);
+    return found;
+}
+
+bool QCamera3PostProcessor::hasPendingHdrCapture(uint32_t frameNumber)
+{
+    pthread_mutex_lock(&mHdrCaptureLock);
+    const auto current = std::atomic_load(&mHdrCaptureState);
+    bool found = false;
+    for (unsigned i = 0; mHdrActive && i < current->count; ++i)
+        found |= frameNumber == mHdrFrameIds[i];
+    const auto tracked = mHdrFrameStates.find(frameNumber);
+    if (tracked != mHdrFrameStates.end()) {
+        const auto &state = tracked->second;
+        found |= state->outputPending && state->frameIds[0] == frameNumber;
+    }
+    for (List<uint32_t>::iterator it = mHdrFailedFrames.begin();
+            !found && it != mHdrFailedFrames.end(); ++it) found = *it == frameNumber;
+    pthread_mutex_unlock(&mHdrCaptureLock);
+    return found;
+}
+
+void QCamera3PostProcessor::finishHdrGroupLocked()
+{
+    const auto state = std::atomic_load(&mHdrCaptureState);
+    state->stage = state->cancelled.load() ? HdrCaptureState::FAILED :
+            HdrCaptureState::READY;
+    for (unsigned i = 0; i < state->count; ++i) {
+        free(mHdrImages[i].data);
+        mHdrImages[i].data = NULL;
+        mHdrDiscardFrames.push_back(mHdrFrameIds[i]);
+        if (state->cancelled.load()) mHdrFailedFrames.push_back(mHdrFrameIds[i]);
+    }
+    // Recent duplicates are bounded; actual outstanding owners are retained in
+    // mHdrFrameStates until PP and framework output ownership are both gone.
+    while (mHdrDiscardFrames.size() > 96)
+        mHdrDiscardFrames.erase(mHdrDiscardFrames.begin());
+    while (mHdrFailedFrames.size() > 96)
+        mHdrFailedFrames.erase(mHdrFailedFrames.begin());
+    mHdrBaseJob = NULL;
+    mHdrBaseFrame = NULL;
+    mHdrActive = false;
+    pthread_cond_broadcast(&mHdrCaptureCond);
+}
+
+void QCamera3PostProcessor::abortHdrCapture()
+{
+    const auto state = std::atomic_load(&mHdrCaptureState);
+    if (state) cancelHdrCapture(state->frameIds[0]);
+}
+
+bool QCamera3PostProcessor::cancelHdrCapture(uint32_t frameNumber)
+{
+    // Signal only this immutable group's token before waiting for a core call.
+    // A newer begin cannot clear or inherit the old group's cancellation.
+    auto state = std::atomic_load(&mHdrCaptureState);
+    bool matches = false;
+    for (unsigned i = 0; state && i < state->count; ++i)
+        matches |= state->frameIds[i] == frameNumber;
+    if (matches) {
+        state->cancelled.store(true);
+        if (state->dualToken && m_parent->dualCapture())
+            m_parent->dualCapture()->cancel(state->dualToken);
+    }
+    pthread_mutex_lock(&mHdrCaptureLock);
+    if (!matches) {
+        const auto tracked = mHdrFrameStates.find(frameNumber);
+        state = tracked != mHdrFrameStates.end() ? tracked->second : nullptr;
+    }
+    if (state && state == std::atomic_load(&mHdrCaptureState) && mHdrActive) {
+        state->cancelled.store(true);
+        discardHdrFrame(mHdrBaseJob, mHdrBaseFrame);
+        finishHdrGroupLocked();
+    }
+    bool cancelled = state && state->stage == HdrCaptureState::FAILED;
+    if (!state) {
+        for (auto it = mHdrFailedFrames.begin(); it != mHdrFailedFrames.end(); ++it)
+            cancelled |= *it == frameNumber;
+    }
+    // A JPEG already handed to the encoder retains its output buffer. This
+    // return value is the boundary used by PicChannel's timeout error return.
+    pthread_mutex_unlock(&mHdrCaptureLock);
+    if (cancelled && state) {
+        // The cancellation queue has its own lock. Inputs still waiting for
+        // metadata also need to release their source slots; a CPP callback
+        // cannot do that for work which was never submitted.
+        for (unsigned i = 0; i < state->count; ++i)
+            cancelQueuedFrame(state->frameIds[i]);
+    }
+    return cancelled;
+}
+
+void QCamera3PostProcessor::retireHdrFrame(uint32_t frameNumber)
+{
+    pthread_mutex_lock(&mHdrCaptureLock);
+    const auto tracked = mHdrFrameStates.find(frameNumber);
+    if (tracked != mHdrFrameStates.end()) {
+        const auto state = tracked->second;
+        for (unsigned i = 0; i < state->count; ++i) {
+            if (state->frameIds[i] == frameNumber) {
+                state->pending[i] = false;
+                if (i != 0 || !state->outputPending) mHdrFrameStates.erase(tracked);
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&mHdrCaptureLock);
+}
+
+void QCamera3PostProcessor::completeHdrOutput(uint32_t frameNumber)
+{
+    pthread_mutex_lock(&mHdrCaptureLock);
+    const auto tracked = mHdrFrameStates.find(frameNumber);
+    if (tracked != mHdrFrameStates.end() && tracked->second->frameIds[0] == frameNumber) {
+        const auto state = tracked->second;
+        state->outputPending = false;
+        if (!state->pending[0]) mHdrFrameStates.erase(tracked);
+    }
+    for (auto it = mHdrFailedFrames.begin(); it != mHdrFailedFrames.end();) {
+        if (*it == frameNumber) it = mHdrFailedFrames.erase(it);
+        else ++it;
+    }
+    pthread_mutex_unlock(&mHdrCaptureLock);
+}
+
+void QCamera3PostProcessor::discardHdrFrame(qcamera_hal3_pp_data_t *job,
+        mm_camera_super_buf_t *frame)
+{
+    if (frame && job) releaseOfflineBuffersForFrame(job->frameNumber);
+    if (frame) {
+        for (int8_t i = 0; i < m_ppChannelCnt; ++i) {
+            if (m_pReprocChannel[i] &&
+                    m_pReprocChannel[i]->getMyHandle() == frame->ch_id) {
+                m_pReprocChannel[i]->bufDone(frame);
+                break;
+            }
+        }
+        if (!job || frame != job->src_frame) free(frame);
+    }
+    if (job) {
+        retireHdrFrame(job->frameNumber);
+        if (job->src_frame) m_parent->freeBufferForFrame(job->src_frame);
+        if (job->reprocessed_src_frame && job->reprocessed_src_frame != frame) {
+            for (int8_t i = 0; i < m_ppChannelCnt; ++i) {
+                if (m_pReprocChannel[i] && m_pReprocChannel[i]->getMyHandle() ==
+                        job->reprocessed_src_frame->ch_id) {
+                    m_pReprocChannel[i]->bufDone(job->reprocessed_src_frame);
+                    break;
+                }
+            }
+            free(job->reprocessed_src_frame);
+        }
+        free(job->jpeg_settings);
+        if (job->ppOutput_jpeg_settings != job->jpeg_settings)
+            free(job->ppOutput_jpeg_settings);
+        releasePPJobData(job);
+        free(job);
+    }
+}
+
+bool QCamera3PostProcessor::getHdrImage(mm_camera_super_buf_t *frame,
+        QCamera3HdrAlgo::Image &image, QCamera3StreamMem *&memory)
+{
+    memset(&image, 0, sizeof(image));
+    memory = NULL;
+    if (!frame || frame->num_bufs != 1 || !frame->bufs[0]) return false;
+    mm_camera_buf_def_t *buf = frame->bufs[0];
+    QCamera3Stream *stream = NULL;
+    for (int8_t i = 0; i < m_ppChannelCnt; ++i) {
+        if (m_pReprocChannel[i] && m_pReprocChannel[i]->getMyHandle() == frame->ch_id) {
+            stream = m_pReprocChannel[i]->getStreamByHandle(buf->stream_id);
+            break;
+        }
+    }
+    if (!stream && m_parent) stream = m_parent->getStreamByHandle(buf->stream_id);
+    if (!stream) return false;
+    cam_dimension_t dim = {};
+    cam_frame_len_offset_t layout = {};
+    cam_format_t format;
+    if (stream->getFrameDimension(dim) != NO_ERROR ||
+            stream->getFrameOffset(layout) != NO_ERROR ||
+            stream->getFormat(format) != NO_ERROR || format != CAM_FORMAT_YUV_420_NV21 ||
+            layout.num_planes != 2 || dim.width <= 0 || dim.height <= 0) return false;
+    memory = stream->getStreamBufs();
+    if (!memory) return false;
+    const ssize_t size = memory->getSize(buf->buf_idx);
+    if (size <= 0 || !buf->buffer || layout.frame_len > buf->frame_len ||
+            buf->frame_len > uint64_t(size) ||
+            uint64_t(layout.mp[0].len) + layout.mp[1].len > layout.frame_len ||
+            layout.mp[0].offset >= layout.mp[0].len ||
+            layout.mp[1].offset >= layout.mp[1].len ||
+            layout.mp[0].scanline < dim.height ||
+            layout.mp[1].scanline < dim.height / 2) return false;
+    image.data = static_cast<uint8_t *>(buf->buffer);
+    image.length = size_t(size);
+    image.width = dim.width;
+    image.height = dim.height;
+    image.yOffset = layout.mp[0].offset;
+    image.uvOffset = size_t(layout.mp[0].len) + layout.mp[1].offset;
+    image.yStride = layout.mp[0].stride_in_bytes > 0 ?
+            layout.mp[0].stride_in_bytes : layout.mp[0].stride;
+    image.uvStride = layout.mp[1].stride_in_bytes > 0 ?
+            layout.mp[1].stride_in_bytes : layout.mp[1].stride;
+    image.yScanline = layout.mp[0].scanline;
+    image.uvScanline = layout.mp[1].scanline;
+    if (!QCamera3HdrAlgo::validImage(image)) return false;
+    // In addition to the allocation bound, each visible plane must fit its own
+    // length. A bad Y extent cannot borrow space belonging to the UV plane.
+    if (uint64_t(image.yOffset) + uint64_t(image.yStride) * (image.height - 1) +
+            image.width > layout.mp[0].len ||
+            uint64_t(layout.mp[1].offset) + uint64_t(image.uvStride) *
+            (image.height / 2 - 1) + image.width > layout.mp[1].len) return false;
+    return memory->invalidateCache(buf->buf_idx) == NO_ERROR;
+}
+
+bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
+        mm_camera_super_buf_t *&frame)
+{
+    pthread_mutex_lock(&mHdrCaptureLock);
+    const auto state = std::atomic_load(&mHdrCaptureState);
+    int slot = -1;
+    for (unsigned i = 0; mHdrActive && i < state->count; ++i)
+        if (job->frameNumber == mHdrFrameIds[i]) slot = i;
+    if (slot < 0) {
+        bool discard = mHdrFrameStates.count(job->frameNumber) != 0;
+        for (List<uint32_t>::iterator it = mHdrDiscardFrames.begin();
+                it != mHdrDiscardFrames.end(); ++it) discard |= *it == job->frameNumber;
+        if (discard) discardHdrFrame(job, frame);
+        pthread_mutex_unlock(&mHdrCaptureLock);
+        return discard;
+    }
+    if (mHdrReceived[slot]) {
+        discardHdrFrame(job, frame);
+        pthread_mutex_unlock(&mHdrCaptureLock);
+        return true;
+    }
+    mHdrReceived[slot] = true;
+    QCamera3HdrAlgo::Image source;
+    QCamera3StreamMem *memory;
+    if (getHdrImage(frame, source, memory)) {
+        const uint64_t ySize = uint64_t(source.width) * source.height;
+        const uint64_t size = ySize + ySize / 2;
+        if (size <= SIZE_MAX) {
+            QCamera3HdrAlgo::Image &copy = mHdrImages[slot];
+            copy = source;
+            copy.data = static_cast<uint8_t *>(malloc(size_t(size)));
+            copy.length = size_t(size);
+            copy.yOffset = 0;
+            copy.uvOffset = size_t(ySize);
+            copy.yStride = copy.uvStride = source.width;
+            copy.yScanline = source.height;
+            copy.uvScanline = source.height / 2;
+            if (copy.data) {
+                for (uint32_t row = 0; row < source.height; ++row)
+                    memcpy(copy.data + size_t(row) * copy.yStride,
+                            source.data + source.yOffset + size_t(row) * source.yStride,
+                            source.width);
+                for (uint32_t row = 0; row < source.height / 2; ++row)
+                    memcpy(copy.data + copy.uvOffset + size_t(row) * copy.uvStride,
+                            source.data + source.uvOffset + size_t(row) * source.uvStride,
+                            source.width);
+            }
+        }
+    }
+    if (job->metadata) {
+        int64_t exposure = 0;
+        int32_t sensitivity = 0;
+        IF_META_AVAILABLE(int64_t, exposureValue, CAM_INTF_META_SENSOR_EXPOSURE_TIME, job->metadata) {
+            exposure = *exposureValue;
+        }
+        IF_META_AVAILABLE(int32_t, sensitivityValue, CAM_INTF_META_SENSOR_SENSITIVITY, job->metadata) {
+            sensitivity = *sensitivityValue;
+        }
+        if (exposure > 0 && sensitivity > 0)
+            mHdrExposure[slot] = double(exposure) * sensitivity;
+        mHdrSensitivity[slot] = sensitivity;
+        IF_META_AVAILABLE(int64_t, frameTimestamp, CAM_INTF_META_SENSOR_TIMESTAMP,
+                job->metadata) {
+            if (*frameTimestamp > 0) mHdrTimestamps[slot] = *frameTimestamp;
+        }
+        if (job->metadata->oppo_algorithm.llhdr_drc_valid)
+            mHdrDrcGain[slot] = job->metadata->oppo_algorithm.llhdr_drc_gain;
+    }
+    if (slot == 0) {
+        mHdrBaseJob = job;
+        mHdrBaseFrame = frame;
+    } else {
+        // CPP may have fewer output slots than the burst's image count. Return each internal
+        // output immediately after copying, allowing the next exposure to run.
+        discardHdrFrame(job, frame);
+    }
+    if (state->dualToken) {
+        QCamera3DualCapture *capture = m_parent->dualCapture();
+        QCamera3PostProcessor *owner = m_parent->dualPostprocessor();
+        const int32_t rc = capture && QCamera3HdrAlgo::validImage(mHdrImages[0]) ?
+                capture->submitImage(state->dualToken, m_parent->getMyCamHandle(),
+                        state->frameIds[0], mHdrImages[0]) : -EINVAL;
+        if (rc != NO_ERROR && capture) capture->cancel(state->dualToken);
+        if (owner != this) {
+            // The shared collector has copied the tele input. No auxiliary
+            // framework output or JPEG ownership crosses into the main channel.
+            discardHdrFrame(mHdrBaseJob, mHdrBaseFrame);
+            finishHdrGroupLocked();
+        }
+        if (owner) owner->notifyDualFrameReady();
+        pthread_mutex_unlock(&mHdrCaptureLock);
+        return true;
+    }
+    for (unsigned i = 0; i < state->count; ++i)
+        if (!mHdrReceived[i]) {
+            pthread_mutex_unlock(&mHdrCaptureLock);
+            return true;
+        }
+    job = mHdrBaseJob;
+    frame = mHdrBaseFrame;
+    int32_t rc = -EINVAL;
+    const bool superPhoto = state->still && job->jpeg_settings &&
+            job->jpeg_settings->native_still_mode == OPPO_NATIVE_SUPERPHOTO;
+    const char *algorithm = superPhoto ? "VDSuperPhoto" :
+            state->still ? "MFNR" : state->lowLight ? "LLHDR" : "HDR";
+    QCamera3HdrAlgo::Image destination;
+    bool settled = true;
+    for (unsigned i = 0; i < state->count; ++i) settled &= mHdrExposure[i] > 0;
+    if (state->still) {
+        for (unsigned i = 1; i < state->count; ++i)
+            settled &= mHdrExposure[i] >= mHdrExposure[0] * 0.90 &&
+                    mHdrExposure[i] <= mHdrExposure[0] * 1.10;
+    } else if (state->lowLight) {
+        for (unsigned i = 1; i < 4; ++i)
+            settled &= mHdrExposure[i] >= mHdrExposure[0] * 0.85 &&
+                    mHdrExposure[i] <= mHdrExposure[0] * 1.15;
+        settled &= mHdrExposure[4] >= mHdrExposure[0] * 0.125 &&
+                mHdrExposure[4] <= mHdrExposure[0] * 0.5;
+    } else {
+        settled &= mHdrExposure[1] < mHdrExposure[0] * 0.95 &&
+                mHdrExposure[2] > mHdrExposure[0] * 1.05;
+    }
+    if (!settled) {
+        LOGE("HAL3 burst exposure bracket did not settle; returning base JPEG");
+    } else if (getHdrImage(frame, destination, memory)) {
+        if (state->still) {
+            if (superPhoto) {
+                QCamera3HardwareInterface *hardware =
+                        static_cast<QCamera3HardwareInterface *>(m_parent->mUserData);
+                const char *sensor = hardware ? hardware->getOppoSensorName() : nullptr;
+                rc = sensor ? QCamera3StockSuperPhoto::process(mHdrImages,
+                        state->count, destination, sensor,
+                        mHdrSensitivity[0], mHdrFrontCamera, &state->cancelled) : -EINVAL;
+            } else {
+                QCamera3StillAlgo::Options options;
+                options.referenceIndex = 0; // Framework metadata belongs to base.
+                options.enhanceDetails = state->enhanceDetail;
+                QCamera3StillAlgo::Result result;
+                rc = QCamera3StillAlgo::process(mHdrImages, state->count, destination,
+                        options, &result, &state->cancelled);
+                if (rc == NO_ERROR)
+                    LOGI("HAL3 still fusion accepted %u/%u frames", result.acceptedFrames, state->count);
+            }
+        } else {
+            rc = state->lowLight ? QCamera3LowLightHdrAlgo::process(mHdrImages,
+                destination, mHdrSensitivity[0], mHdrDrcGain[0],
+                mHdrFrontCamera ? 1 : 0, &state->cancelled) :
+                QCamera3HdrAlgo::process(mHdrImages, destination, mHdrFrontCamera,
+                    &state->cancelled);
+        }
+        if (rc == NO_ERROR && state->nativeMode == 0 && !state->lowLight && !state->still &&
+                job->metadata) {
+            bool denoise = false, sharpen = false;
+            IF_META_AVAILABLE(uint32_t, mode, CAM_INTF_META_NOISE_REDUCTION_MODE, job->metadata) {
+                denoise = *mode == ANDROID_NOISE_REDUCTION_MODE_HIGH_QUALITY;
+            }
+            IF_META_AVAILABLE(cam_edge_application_t, edge, CAM_INTF_META_EDGE_MODE, job->metadata) {
+                sharpen = edge->edge_mode != ANDROID_EDGE_MODE_OFF;
+            }
+            if (denoise) {
+                const int32_t asd = QCamera3HdrDenoise::process(destination,
+                        mHdrSensitivity[0], sharpen, &state->cancelled);
+                if (asd != NO_ERROR)
+                    LOGW("HAL3 NCF/ASD stage unavailable (%d); keeping merged HDR", asd);
+            }
+        }
+        if (rc == NO_ERROR) {
+            rc = memory->cleanCache(frame->bufs[0]->buf_idx);
+            if (rc != NO_ERROR) {
+                const QCamera3HdrAlgo::Image &base = mHdrImages[0];
+                for (uint32_t row = 0; row < base.height; ++row)
+                    memcpy(destination.data + destination.yOffset + size_t(row) * destination.yStride,
+                            base.data + size_t(row) * base.yStride, base.width);
+                for (uint32_t row = 0; row < base.height / 2; ++row)
+                    memcpy(destination.data + destination.uvOffset + size_t(row) * destination.uvStride,
+                            base.data + base.uvOffset + size_t(row) * base.uvStride, base.width);
+                if (memory->cleanCache(frame->bufs[0]->buf_idx) != NO_ERROR) {
+                    LOGE("HAL3 burst base fallback cache synchronization failed");
+                    state->cancelled.store(true);
+                }
+            }
+        }
+    }
+    if (rc != NO_ERROR) {
+        LOGE("HAL3 %s fusion failed (%d); returning unfused base JPEG",
+                algorithm, rc);
+    } else {
+        LOGI("HAL3 %s fused frame %u using %u inputs",
+                algorithm, job->frameNumber, state->count);
+    }
+    nativeAlgorithmTrace(job->jpeg_settings, algorithm, rc, job->frameNumber, state->count,
+            static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
+    const bool discard = state->cancelled.load();
+    if (discard) discardHdrFrame(job, frame);
+    finishHdrGroupLocked();
+    pthread_mutex_unlock(&mHdrCaptureLock);
+    return discard;
+}
+
+bool QCamera3PostProcessor::fallbackDualCapture(uint32_t frameNumber)
+{
+    // The output watchdog may expire while the auxiliary camera is silent.
+    // Transfer the retained main frame to JPEG before timeout reclaims its
+    // framework buffer. The recursive group lock serializes flush and worker.
+    pthread_mutex_lock(&mHdrCaptureLock);
+    const auto state = std::atomic_load(&mHdrCaptureState);
+    QCamera3DualCapture *capture = m_parent->dualCapture();
+    bool handedOff = false;
+    if (mHdrActive && state && state->dualToken && state->frameIds[0] == frameNumber &&
+            !state->cancelled.load() && mHdrBaseJob && capture &&
+            m_parent->dualPostprocessor() == this) {
+        capture->cancel(state->dualToken);
+        processDualCapture();
+        handedOff = state->stage == HdrCaptureState::HANDED_OFF;
+    }
+    pthread_mutex_unlock(&mHdrCaptureLock);
+    return handedOff;
+}
+
+void QCamera3PostProcessor::processDualCapture()
+{
+    pthread_mutex_lock(&mHdrCaptureLock);
+    const auto state = std::atomic_load(&mHdrCaptureState);
+    QCamera3DualCapture *capture = m_parent->dualCapture();
+    if (!mHdrActive || !state || !state->dualToken || !mHdrBaseJob ||
+            m_parent->dualPostprocessor() != this || !capture) {
+        pthread_mutex_unlock(&mHdrCaptureLock);
+        return;
+    }
+    const bool alive = capture->tokenFor(m_parent->getMyCamHandle(), state->frameIds[0]) ==
+            state->dualToken;
+    if (alive && !capture->isReady(state->dualToken) && !state->cancelled.load()) {
+        pthread_mutex_unlock(&mHdrCaptureLock);
+        return;
+    }
+    qcamera_hal3_pp_data_t *job = mHdrBaseJob;
+    mm_camera_super_buf_t *frame = mHdrBaseFrame;
+    QCamera3HdrAlgo::Image destination;
+    QCamera3StreamMem *memory = nullptr;
+    const bool destinationValid = getHdrImage(frame, destination, memory);
+    int32_t rc = alive && destinationValid ?
+            capture->process(state->dualToken, destination) : -ECANCELED;
+    if (rc == NO_ERROR) rc = memory->cleanCache(frame->bufs[0]->buf_idx);
+    bool fallback = false;
+    if (rc != NO_ERROR && !state->cancelled.load() && destinationValid &&
+            QCamera3HdrAlgo::validImage(mHdrImages[0])) {
+        // The collector/core commits only a successful result. Restore the
+        // owned main image as well when cache synchronization failed after a
+        // successful merge. A failed pair must still produce one base JPEG.
+        const auto &base = mHdrImages[0];
+        if (base.width == destination.width && base.height == destination.height) {
+            for (uint32_t row = 0; row < base.height; ++row)
+                memcpy(destination.data + destination.yOffset + size_t(row) * destination.yStride,
+                        base.data + base.yOffset + size_t(row) * base.yStride, base.width);
+            for (uint32_t row = 0; row < base.height / 2; ++row)
+                memcpy(destination.data + destination.uvOffset + size_t(row) * destination.uvStride,
+                        base.data + base.uvOffset + size_t(row) * base.uvStride, base.width);
+            fallback = memory->cleanCache(frame->bufs[0]->buf_idx) == NO_ERROR;
+        }
+    }
+    capture->cancel(state->dualToken);
+    if (state->cancelled.load() || (rc != NO_ERROR && !fallback)) {
+        // Flush/cancellation must never deliver a late successful output.
+        state->cancelled.store(true);
+        discardHdrFrame(job, frame);
+        LOGE("HAL3 dual capture has no deliverable main frame %u: %d", state->frameIds[0], rc);
+        finishHdrGroupLocked();
+    } else {
+        LOGI("HAL3 dual capture frame %u: status %d, main fallback %d",
+                job->frameNumber, rc, fallback);
+        // The mode-8 disparity-relight route was deleted with the 2026-10-17
+        // B2-b/B2-c batch, so the paired collector is always the bokeh core.
+        const char *algorithm = "ArcSoftDualBokeh";
+        nativeAlgorithmTrace(job->jpeg_settings, algorithm, rc, job->frameNumber, 2,
+                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
+        finishHdrGroupLocked();
+        queueJpegFrame(job, frame, nullptr);
+    }
+    pthread_mutex_unlock(&mHdrCaptureLock);
+}
+
+int32_t QCamera3PostProcessor::processPPData(mm_camera_super_buf_t *frame,
+        const metadata_buffer_t *p_metadata, uint32_t frameNumber)
+{
+    qcamera_hal3_pp_data_t *job = static_cast<qcamera_hal3_pp_data_t *>(
+            frameNumber == UINT32_MAX ? m_ongoingPPQ.dequeue() :
+            m_ongoingPPQ.dequeue(matchPPJob, &frameNumber));
     qcamera_hal3_pp_data_t *pending_job;
-    QCamera3HardwareInterface* hal_obj = (QCamera3HardwareInterface*)m_parent->mUserData;
-    bool needHalPP = hal_obj->needHALPP();
-    LOGH("needHalPP:%d", needHalPP);
     ATRACE_INT("Camera:Reprocess", 0);
     if (job == NULL || ((NULL == job->src_frame) && (NULL == job->fwk_src_frame))) {
         LOGE("Cannot find reprocess job");
+        // Every orphan output still owns a CPP slot, regardless of how old its
+        // frame number is. Return it even after recent duplicate records expire.
+        discardHdrFrame(job, frame);
         return BAD_VALUE;
     }
-    LOGD("jpeg settings is :%p and %d",job->jpeg_settings, m_ongoingPPQ.getCurrentSize());
-    if (job->jpeg_settings == NULL  && !m_parent->m_bQuadraChannel)
-    {
-        //If needHALPP is true, checking for ouput jpeg settings != NULL
-        if(!hal_obj->needHALPP() || (job->ppOutput_jpeg_settings == NULL)) {
-            LOGE("Cannot find jpeg settings");
-            return BAD_VALUE;
+    const bool hal3Hdr = isHdrCaptureFrame(job->frameNumber) ||
+            isDiscardedHdrFrame(job->frameNumber);
+    // Keep abort/flush from reclaiming the base between collection and JPEG
+    // queue ownership transfer. Helpers also take this recursive group lock.
+    struct HdrHandoffLock {
+        pthread_mutex_t *mutex;
+        explicit HdrHandoffLock(pthread_mutex_t *m) : mutex(m) {
+            if (mutex) pthread_mutex_lock(mutex);
         }
+        ~HdrHandoffLock() { if (mutex) pthread_mutex_unlock(mutex); }
+    } hdrHandoff(hal3Hdr ? &mHdrCaptureLock : NULL);
+    std::shared_ptr<HdrCaptureState> hdrState;
+    if (hal3Hdr) {
+        const auto tracked = mHdrFrameStates.find(job->frameNumber);
+        if (tracked != mHdrFrameStates.end()) hdrState = tracked->second;
+    }
+    if (hal3Hdr && (job->pp_ch_idx + 1) >= m_ppChannelCnt) {
+        // The original matched sensor result owns exposure, ISO and DRC.
+        // Offline CPP metadata may be partial; it cannot replace those inputs.
+        if (collectHdrFrame(job, frame)) return NO_ERROR;
+        // The final arriving frame need not be the base exposure. Its metadata
+        // must not overwrite the base frame's metadata before JPEG encoding.
+        p_metadata = NULL;
+    }
+    LOGD("jpeg settings is :%p and %d",job->jpeg_settings, m_ongoingPPQ.getCurrentSize());
+    if (job->jpeg_settings == NULL && !m_parent->m_bQuadraChannel &&
+            !(hal3Hdr && (job->pp_ch_idx + 1) < m_ppChannelCnt)) {
+        LOGE("Cannot find jpeg settings");
+        if (hal3Hdr) {
+            cancelHdrCapture(job->frameNumber);
+            if (hdrState) hdrState->stage = HdrCaptureState::FAILED;
+            discardHdrFrame(job, frame);
+        }
+        return BAD_VALUE;
     }
 
     bool hdr_snapshot = FALSE;
@@ -1298,94 +2092,6 @@ int32_t QCamera3PostProcessor::processPPData(mm_camera_super_buf_t *frame,
         }
     }
 
-    if ((m_pHalPPManager != NULL) && needHalPP &&
-                (hal_obj->getHalPPType() != CAM_HAL_PP_TYPE_NONE)) {
-        qcamera_hal_pp_data_t *hal_pp_job =
-            (qcamera_hal_pp_data_t*) malloc(sizeof(qcamera_hal_pp_data_t));
-        if (hal_pp_job == NULL) {
-            LOGE("No memory for qcamera_hal_pp_data_t data");
-            return NO_MEMORY;
-        }
-        memset(hal_pp_job, 0, sizeof(qcamera_hal_pp_data_t));
-
-
-        // find snapshot frame
-        QCamera3Channel * srcChannel = getChannelByHandle(frame->ch_id);
-        if (srcChannel == NULL) {
-            LOGE("No corresponding channel (ch_id = %d) exist, return here",
-                frame->ch_id);
-            return BAD_VALUE;
-        }
-        QCamera3Stream *pSnapStream = NULL;
-        for (uint32_t i = 0; i < frame->num_bufs; i++) {
-            QCamera3Stream *pStream =
-                srcChannel->getStreamByHandle(frame->bufs[i]->stream_id);
-            if ((pStream != NULL) &&
-                (pStream->getMyType() == CAM_STREAM_TYPE_SNAPSHOT ||
-                 pStream->getMyType() == CAM_STREAM_TYPE_OFFLINE_PROC)) {
-                pSnapStream = pStream;
-                break;
-            }
-        }
-
-        //get snapshot offset info
-        cam_frame_len_offset_t snap_offset, meta_offset;
-        memset(&snap_offset, 0, sizeof(cam_frame_len_offset_t));
-        memset(&meta_offset, 0, sizeof(cam_frame_len_offset_t));
-        if (pSnapStream != NULL) {
-            pSnapStream->getFrameOffset(snap_offset);
-        }
-
-        // find meta frame
-        srcChannel = getChannelByHandle(job->src_frame->ch_id);
-        if (srcChannel == NULL) {
-            LOGE("No corresponding channel (ch_id = %d) exist, return here",
-                job->src_frame->ch_id);
-            return BAD_VALUE;
-        }
-        QCamera3Stream *pMetaStream = NULL;
-        for (uint32_t i = 0; i < job->src_frame->num_bufs; i++) {
-            QCamera3Stream *pStream =
-                srcChannel->getStreamByHandle(frame->bufs[i]->stream_id);
-            if ((pStream != NULL) &&
-                (pStream->getMyType() == CAM_STREAM_TYPE_SNAPSHOT ||
-                 pStream->getMyType() == CAM_STREAM_TYPE_OFFLINE_PROC)) {
-                pMetaStream = pStream;
-                break;
-            }
-        }
-        if (pMetaStream != NULL) {
-            pMetaStream->getFrameOffset(meta_offset);
-        }
-
-        hal_pp_job->frame = frame;
-        hal_pp_job->snap_offset = snap_offset;
-        hal_pp_job->meta_offset = meta_offset;
-        hal_pp_job->frameIndex = frame->bufs[0]->frame_idx;
-        hal_pp_job->src_reproc_frame = job ? job->src_frame : NULL;
-        hal_pp_job->metadata = job ? job->metadata : NULL;
-        hal_pp_job->jpeg_settings = job ? job->jpeg_settings : NULL;
-        hal_pp_job->output_jpeg_settings = job ? job->ppOutput_jpeg_settings : NULL;
-        hal_pp_job->src_metadata = job ? job->src_metadata : NULL;
-        hal_pp_job->pUserData = this;
-        //adding blur information for BOKEH process.
-        if(hal_pp_job->metadata != NULL)
-        {
-            QCamera3HardwareInterface * hal_obj = (QCamera3HardwareInterface *)m_parent->mUserData;
-            uint32_t blurlevel = hal_obj->getBlurLevel();
-            cam_rtb_blur_info_t blurInfo;
-            blurInfo.blur_level = blurlevel;
-            blurInfo.blur_max_value = MAX_BLUR;
-            blurInfo.blur_min_value = MIN_BLUR;
-            ADD_SET_PARAM_ENTRY_TO_BATCH(hal_pp_job->metadata,
-                                         CAM_INTF_PARAM_BOKEH_BLUR_LEVEL, blurInfo);
-        }
-        LOGH("Feeding input to Manager");
-        m_pHalPPManager->feedInput(hal_pp_job);
-        free(job);
-        return NO_ERROR;
-    }
-
     if (job->jpeg_settings != NULL && job->jpeg_settings->zsl_snapshot) {
         m_parent->freeBufferForFrame(job->src_frame);
         job->src_frame = NULL;
@@ -1403,24 +2109,59 @@ int32_t QCamera3PostProcessor::processPPData(mm_camera_super_buf_t *frame,
             }
         } else if (job->src_frame != NULL) {
             LOGD("reprocess for non-fwk input frame.");
-            if (p_metadata != NULL && job->metadata != NULL) {
+            if (!hal3Hdr && p_metadata != NULL && job->metadata != NULL) {
                 memcpy(job->metadata, p_metadata, sizeof(metadata_buffer_t));
             }
         }
 
         // the src frame here should be from output of previous reprocess channel
         job->reprocessed_src_frame = frame;
-        m_inputMultiReprocQ.enqueue(job);
+        if (!m_inputMultiReprocQ.enqueue(job)) {
+            if (hdrState) {
+                cancelHdrCapture(job->frameNumber);
+                hdrState->stage = HdrCaptureState::FAILED;
+            }
+            releaseOfflineBuffersForFrame(job->frameNumber);
+            releaseOngoingPPData(job, this);
+            free(job);
+            return DEAD_OBJECT;
+        }
 
         m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_DO_NEXT_JOB, FALSE, FALSE);
         return NO_ERROR;
     }
 
+    return queueJpegFrame(job, frame, p_metadata);
+}
+
+int32_t QCamera3PostProcessor::queueJpegFrame(qcamera_hal3_pp_data_t *job,
+        mm_camera_super_buf_t *frame, const metadata_buffer_t *p_metadata)
+{
+    struct HandoffLock {
+        pthread_mutex_t &mutex;
+        explicit HandoffLock(pthread_mutex_t &m) : mutex(m) { pthread_mutex_lock(&mutex); }
+        ~HandoffLock() { pthread_mutex_unlock(&mutex); }
+    } handoff(mHdrCaptureLock);
+    const auto tracked = mHdrFrameStates.find(job->frameNumber);
+    const auto hdrState = tracked == mHdrFrameStates.end() ? nullptr : tracked->second;
+    const bool hal3Hdr = hdrState != nullptr;
     qcamera_hal3_jpeg_data_t *jpeg_job =
         (qcamera_hal3_jpeg_data_t *)malloc(sizeof(qcamera_hal3_jpeg_data_t));
     if (jpeg_job == NULL) {
         LOGE("No memory for jpeg job");
+        if (hal3Hdr) {
+            cancelHdrCapture(job->frameNumber);
+            if (hdrState) hdrState->stage = HdrCaptureState::FAILED;
+            discardHdrFrame(job, frame);
+        }
         return NO_MEMORY;
+    }
+
+    if (hdrState && hdrState->cancelled.load()) {
+        hdrState->stage = HdrCaptureState::FAILED;
+        discardHdrFrame(job, frame);
+        free(jpeg_job);
+        return NO_ERROR;
     }
 
     memset(jpeg_job, 0, sizeof(qcamera_hal3_jpeg_data_t));
@@ -1457,11 +2198,30 @@ int32_t QCamera3PostProcessor::processPPData(mm_camera_super_buf_t *frame,
         job->reprocessed_src_frame = NULL;
     }
 
+    if (hdrState) {
+        // Cancel may signal after the last check, but cannot reclaim an output
+        // across this locked ownership transfer. Timeout then defers to JPEG.
+        hdrState->stage = HdrCaptureState::HANDED_OFF;
+        retireHdrFrame(job->frameNumber);
+    }
     // free pp job buf
     free(job);
 
-    // enqueu reprocessed frame to jpeg input queue
-    m_inputJpegQ.enqueue((void *)jpeg_job);
+    // enqueue transfers ownership only if the queue is still active. A CPP
+    // callback racing STOP must release its payload instead of leaking it.
+    if (!m_inputJpegQ.enqueue((void *)jpeg_job)) {
+        if (hdrState) {
+            hdrState->cancelled.store(true);
+            hdrState->stage = HdrCaptureState::FAILED;
+        }
+        if (jpeg_job->jpeg_settings)
+            releaseOfflineBuffersForFrame(jpeg_job->jpeg_settings->frame_number);
+        if (jpeg_job->src_reproc_frame)
+            m_parent->freeBufferForFrame(jpeg_job->src_reproc_frame);
+        releaseJpegJobData(jpeg_job);
+        free(jpeg_job);
+        return DEAD_OBJECT;
+    }
 
     // wait up data proc thread
     m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_DO_NEXT_JOB, FALSE, FALSE);
@@ -1561,12 +2321,107 @@ void QCamera3PostProcessor::releasePPInputData(void *data, void *user_data)
         qcamera_hal3_pp_buffer_t *buf = (qcamera_hal3_pp_buffer_t *)data;
         if (NULL != buf) {
             if (buf->input) {
-                pme->releaseSuperBuf(buf->input);
+                if (buf->input->num_bufs == 1 && buf->input->bufs[0] &&
+                        buf->input->bufs[0]->stream_type == CAM_STREAM_TYPE_SNAPSHOT)
+                    pme->m_parent->freeBufferForFrame(buf->input);
+                else
+                    pme->releaseSuperBuf(buf->input);
                 free(buf->input);
                 buf->input = NULL;
             }
         }
     }
+}
+
+int32_t QCamera3PostProcessor::cancelQueuedFrame(uint32_t frameNumber)
+{
+    // A caller can own HDR or reprocess locks. This independent marker lock
+    // is never held while taking either lock or delivering any callback.
+    pthread_mutex_lock(&mCancelJobLock);
+    bool found = false;
+    for (List<uint32_t>::iterator it = mCancelpprocReqFrameList.begin();
+            it != mCancelpprocReqFrameList.end(); ++it)
+        found |= *it == frameNumber;
+    if (!found) mCancelpprocReqFrameList.push_back(frameNumber);
+    pthread_mutex_unlock(&mCancelJobLock);
+    // The caller may hold HWI's result lock. Buffer/error callbacks must run
+    // on the worker after this call returns, rather than reentering that lock.
+    m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_CANCEL_PP_FRAME, FALSE, FALSE);
+    return NO_ERROR;
+}
+
+bool QCamera3PostProcessor::isQueuedFrameCancelled(uint32_t frameNumber)
+{
+    pthread_mutex_lock(&mCancelJobLock);
+    bool cancelled = false;
+    for (List<uint32_t>::iterator it = mCancelpprocReqFrameList.begin();
+            it != mCancelpprocReqFrameList.end(); ++it)
+        cancelled |= *it == frameNumber;
+    pthread_mutex_unlock(&mCancelJobLock);
+    return cancelled;
+}
+
+void QCamera3PostProcessor::cancelQueuedFrames()
+{
+    List<qcamera_hal3_pp_buffer_t *> inputs;
+    List<qcamera_hal3_meta_pp_buffer_t *> metadata;
+    List<qcamera_hal3_pp_data_t *> multi;
+    List<uint32_t> frames;
+    pthread_mutex_lock(&mReprocJobLock);
+    pthread_mutex_lock(&mCancelJobLock);
+    for (List<uint32_t>::iterator it = mCancelpprocReqFrameList.begin();
+            it != mCancelpprocReqFrameList.end(); ++it) frames.push_back(*it);
+    pthread_mutex_unlock(&mCancelJobLock);
+    for (List<uint32_t>::iterator it = frames.begin(); it != frames.end(); ++it) {
+        uint32_t frameNumber = *it;
+        qcamera_hal3_pp_buffer_t *input;
+        while ((input = isFrameMatched(frameNumber)) != NULL)
+            inputs.push_back(input);
+        qcamera_hal3_meta_pp_buffer_t *meta;
+        while ((meta = isMetaMatched(frameNumber)) != NULL)
+            metadata.push_back(meta);
+        for (List<ReprocessBuffer>::iterator node = mReprocessNode.begin();
+                node != mReprocessNode.end();) {
+            if (node->reprocBuf->frameNumber == frameNumber) {
+                inputs.push_back(node->reprocBuf);
+                metadata.push_back(node->metaBuffer);
+                node = mReprocessNode.erase(node);
+            } else ++node;
+        }
+        qcamera_hal3_pp_data_t *job;
+        while ((job = static_cast<qcamera_hal3_pp_data_t *>(
+                m_inputMultiReprocQ.dequeue(matchPPJob, &frameNumber))) != NULL)
+            multi.push_back(job);
+    }
+    // Keep each cancellation until stop: source and metadata callbacks can
+    // arrive independently, including after the first cancellation command.
+    pthread_mutex_unlock(&mReprocJobLock);
+    for (List<qcamera_hal3_pp_buffer_t *>::iterator it = inputs.begin();
+            it != inputs.end(); ++it) {
+        qcamera_hal3_pp_buffer_t *input = *it;
+        const bool hdr = isHdrCaptureFrame(input->frameNumber) ||
+                isDiscardedHdrFrame(input->frameNumber);
+        releasePPInputData(input, this);
+        if (hdr) retireHdrFrame(input->frameNumber);
+        // HDR's framework output belongs to the group timeout/flush path.
+        // Internal source cleanup must never return that JPEG a second time.
+        if (!hdr && m_pReprocChannel[0])
+            m_pReprocChannel[0]->releaseOutputBuffer(input->output, input->frameNumber);
+        free(input);
+    }
+    for (List<qcamera_hal3_meta_pp_buffer_t *>::iterator it = metadata.begin();
+            it != metadata.end(); ++it) {
+        releaseMetadata(*it, this);
+        free(*it);
+    }
+    for (List<qcamera_hal3_pp_data_t *>::iterator it = multi.begin();
+            it != multi.end(); ++it) {
+        releaseOfflineBuffersForFrame((*it)->frameNumber);
+        releaseOngoingPPData(*it, this);
+        free(*it);
+    }
+    for (List<uint32_t>::iterator it = frames.begin(); it != frames.end(); ++it)
+        eraseJpegSetting(*it);
 }
 
 /*===========================================================================
@@ -1581,6 +2436,10 @@ void QCamera3PostProcessor::releasePPInputData(void *data, void *user_data)
  *==========================================================================*/
 int32_t QCamera3PostProcessor::timeoutFrame(uint32_t frameNumber)
 {
+    if (isHdrCaptureFrame(frameNumber) || isDiscardedHdrFrame(frameNumber)) {
+        cancelHdrCapture(frameNumber);
+        return NO_ERROR;
+    }
     int32_t rc = NO_ERROR;
 
     if(NULL != m_pReprocChannel[0]) {
@@ -1605,7 +2464,11 @@ void QCamera3PostProcessor::releaseMetadata(void *data, void *user_data)
     QCamera3PostProcessor *pme = (QCamera3PostProcessor *)user_data;
     if (NULL != pme) {
         qcamera_hal3_meta_pp_buffer_t *buf  = (qcamera_hal3_meta_pp_buffer_t *)data;
-        pme->m_parent->metadataBufDone((mm_camera_super_buf_t *)buf->metabuf);
+        if (buf && buf->metabuf) {
+            pme->m_parent->metadataBufDone(buf->metabuf);
+            free(buf->metabuf);
+            buf->metabuf = NULL;
+        }
     }
 }
 
@@ -1624,7 +2487,17 @@ void QCamera3PostProcessor::releaseJpegData(void *data, void *user_data)
 {
     QCamera3PostProcessor *pme = (QCamera3PostProcessor *)user_data;
     if (NULL != pme) {
-        pme->releaseJpegJobData((qcamera_hal3_jpeg_data_t *)data);
+        qcamera_hal3_jpeg_data_t *job = static_cast<qcamera_hal3_jpeg_data_t *>(data);
+        if (job && job->jpeg_settings)
+            pme->releaseOfflineBuffersForFrame(job->jpeg_settings->frame_number);
+        // Successful JPEG callbacks return this source before calling the
+        // structural releaser. Flushed/aborted queue owners have no callback.
+        mm_camera_super_buf_t *source = job ?
+                (job->src_reproc_frame ? job->src_reproc_frame : job->src_frame) : NULL;
+        if (source && source->num_bufs == 1 && source->bufs[0] &&
+                source->bufs[0]->stream_type == CAM_STREAM_TYPE_SNAPSHOT)
+            pme->m_parent->freeBufferForFrame(source);
+        pme->releaseJpegJobData(job);
     }
 }
 
@@ -1645,11 +2518,33 @@ void QCamera3PostProcessor::releaseOngoingPPData(void *data, void *user_data)
     if (NULL != pme) {
         qcamera_hal3_pp_data_t *pp_data = (qcamera_hal3_pp_data_t *)data;
 
-        if (pp_data && pp_data->src_frame)
-          pme->releaseSuperBuf(pp_data->src_frame);
-
+        if (!pp_data) return;
+        if (pp_data->src_frame) {
+            if (pp_data->src_frame->num_bufs == 1 && pp_data->src_frame->bufs[0] &&
+                    pp_data->src_frame->bufs[0]->stream_type == CAM_STREAM_TYPE_SNAPSHOT)
+                pme->m_parent->freeBufferForFrame(pp_data->src_frame);
+            else
+                pme->releaseSuperBuf(pp_data->src_frame);
+        }
+        if (pp_data->reprocessed_src_frame &&
+                pp_data->reprocessed_src_frame != pp_data->src_frame) {
+            for (int8_t i = 0; i < pme->m_ppChannelCnt; ++i) {
+                if (pme->m_pReprocChannel[i] &&
+                        pme->m_pReprocChannel[i]->getMyHandle() ==
+                        pp_data->reprocessed_src_frame->ch_id) {
+                    pme->m_pReprocChannel[i]->bufDone(pp_data->reprocessed_src_frame);
+                    break;
+                }
+            }
+            free(pp_data->reprocessed_src_frame);
+        }
+        pp_data->reprocessed_src_frame = NULL;
+        if (pp_data->ppOutput_jpeg_settings != pp_data->jpeg_settings)
+            free(pp_data->ppOutput_jpeg_settings);
+        free(pp_data->jpeg_settings);
+        pp_data->jpeg_settings = pp_data->ppOutput_jpeg_settings = NULL;
         pme->releasePPJobData(pp_data);
-
+        pme->retireHdrFrame(pp_data->frameNumber);
     }
 }
 
@@ -1698,6 +2593,16 @@ int32_t QCamera3PostProcessor::releaseOfflineBuffers(bool allBuffers)
     return rc;
 }
 
+int32_t QCamera3PostProcessor::releaseOfflineBuffersForFrame(uint32_t frameNumber)
+{
+    int32_t rc = NO_ERROR;
+    for (int8_t i = 0; i < m_ppChannelCnt; ++i) {
+        if (m_pReprocChannel[i])
+            rc |= m_pReprocChannel[i]->unmapOfflineFrame(frameNumber);
+    }
+    return rc;
+}
+
 /*===========================================================================
  * FUNCTION   : releaseJpegJobData
  *
@@ -1724,33 +2629,15 @@ void QCamera3PostProcessor::releaseJpegJobData(qcamera_hal3_jpeg_data_t *job)
         }
 
         if (NULL != job->src_frame) {
-            if(!job->halPPAllocatedBuf)
-            {
-                // find the correct reprocess channel for the super buffer
-                for (int8_t i = 0; i < m_ppChannelCnt; i++) {
-                    if (m_pReprocChannel[i] != NULL &&
-                        m_pReprocChannel[i]->getMyHandle() == job->src_frame->ch_id) {
-                        rc = m_pReprocChannel[i]->bufDone(job->src_frame);
-                        if (NO_ERROR != rc) {
-                            LOGE("bufDone error: %d", rc);
-                        }
-                        break;
+            // find the correct reprocess channel for the super buffer
+            for (int8_t i = 0; i < m_ppChannelCnt; i++) {
+                if (m_pReprocChannel[i] != NULL &&
+                    m_pReprocChannel[i]->getMyHandle() == job->src_frame->ch_id) {
+                    rc = m_pReprocChannel[i]->bufDone(job->src_frame);
+                    if (NO_ERROR != rc) {
+                        LOGE("bufDone error: %d", rc);
                     }
-                }
-            } else {
-               if (job->hal_pp_bufs) {
-                    free(job->hal_pp_bufs);
-                    job->hal_pp_bufs = NULL;
-                }
-                if (job->snapshot_heap) {
-                    job->snapshot_heap->deallocate();
-                    delete job->snapshot_heap;
-                    job->snapshot_heap = NULL;
-                }
-                if (job->metadata_heap) {
-                    job->metadata_heap->deallocate();
-                    delete job->metadata_heap;
-                    job->metadata_heap = NULL;
+                    break;
                 }
             }
 
@@ -2407,16 +3294,234 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
        return BAD_VALUE;
     }
 
-    if (!jpeg_job_data->halPPAllocatedBuf) {
-        QCamera3StreamMem *memObj = (QCamera3StreamMem *)main_frame->mem_info;
-        if (NULL == memObj) {
-            LOGE("Memeory Obj of main frame is NULL");
-            return NO_MEMORY;
-        }
-
-        // clean and invalidate cache ops through mem obj of the frame
-        memObj->cleanInvalidateCache(main_frame->buf_idx);
+    QCamera3StreamMem *memObj = (QCamera3StreamMem *)main_frame->mem_info;
+    if (NULL == memObj) {
+        LOGE("Memeory Obj of main frame is NULL");
+        return NO_MEMORY;
     }
+
+    if (jpeg_settings && jpeg_settings->native_still_mode == OPPO_NATIVE_REAR_BEAUTY) {
+        QCamera3HdrAlgo::Image image;
+        QCamera3StreamMem *memory = nullptr;
+        int32_t beautyStatus = -ENOTSUP;
+        if (getHdrImage(recvd_frame, image, memory)) {
+            QCamera3StockBeauty::Options options;
+            const int32_t strength = jpeg_settings->native_beauty_strength;
+            if (strength >= 0 && strength <= 100) {
+                options.soften = strength;
+                options.softenSharp = strength;
+                options.skinBright = strength;
+                // Style is an independent stock feature; strength must not
+                // select a guessed skin-style preset.
+                options.skinStyle = 0;
+                beautyStatus = QCamera3StockBeauty::process(image, options);
+                if (beautyStatus == NO_ERROR) {
+                    beautyStatus = memory->cleanCache(main_frame->buf_idx);
+                    if (beautyStatus != NO_ERROR) return beautyStatus;
+                }
+            } else beautyStatus = -EINVAL;
+        }
+        nativeAlgorithmTrace(jpeg_settings, "ARCRLP", beautyStatus,
+                jpeg_settings->frame_number, 1,
+                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
+    }
+    // Graphical watermark / sticker / mirror on the real JPEG edit surface: the
+    // unrotated NV21 frame this path is about to encode. The rectangles are
+    // mapped back from the viewed orientation, so preview and photo agree for
+    // the same request. A bypass (no asset, no mirror) leaves the bytes alone.
+    if (jpeg_settings && (jpeg_settings->native_stages.watermark_asset_length > 0 ||
+            jpeg_settings->native_stages.sticker_asset_length > 0 ||
+            jpeg_settings->native_stages.mirror_preview)) {
+        QCamera3HdrAlgo::Image image;
+        QCamera3StreamMem *memory = nullptr;
+        int32_t assetStatus = -ENODATA;
+        int32_t assetApplied = 0;
+        if (getHdrImage(recvd_frame, image, memory)) {
+            QCamera3PostprocessAssets assets;
+            QCamera3PostprocessAssets::Options options;
+            options.enable = 1;
+            options.mirror = jpeg_settings->native_stages.mirror_preview;
+            options.frameNumber = jpeg_settings->framework_frame_number_valid ?
+                    jpeg_settings->framework_frame_number : jpeg_settings->frame_number;
+            // 1 MiB each, and they must not live on the stack: this poster runs
+            // on the postprocessing worker thread with the default (1 MiB)
+            // pthread stack, while encodeData() already carries large value
+            // locals (mm_jpeg_job_t alone is 80 KB). A frame that large
+            // overruns the worker stack and the first memset past the stack top
+            // faults (SIGSEGV on the first still capture).
+            std::vector<uint8_t> watermarkStorage(
+                    QCamera3PostprocessAssets::MAX_ASSET_BYTES, 0);
+            std::vector<uint8_t> stickerStorage(
+                    QCamera3PostprocessAssets::MAX_ASSET_BYTES, 0);
+            QCamera3PostprocessAssets::Asset watermark;
+            QCamera3PostprocessAssets::Asset sticker;
+            bool haveWatermark = false, haveSticker = false;
+            if (jpeg_settings->native_stages.watermark_asset_length > 0) {
+                size_t length = 0;
+                const int32_t load = QCamera3PostprocessAssets::loadAsset(
+                        jpeg_settings->native_stages.watermark_asset, watermarkStorage.data(),
+                        watermarkStorage.size(), length, watermark);
+                if (load == NO_ERROR) { options.watermark = &watermark; haveWatermark = true; }
+                else assetStatus = load;
+            }
+            if (jpeg_settings->native_stages.sticker_asset_length > 0) {
+                size_t length = 0;
+                const int32_t load = QCamera3PostprocessAssets::loadAsset(
+                        jpeg_settings->native_stages.sticker_asset, stickerStorage.data(),
+                        stickerStorage.size(), length, sticker);
+                if (load == NO_ERROR) {
+                    options.sticker = &sticker;
+                    haveSticker = true;
+                    if (jpeg_settings->native_stages.sticker_rect_valid) {
+                        options.stickerRect = {jpeg_settings->native_stages.sticker_rect[0],
+                                jpeg_settings->native_stages.sticker_rect[1],
+                                jpeg_settings->native_stages.sticker_rect[2],
+                                jpeg_settings->native_stages.sticker_rect[3]};
+                    }
+                } else assetStatus = load;
+            }
+            if ((haveWatermark || haveSticker || options.mirror) &&
+                    QCamera3PostprocessAssets::validOptions(options)) {
+                QCamera3PostprocessAssets::Result result;
+                const int32_t rotation = jpeg_settings->jpeg_orientation;
+                assetStatus = assets.processJpegEdit(image, image, rotation, options, result);
+                assetApplied = result.applied;
+                if (assetStatus == NO_ERROR && result.applied != 0) {
+                    assetStatus = memory->cleanCache(main_frame->buf_idx);
+                    if (assetStatus != NO_ERROR) return assetStatus;
+                }
+            }
+        }
+        if (assetStatus != NO_ERROR || assetApplied != 0)
+            nativeAlgorithmTrace(jpeg_settings, "PostprocessAssets", assetStatus,
+                    jpeg_settings->frame_number, 1, hal_obj, assetApplied);
+    }
+
+    // Stage evidence recorded on the still this path really produced: lens
+    // occlusion, the scene-conditional brightness / low-light macro decision and
+    // the EIS-aware still selection. They change no pixel; each records its own
+    // real status and refuses when its real inputs are absent.
+    if (jpeg_settings) {
+        QCamera3HdrAlgo::Image evidence;
+        QCamera3StreamMem *evidenceMemory = nullptr;
+        if (getHdrImage(recvd_frame, evidence, evidenceMemory)) {
+            const uint32_t evidenceFrame = jpeg_settings->framework_frame_number_valid ?
+                    jpeg_settings->framework_frame_number : jpeg_settings->frame_number;
+            // Multi-frame flash plan: real decoded flash presence, the real AE
+            // state of this frame and the real LED-on bound. The stage is a
+            // planner: it never submits a request and never changes the capture,
+            // so a refusal (an undecoded bound or calibration) is recorded and
+            // the still keeps its existing flash behaviour.
+            {
+                bool hasFlash = false;
+                char flashNode[QCAMERA_MAX_FILEPATH_LENGTH] = {};
+                QCamera3HardwareInterface::getFlashInfo(hal_obj->getCameraID(), hasFlash,
+                        flashNode);
+                QCamera3FlashSequence::Capability flashCapability;
+                flashCapability.flashAvailable = hasFlash ? 1 : 0;
+                flashCapability.dualLed = 0;
+                QCamera3FlashSequence::AeState flashAe;
+                IF_META_AVAILABLE(int32_t, flashState, CAM_INTF_META_FLASH_STATE, metadata) {
+                    // Real reported flash state: FIRED means the LED really lit
+                    // for this frame, everything else is not a flash decision.
+                    flashAe.flashRequired = *flashState == CAM_FLASH_STATE_FIRED ? 1 : 0;
+                }
+                IF_META_AVAILABLE(uint32_t, flashAeState, CAM_INTF_META_AEC_STATE, metadata) {
+                    flashAe.aeState = int32_t(*flashAeState);
+                }
+                IF_META_AVAILABLE(int64_t, flashExposure,
+                        CAM_INTF_META_SENSOR_EXPOSURE_TIME, metadata) {
+                    flashAe.ambientExposureNs = *flashExposure;
+                }
+                IF_META_AVAILABLE(int32_t, flashIso, CAM_INTF_META_SENSOR_SENSITIVITY,
+                        metadata) {
+                    flashAe.ambientIso = *flashIso;
+                }
+                QCamera3FlashSequence::Options flashOptions;
+                flashOptions.flashMode = hasFlash ?
+                        QCamera3FlashSequence::FLASH_MODE_SINGLE :
+                        QCamera3FlashSequence::FLASH_MODE_OFF;
+                flashOptions.frameNumber = evidenceFrame;
+                QCamera3FlashSequence::Result flashResult;
+                QCamera3FlashSequence::Plan flashPlan;
+                int32_t flashStatus = -ENOTSUP;
+                if (QCamera3FlashSequence::validCapability(flashCapability) &&
+                        QCamera3FlashSequence::validOptions(flashOptions))
+                    flashStatus = QCamera3FlashSequence::plan(flashCapability, flashAe, NULL,
+                            flashOptions, flashResult, flashPlan);
+                // A plan with no real LED-on bound refuses (-ENODATA): the
+                // decoded bound is not present in this tree, so the refusal is
+                // the honest outcome and is recorded with applied 0.
+                nativeAlgorithmTrace(jpeg_settings, "FlashSequence", flashStatus,
+                        jpeg_settings->frame_number, 0, hal_obj, 0);
+            }
+
+            // Scene-conditional brightness / low-light macro over the real
+            // frame statistics. The decoded QCameraParameters brightness range
+            // is not present in this tree, so the config refuses and only the
+            // measured statistics are recorded; no target is invented.
+            {
+                QCamera3SceneBrightness sceneBrightness;
+                QCamera3SceneBrightness::Stats brightnessStats;
+                IF_META_AVAILABLE(cam_hist_stats_t, brightnessHistogram,
+                        CAM_INTF_META_HISTOGRAM, metadata) {
+                    if (brightnessHistogram->type == CAM_HISTOGRAM_TYPE_YUV) {
+                        brightnessStats.lumaHistogram =
+                                brightnessHistogram->yuv_stats.hist_buf;
+                        uint64_t total = 0;
+                        for (uint32_t i = 0; i < QCamera3SceneBrightness::kHistogramBins; ++i)
+                            total += brightnessHistogram->yuv_stats.hist_buf[i];
+                        brightnessStats.histogramTotal =
+                                total <= UINT32_MAX ? uint32_t(total) : 0;
+                    }
+                }
+                int32_t meanMilli = -1;
+                if (QCamera3SceneBrightness::histogramMeanLumaMilli(brightnessStats,
+                        meanMilli)) brightnessStats.meanLumaMilli = meanMilli;
+                QCamera3SceneBrightness::Config brightnessConfig;
+                QCamera3SceneBrightness::Result brightnessResult;
+                QCamera3SceneBrightness::Decision brightnessDecision;
+                int32_t brightnessStatus = -ENOTSUP;
+                if (QCamera3SceneBrightness::validStats(brightnessStats) &&
+                        QCamera3SceneBrightness::validConfig(brightnessConfig) &&
+                        QCamera3SceneBrightness::usableStats(brightnessStats))
+                    brightnessStatus = sceneBrightness.decide(brightnessStats,
+                            brightnessConfig, evidenceFrame, brightnessResult,
+                            brightnessDecision);
+                else if (QCamera3SceneBrightness::validStats(brightnessStats))
+                    brightnessStatus = sceneBrightness.idle(evidenceFrame, brightnessConfig,
+                            brightnessResult, brightnessDecision);
+                if (brightnessStatus != NO_ERROR || brightnessResult.applied != 0)
+                    nativeAlgorithmTrace(jpeg_settings, "SceneBrightness", brightnessStatus,
+                            jpeg_settings->frame_number, 0, hal_obj,
+                            brightnessResult.applied);
+            }
+
+            QCamera3Occlusion occlusion;
+            QCamera3Occlusion::Options occlusionOptions;
+            occlusionOptions.frameNumber = evidenceFrame;
+            QCamera3Occlusion::Result occlusionResult;
+            int32_t occlusionStatus = -ENOTSUP;
+            if (QCamera3Occlusion::validOptions(occlusionOptions))
+                occlusionStatus = occlusion.analyse(evidence, occlusionOptions,
+                        occlusionResult);
+            if (occlusionStatus != NO_ERROR || occlusionResult.applied != 0)
+                nativeAlgorithmTrace(jpeg_settings, "Occlusion", occlusionStatus,
+                        jpeg_settings->frame_number, 1, hal_obj, occlusionResult.applied);
+            // Real occlusion decision of this frame, published through the
+            // diagnostics.occlusion* result keys. Only a result the stage really
+            // produced is recorded (status 0); a refused or unavailable analysis
+            // records nothing, and the result path publishes only what the frame
+            // it refers to really carries.
+            if (occlusionStatus == NO_ERROR)
+                hal_obj->noteOcclusionResult(jpeg_settings->frame_number,
+                        occlusionResult.occluded ? 1 : 0, occlusionResult.confidence,
+                        occlusionResult.reason, occlusionResult.coreStatus);
+        }
+    }
+
+    // clean and invalidate cache ops through mem obj of the frame
+    memObj->cleanInvalidateCache(main_frame->buf_idx);
 
     if (mJpegClientHandle <= 0) {
         LOGE("Error: bug here, mJpegClientHandle is 0");
@@ -2928,17 +4033,78 @@ int32_t QCamera3PostProcessor::composeMpo(qcamera_hal3_mpo_compose_info_t &mpo_i
 }
 
 /*===========================================================================
- * FUNCTION   : dataProcessRoutine
+ * FUNCTION   : clearPostprocQueues
  *
- * DESCRIPTION: data process routine that handles input data either from input
- *              Jpeg Queue to do jpeg encoding, or from input PP Queue to do
- *              reprocess.
- *
- * PARAMETERS :
- *   @data    : user data ptr (QCamera3PostProcessor)
- *
- * RETURN     : None
+ * DESCRIPTION: release queued owners while their channels and buffers live.
  *==========================================================================*/
+void QCamera3PostProcessor::clearPostprocQueues()
+{
+    // cancel all ongoing jpeg jobs
+    qcamera_hal3_jpeg_data_t *jpeg_job =
+        (qcamera_hal3_jpeg_data_t *)m_ongoingJpegQ.dequeue();
+    while (jpeg_job != NULL) {
+        mJpegHandle.abort_job(jpeg_job->jobId);
+
+        releaseJpegData(jpeg_job, this);
+        free(jpeg_job);
+        jpeg_job = (qcamera_hal3_jpeg_data_t *)m_ongoingJpegQ.dequeue();
+    }
+
+    m_ongoingJpegQ.flushOutsideLock();
+
+    // destroy jpeg encoding session
+    if ( 0 < mJpegSessionId ) {
+        mJpegHandle.destroy_session(mJpegSessionId);
+        mJpegSessionId = 0;
+    }
+
+    releaseFreeJpegSessions();
+
+    // flush ongoing postproc Queue
+    m_ongoingPPQ.flushOutsideLock();
+
+    m_inputRawQ.flushOutsideLock();
+
+    // flush input jpeg Queue
+    m_inputJpegQ.flushOutsideLock();
+
+    // flush framework input Postproc Queue
+    m_inputFWKPPQ.flush();
+
+    m_inputMultiReprocQ.flushOutsideLock();
+
+    // Matching callbacks also use mReprocJobLock. Close both
+    // unmatched queues and detach matched pairs as one operation.
+    List<ReprocessBuffer> abandoned;
+    pthread_mutex_lock(&mReprocJobLock);
+    m_inputPPQ.flushOutsideLock();
+    m_inputMetaQ.flushOutsideLock();
+    m_jpegSettingsQ.flush();
+    while (mReprocessNode.size()) {
+        abandoned.push_back(*mReprocessNode.begin());
+        mReprocessNode.erase(mReprocessNode.begin());
+    }
+    pthread_mutex_unlock(&mReprocJobLock);
+    while (abandoned.size())
+    {
+        List<ReprocessBuffer>::iterator reprocData = abandoned.begin();
+        qcamera_hal3_pp_buffer_t *pp_buffer = reprocData->reprocBuf;
+        qcamera_hal3_meta_pp_buffer_t *meta_pp_buffer = reprocData->metaBuffer;
+
+        abandoned.erase(reprocData);
+        // free frame
+        if (pp_buffer != NULL) {
+            releasePPInputData(pp_buffer, this);
+            free(pp_buffer);
+        }
+        //free metadata
+        if (NULL != meta_pp_buffer) {
+            releaseMetadata(meta_pp_buffer, this);
+            free(meta_pp_buffer);
+        }
+    }
+}
+
 void *QCamera3PostProcessor::dataProcessRoutine(void *data)
 {
     int running = 1;
@@ -2972,6 +4138,7 @@ void *QCamera3PostProcessor::dataProcessRoutine(void *data)
             needNewSess = TRUE;
 
             pme->m_ongoingPPQ.init();
+            pme->m_ongoingJpegQ.init();
             pme->m_inputJpegQ.init();
             pme->m_inputPPQ.init();
             pme->m_inputFWKPPQ.init();
@@ -2985,110 +4152,25 @@ void *QCamera3PostProcessor::dataProcessRoutine(void *data)
             break;
         case CAMERA_CMD_TYPE_CANCEL_PP_FRAME:
             {
-                if(pme->m_inputPPQ.isEmpty()){
-                    LOGH("pp queue is empty. Invalid cancel request.");
-                }else {
-                    LOGH("PP frame request cancel");
-                    qcamera_hal3_pp_buffer_t* pp_buf =
-                            (qcamera_hal3_pp_buffer_t *)pme->m_inputPPQ.dequeue();
-                    if (NULL != pp_buf) {
-                        if (pp_buf->input) {
-                            pme->releaseSuperBuf(pp_buf->input);
-                            free(pp_buf->input);
-                            pp_buf->input = NULL;
-                        }
-                        if(pme->m_pReprocChannel[0] != NULL)
-                        {
-                            int rc = NO_ERROR;
-                            rc = pme->m_pReprocChannel[0]->releaseOutputBuffer(pp_buf->output,
-                                                                               pp_buf->frameNumber);
-                            if(rc != NO_ERROR)
-                            {
-                                LOGE("failed to return o/p buffer.error = %d",rc);
-                            }
-                        }
-                        free(pp_buf);
-                    }
-                }
+                pme->cancelQueuedFrames();
             }
+            break;
+        case CAMERA_CMD_TYPE_PAUSE_DATA_PROC:
+            is_active = FALSE;
+            if (sync) cam_sem_post(&cmdThread->sync_sem);
             break;
         case CAMERA_CMD_TYPE_STOP_DATA_PROC:
             {
                 LOGH("stop data proc");
+                pme->abortHdrCapture();
                 is_active = FALSE;
-                // cancel all ongoing jpeg jobs
-                qcamera_hal3_jpeg_data_t *jpeg_job =
-                    (qcamera_hal3_jpeg_data_t *)pme->m_ongoingJpegQ.dequeue();
-                while (jpeg_job != NULL) {
-                    pme->mJpegHandle.abort_job(jpeg_job->jobId);
-
-                    pme->releaseJpegJobData(jpeg_job);
-                    free(jpeg_job);
-                    jpeg_job = (qcamera_hal3_jpeg_data_t *)pme->m_ongoingJpegQ.dequeue();
-                }
-
-                // destroy jpeg encoding session
-                if ( 0 < pme->mJpegSessionId ) {
-                    pme->mJpegHandle.destroy_session(pme->mJpegSessionId);
-                    pme->mJpegSessionId = 0;
-                }
-
-                pme->releaseFreeJpegSessions();
-
+                pme->stopPostproc();
                 needNewSess = TRUE;
-
-                // flush ongoing postproc Queue
-                pme->m_ongoingPPQ.flush();
-
-                // flush input jpeg Queue
-                pme->m_inputJpegQ.flush();
-
-                // flush input Postproc Queue
-                pme->m_inputPPQ.flush();
-
-                // flush framework input Postproc Queue
-                pme->m_inputFWKPPQ.flush();
-
-                pme->m_inputMultiReprocQ.flush();
-
-                pme->m_inputMetaQ.flush();
-                pme->m_jpegSettingsQ.flush();
-
-                while(pme->mReprocessNode.size())
-                {
-                    List<ReprocessBuffer>::iterator reprocData;
-                    reprocData = pme->mReprocessNode.begin();
-                    qcamera_hal3_pp_buffer_t *pp_buffer = reprocData->reprocBuf;
-                    qcamera_hal3_meta_pp_buffer_t *meta_pp_buffer = reprocData->metaBuffer;
-
-                    pme->mReprocessNode.erase(pme->mReprocessNode.begin());
-                    // free frame
-                    if (pp_buffer != NULL) {
-                        if (pp_buffer->input) {
-                            pme->releaseSuperBuf(pp_buffer->input);
-                            free(pp_buffer->input);
-                        }
-                        free(pp_buffer);
-                    }
-                    //free metadata
-                    if (NULL != meta_pp_buffer) {
-                        if(NULL != meta_pp_buffer->metabuf)
-                        {
-                            pme->m_parent->metadataBufDone(meta_pp_buffer->metabuf);
-                            free(meta_pp_buffer->metabuf);
-                        }
-                        free(meta_pp_buffer);
-                    }
-                }
                 // signal cmd is completed
                 if(sync)
                 {
                     cam_sem_post(&cmdThread->sync_sem);
                 }
-                pthread_mutex_lock(&pme->mHDRJobLock);
-                pme->mChannelStop = true;
-                pthread_cond_signal(&pme->mProcChStopCond);
-                pthread_mutex_unlock(&pme->mHDRJobLock);
             }
             break;
         case CAMERA_CMD_TYPE_DO_NEXT_JOB:
@@ -3098,6 +4180,10 @@ void *QCamera3PostProcessor::dataProcessRoutine(void *data)
                  * anymore for every captureRequest */
                 needNewSess = TRUE;
                 if (is_active == TRUE) {
+                    // Cancellation may have been recorded after an earlier
+                    // DO_NEXT_JOB was queued. Honor it before submitting work.
+                    pme->cancelQueuedFrames();
+                    pme->processDualCapture();
                     // check if there is any ongoing jpeg jobs
                     if (pme->m_ongoingJpegQ.isEmpty()) {
                         LOGD("ongoing jpeg queue is empty so doing the jpeg job");
@@ -3118,7 +4204,7 @@ void *QCamera3PostProcessor::dataProcessRoutine(void *data)
                                 // dequeue the last one
                                 pme->m_ongoingJpegQ.dequeue(false);
 
-                                pme->releaseJpegJobData(jpeg_job);
+                                pme->releaseJpegData(jpeg_job, pme);
                                 free(jpeg_job);
                             }
                             pme->releaseFreeJpegSessions();
@@ -3198,7 +4284,8 @@ void *QCamera3PostProcessor::dataProcessRoutine(void *data)
                                     ret = pme->m_pReprocChannel[0]->doReprocessOffline(fwk_frame);
                                     if (NO_ERROR != ret) {
                                         // remove from ongoing PP job Q
-                                        pme->m_ongoingPPQ.dequeue(false);
+                                        pme->m_ongoingPPQ.dequeue(matchPPJob,
+                                                &fwk_frame->frameNumber);
                                     }
                                 } else {
                                     LOGE("Reprocess channel is NULL");
@@ -3235,7 +4322,8 @@ void *QCamera3PostProcessor::dataProcessRoutine(void *data)
                         meta_buffer =
                             (mm_camera_super_buf_t *)meta_pp_buffer->metabuf;
                         jpeg_settings_t *jpeg_settings =
-                           (jpeg_settings_t *)pme->m_jpegSettingsQ.dequeue();
+                           (jpeg_settings_t *)pme->m_jpegSettingsQ.dequeue(
+                                   matchJpegSetting, &pp_buffer->frameNumber);
                         jpeg_settings_t *ppOutput_jpeg_settings = NULL;
 
                         //In bokeh case, there will be no AUX image jpeg settings.
@@ -3332,7 +4420,8 @@ void *QCamera3PostProcessor::dataProcessRoutine(void *data)
                                     pme->mPerfLockMgr.releasePerfLock(PERF_LOCK_OFFLINE_REPROC);
                                     if (NO_ERROR != ret) {
                                         // remove from ongoing PP job Q
-                                        pme->m_ongoingPPQ.dequeue(false);
+                                        pme->m_ongoingPPQ.dequeue(matchPPJob,
+                                                &pp_buffer->frameNumber);
                                     }
                                 }
                             } else {
@@ -3342,6 +4431,20 @@ void *QCamera3PostProcessor::dataProcessRoutine(void *data)
                         }
 
                         if (0 != ret) {
+                            if (pp_buffer && (pme->isHdrCaptureFrame(pp_buffer->frameNumber) ||
+                                    pme->isDiscardedHdrFrame(pp_buffer->frameNumber))) {
+                                LOGE("HAL3 HDR CPP submission failed for %u (%d)",
+                                        pp_buffer->frameNumber, ret);
+                                pme->cancelHdrCapture(pp_buffer->frameNumber);
+                                pme->releaseOfflineBuffersForFrame(pp_buffer->frameNumber);
+                                pme->m_ongoingPPQ.dequeue(matchPPJob, &pp_buffer->frameNumber);
+                                if (pp_job && meta_buffer && pp_buffer->input) {
+                                    pme->discardHdrFrame(pp_job, NULL);
+                                    pp_job = NULL;
+                                    pp_buffer->input = NULL;
+                                    meta_buffer = NULL;
+                                }
+                            }
                             // free pp_job
                             if (pp_job != NULL) {
                                 free(pp_job);
@@ -3372,34 +4475,8 @@ void *QCamera3PostProcessor::dataProcessRoutine(void *data)
                         pthread_mutex_unlock(&pme->mReprocJobLock);
                     }
                 } else {
-                    // not active, simply return buf and do no op
-                    qcamera_hal3_jpeg_data_t *jpeg_job =
-                        (qcamera_hal3_jpeg_data_t *)pme->m_inputJpegQ.dequeue();
-                    if (NULL != jpeg_job) {
-                        free(jpeg_job);
-                    }
-
-                    qcamera_hal3_pp_buffer_t* pp_buf =
-                            (qcamera_hal3_pp_buffer_t *)pme->m_inputPPQ.dequeue();
-                    if (NULL != pp_buf) {
-                        if (pp_buf->input) {
-                            pme->releaseSuperBuf(pp_buf->input);
-                            free(pp_buf->input);
-                            pp_buf->input = NULL;
-                        }
-                        free(pp_buf);
-                    }
-                    mm_camera_super_buf_t *metadata = (mm_camera_super_buf_t *)
-                                                            pme->m_inputMetaQ.dequeue();
-                    if (metadata != NULL) {
-                        pme->m_parent->metadataBufDone(metadata);
-                        free(metadata);
-                    }
-                    qcamera_fwk_input_pp_data_t *fwk_frame =
-                            (qcamera_fwk_input_pp_data_t *) pme->m_inputFWKPPQ.dequeue();
-                    if (NULL != fwk_frame) {
-                        free(fwk_frame);
-                    }
+                    // PAUSE preserves owners until driver callbacks stop.
+                    // STOP/deinit drains all queues with their owner callbacks.
                 }
             }
             break;
@@ -3423,216 +4500,6 @@ void *QCamera3PostProcessor::dataProcessRoutine(void *data)
     } while (running);
     LOGD("X");
     return NULL;
-}
-
-/*===========================================================================
- * FUNCTION   : processHalPPDataCB
- *
- * DESCRIPTION: callback function to process frame after HAL PP block
- *
- * PARAMETERS :
- *   @pOutput     : output after HAL PP processed
- *   @pUserData   : user data ptr (QCameraReprocessor)
- *
- * RETURN     : None
- *==========================================================================*/
-void QCamera3PostProcessor::processHalPPDataCB(qcamera_hal_pp_data_t *pOutput, void* pUserData)
-{
-    QCamera3PostProcessor *pme = (QCamera3PostProcessor *)pUserData;
-    pme->processHalPPData(pOutput);
-}
-
-/*===========================================================================
- * FUNCTION   : processHalPPData
- *
- * DESCRIPTION: process received frame after HAL PP block.
- *
- * PARAMETERS :
- *   @pData   : received qcamera_hal_pp_data_t data from HAL PP callback.
- *
- * RETURN     : int32_t type of status
- *              NO_ERROR  -- success
- *              none-zero failure code
- *
- * NOTE       : The frame after HAL PP need to send to jpeg encoding.
- *==========================================================================*/
-int32_t QCamera3PostProcessor::processHalPPData(qcamera_hal_pp_data_t *pData)
-{
-    int32_t rc = NO_ERROR;
-    LOGH("E");
-
-    if (pData == NULL) {
-        LOGE("HAL PP processed data is NULL");
-        return BAD_VALUE;
-    }
-    mm_camera_super_buf_t *frame = pData->frame;
-    if (frame == NULL) {
-        LOGE("HAL PP processed frame is NULL");
-        return BAD_VALUE;
-    }
-    // send to JPEG encoding
-    qcamera_hal3_jpeg_data_t *jpeg_job =
-                (qcamera_hal3_jpeg_data_t *)malloc(sizeof(qcamera_hal3_jpeg_data_t));
-    if (jpeg_job == NULL) {
-        LOGE("No memory for jpeg job");
-        return NO_MEMORY;
-    }
-
-    memset(jpeg_job, 0, sizeof(qcamera_hal3_jpeg_data_t));
-    jpeg_job->src_frame = frame;
-    jpeg_job->src_reproc_frame = pData->src_reproc_frame;
-    //for bokeh and Depth bufs[1] will be NULL.
-    if(pData->metadata != NULL)
-    {
-        jpeg_job->metadata = pData->metadata;
-    }
-    else {
-        jpeg_job->metadata = (metadata_buffer_t*) pData->bufs[1].buffer;
-    }
-    jpeg_job->src_metadata = pData->src_metadata;
-    jpeg_job->jpeg_settings = pData->jpeg_settings;
-
-    jpeg_job->halPPAllocatedBuf = pData->halPPAllocatedBuf;
-    jpeg_job->hal_pp_bufs = pData->bufs;
-    jpeg_job->snapshot_heap = pData->snapshot_heap;
-    jpeg_job->metadata_heap = pData->metadata_heap;
-
-    LOGD("halPPAllocatedBuf = %d needEncode %d", pData->halPPAllocatedBuf, pData->needEncode);
-
-    if ((!pData->halPPAllocatedBuf && !pData->needEncode)
-                || ((jpeg_job->jpeg_settings == NULL)
-                || (jpeg_job->jpeg_settings->image_type == CAM_HAL3_JPEG_TYPE_AUX))) {
-        LOGH("No need to encode input buffer, just release it.");
-        if(jpeg_job->src_reproc_frame)
-        {
-            QCamera3PicChannel *pChannel = (QCamera3PicChannel *)m_parent;
-            pChannel->releaseSnapshotBuffer(jpeg_job->src_reproc_frame);
-        }
-        releaseJpegJobData(jpeg_job);
-        free(jpeg_job);
-        jpeg_job = NULL;
-        free(pData);
-        return NO_ERROR;
-    }
-
-    if (pData->is_dim_valid) {
-        jpeg_job->jpeg_settings->is_dim_valid = true;
-        jpeg_job->jpeg_settings->output_dim = pData->outputDim;
-    }
-
-    if (pData->is_offset_valid) {
-        jpeg_job->jpeg_settings->is_offset_valid = true;
-        jpeg_job->jpeg_settings->offset = pData->snap_offset;
-    }
-
-    if (pData->is_format_valid) {
-        jpeg_job->jpeg_settings->is_format_valid = true;
-        jpeg_job->jpeg_settings->format = pData->outputFormat;
-    }
-
-    if (pData->is_crop_valid) {
-        jpeg_job->jpeg_settings->is_crop_valid = true;
-        jpeg_job->jpeg_settings->crop = pData->outputCrop;
-    }
-
-
-    // Enqueue frame to jpeg input queue
-    if (false == m_inputJpegQ.enqueue((void *)jpeg_job)) {
-        LOGW("Input Jpeg Q is not active!!!");
-        releaseJpegJobData(jpeg_job);
-        free(jpeg_job);
-        jpeg_job = NULL;
-    }
-
-    // wake up data proc thread
-    LOGH("Send frame for jpeg encoding");
-    m_dataProcTh.sendCmd(CAMERA_CMD_TYPE_DO_NEXT_JOB, FALSE, FALSE);
-
-    free(pData);
-    LOGH("X");
-    return rc;
-}
-
-void QCamera3PostProcessor::createHalPPManager()
-{
-    LOGH("E");
-    if (m_pHalPPManager == NULL) {
-        m_pHalPPManager = QCameraHALPPManager::getInstance();
-        LOGH("Created HAL PP manager");
-    }
-    LOGH("X");
-    return;
-}
-
-
-/*===========================================================================
- * FUNCTION   : initHalPPManager
- *
- * DESCRIPTION: function to create and init HALPP manager
- * RETURN     : None
- *==========================================================================*/
-int32_t QCamera3PostProcessor::initHalPPManager()
-{
-    int32_t rc = NO_ERROR;
-
-    if (m_pHalPPManager == NULL) {
-        LOGE("failed as PP manager is NULL");
-        return BAD_VALUE;
-    }
-
-    QCamera3HardwareInterface* hal_obj = (QCamera3HardwareInterface*)m_parent->mUserData;
-
-    void *staticParam = hal_obj->getCamHalCapabilities();;
-    cam_hal_pp_type_t halPPType = hal_obj->getHalPPType();
-    LOGH("E halPPType:%d mPProcType: %d", halPPType, m_pHalPPManager->getPprocType());
-    if (m_pHalPPManager->getPprocType() != halPPType) {
-        //HAL PP block might change, deinit and re init
-        rc = m_pHalPPManager->deinit();
-        if (rc != NO_ERROR) {
-            LOGE("HAL PP type %d init failed, rc = %d", halPPType, rc);
-            return rc;
-        }
-        rc = m_pHalPPManager->init(halPPType, QCamera3PostProcessor::processHalPPDataCB,
-                                  QCamera3PostProcessor::releaseSuperBufCb, staticParam);
-        if (rc != NO_ERROR) {
-            LOGE("HAL PP type %d init failed, rc = %d", halPPType, rc);
-        }
-    }
-    return rc;
-}
-
-void QCamera3PostProcessor::releaseSuperBufCb(mm_camera_super_buf_t *super_buf, void* pUserData)
-{
-    QCamera3PostProcessor *pme = (QCamera3PostProcessor *)pUserData;
-    pme->releaseSuperBuf(super_buf);
-}
-
-/*===========================================================================
- * FUNCTION   : getChannelByHandle
- *
- * DESCRIPTION: function to get channel by handle
- * PARAMETERS :
- *   @channelHandle  : channel handle
- * RETURN     : QCameraChannel
- *==========================================================================*/
-QCamera3Channel *QCamera3PostProcessor::getChannelByHandle(uint32_t channelHandle)
-{
-    QCamera3Channel *pChannel = NULL;
-
-    if (m_parent->getMyHandle() == channelHandle) {
-        pChannel = m_parent;
-    }
-    // check reprocess channel if not found
-    if (pChannel == NULL) {
-        for (int8_t i = 0; i < m_ppChannelCnt; i++) {
-            if (m_pReprocChannel[i] != NULL &&
-                m_pReprocChannel[i]->getMyHandle() == channelHandle) {
-                pChannel = m_pReprocChannel[i];
-                break;
-            }
-        }
-    }
-    return pChannel;
 }
 
 /* EXIF related helper methods */
@@ -4012,6 +4879,21 @@ QCamera3Exif *QCamera3PostProcessor::getExifData(metadata_buffer_t *metadata,
 
     int32_t rc = NO_ERROR;
     uint32_t count = 0;
+
+    // Real EXIF UserComment entry for org.lineageos.camera.algorithms.exifComment.
+    // The still processor already snapshotted the UTF-8 payload at submission
+    // time, so the encoded JPEG carries exactly the bytes the request supplied.
+    // The post-encode carrier (QCamera3ExifExtras, which can also grow an APP1
+    // segment) is not used here: the JPEG output record exposes no destination
+    // capacity, so a growing rewrite could not be proven to fit.
+    if (jpeg_settings != NULL && jpeg_settings->native_stages.exif_comment_length > 0 &&
+            jpeg_settings->native_stages.exif_comment_length <
+                int32_t(sizeof(jpeg_settings->native_stages.exif_comment))) {
+        const int32_t commentLength = jpeg_settings->native_stages.exif_comment_length;
+        exif->addEntry(EXIFTAGID_EXIF_USER_COMMENT, EXIFTAGTYPE_EXIF_USER_COMMENT,
+                uint32_t(commentLength + 1),
+                (void *)jpeg_settings->native_stages.exif_comment);
+    }
 
     // add exif entries
     String8 dateTime;
