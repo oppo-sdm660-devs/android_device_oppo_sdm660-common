@@ -1,0 +1,10 @@
+//
+// SPDX-FileCopyrightText: The LineageOS Project
+// SPDX-License-Identifier: Apache-2.0
+//
+
+// Static Aperture RRO for oppo sdm660 (R11 / R11s).
+runtime_resource_overlay {
+    name: "ApertureResSdm660",
+    product_specific: true,
+}

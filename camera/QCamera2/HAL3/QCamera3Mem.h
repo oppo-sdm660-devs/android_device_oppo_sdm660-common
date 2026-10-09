@@ -32,10 +32,12 @@
 
 // System dependencies
 #include <linux/msm_ion.h>
-#if TARGET_ION_ABI_VERSION >= 2
-#include <ion/ion.h>
+#include <linux/ion.h>
 #include <linux/dma-buf.h>
-#endif //TARGET_ION_ABI_VERSION
+#include <stddef.h>
+static_assert(sizeof(struct ion_allocation_data) == 24 &&
+        offsetof(struct ion_allocation_data, fd) == 16,
+        "The R11/R11s HAL3 requires the modern ION fd-returning allocation ABI");
 #include <utils/Mutex.h>
 
 // Camera dependencies
@@ -44,7 +46,6 @@
 extern "C" {
 #include "mm_camera_interface.h"
 }
-#if TARGET_ION_ABI_VERSION >= 2
 #ifndef CAM_CACHE_OPS
 #define CAM_CACHE_OPS
 enum {
@@ -57,7 +58,6 @@ enum {
 #define ION_IOC_INV_CACHES CAM_INV_CACHE
 #define ION_IOC_CLEAN_INV_CACHES CAM_CLEAN_INV_CACHE
 #endif //CAM_CACHE_OPS
-#endif //TARGET_ION_ABI_VERSION
 using namespace android;
 
 namespace qcamera {
@@ -100,8 +100,7 @@ public:
 protected:
     struct QCamera3MemInfo {
         int fd;
-        int main_ion_fd;
-        ion_user_handle_t handle;
+        bool registered;
         size_t size;
     };
 

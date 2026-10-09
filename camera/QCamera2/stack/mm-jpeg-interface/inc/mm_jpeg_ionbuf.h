@@ -32,20 +32,29 @@
 
 // System dependencies
 #include <linux/msm_ion.h>
-#if TARGET_ION_ABI_VERSION >= 2
-#include <ion/ion.h>
+#include <linux/ion.h>
 #include <linux/dma-buf.h>
-#endif //TARGET_ION_ABI_VERSION
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#ifdef __cplusplus
+static_assert(sizeof(struct ion_allocation_data) == 24 &&
+        offsetof(struct ion_allocation_data, fd) == 16,
+        "The R11/R11s JPEG requires the modern ION fd-returning allocation ABI");
+#else
+_Static_assert(sizeof(struct ion_allocation_data) == 24 &&
+        offsetof(struct ion_allocation_data, fd) == 16,
+        "The R11/R11s JPEG requires the modern ION fd-returning allocation ABI");
+#endif
 // JPEG dependencies
 #include "mm_jpeg_dbg.h"
 
 typedef struct  {
-  struct ion_fd_data ion_info_fd;
-  struct ion_allocation_data alloc;
   int p_pmem_fd;
   size_t size;
-  int ion_fd;
+  size_t allocation_size;
   uint8_t *addr;
+  bool owns_buffer;
 } buffer_t;
 
 /** buffer_allocate:
@@ -120,4 +129,3 @@ int buffer_clean(buffer_t *p_buffer);
 int buffer_cache_ops(buffer_t *p_buffer, uint32_t cmd);
 
 #endif
-

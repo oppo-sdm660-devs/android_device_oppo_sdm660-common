@@ -69,7 +69,6 @@ public:
                          uint8_t minStreamBufNum,
                          cam_feature_mask_t postprocess_mask,
                          cam_is_type_t is_type,
-                         uint32_t batchSize,
                          hal3_stream_cb_routine stream_cb,
                          void *userdata,
                          bool isSecureMode,
@@ -80,7 +79,6 @@ public:
     virtual int32_t processDataNotify(mm_camera_super_buf_t *bufs);
     virtual int32_t start();
     virtual int32_t stop();
-    virtual int32_t queueBatchBuf();
 
     static void dataNotifyCB(mm_camera_super_buf_t *recvd_frame, void *userdata);
     static void *dataProcRoutine(void *data);
@@ -136,15 +134,6 @@ private:
     Mutex mLock;    //Lock controlling access to 'mBufDefs'
     Mutex mParamLock;    //Lock setparam
 
-    uint32_t mBatchSize; // 0: No batch, non-0: Number of imaage bufs in a batch
-    uint8_t mNumBatchBufs; //Number of batch buffers which can hold image bufs
-    QCamera3HeapMemory *mStreamBatchBufs; //Pointer to batch buffers memory
-    mm_camera_buf_def_t *mBatchBufDefs; //Pointer to array of batch bufDefs
-    mm_camera_buf_def_t *mCurrentBatchBufDef; //batch buffer in progress during
-                                              //aggregation
-    uint32_t    mBufsStaged; //Number of image buffers aggregated into
-                             //currentBatchBufDef
-    QCameraQueue mFreeBatchBufQ; //Buffer queue containing empty batch buffers
 
     static int32_t get_bufs(
                      cam_frame_len_offset_t *offset,
@@ -169,18 +158,8 @@ private:
     int32_t invalidateBuf(uint32_t index);
     int32_t cleanInvalidateBuf(uint32_t index);
     int32_t cleanBuf(uint32_t index);
-    int32_t getBatchBufs(
-            uint8_t *num_bufs, uint8_t **initial_reg_flag,
-            mm_camera_buf_def_t **bufs,
-            mm_camera_map_unmap_ops_tbl_t *ops_tbl);
-    int32_t putBatchBufs(mm_camera_map_unmap_ops_tbl_t *ops_tbl);
-    int32_t getBatchBufDef(mm_camera_buf_def_t& batchBufDef,
-            int32_t index);
-    int32_t aggregateBufToBatch(mm_camera_buf_def_t& bufDef);
-    int32_t handleBatchBuffer(mm_camera_super_buf_t *superBuf);
 
     static const char* mStreamNames[CAM_STREAM_TYPE_MAX];
-    void flushFreeBatchBufQ();
     bool mDualStream;
     uint32_t mMasterCam;
 };

@@ -32,6 +32,8 @@
 
 // Camera dependencies
 #include "hardware/camera_common.h"
+#include <utils/Mutex.h>
+#include <deque>
 
 extern "C" {
 #include "mm_camera_interface.h"
@@ -46,9 +48,7 @@ public:
     static QCameraFlash& getInstance();
 
     int32_t registerCallbacks(const camera_module_callbacks_t* callbacks);
-    int32_t initFlash(const int camera_id);
-    int32_t setFlashMode(const int camera_id, const bool on);
-    int32_t deinitFlash(const int camera_id);
+    int32_t setTorchMode(const int camera_id, const bool on);
     int32_t reserveFlashForCamera(const int camera_id);
     int32_t releaseFlashFromCamera(const int camera_id);
 
@@ -58,9 +58,26 @@ private:
     QCameraFlash(const QCameraFlash&);
     QCameraFlash& operator=(const QCameraFlash&);
 
+    // Locked helpers never call framework callbacks.
+    int32_t initFlashLocked(const int camera_id);
+    int32_t setFlashModeLocked(const int camera_id, const bool on);
+    int32_t deinitFlashLocked(const int camera_id);
+    bool sharesFlashLocked(const int first, const int second);
+    int cameraOwnerLocked(const int camera_id);
+    int torchOwnerLocked(const int camera_id);
+    void queueGroupStatusLocked(const int camera_id, const int status);
+    void dispatchCallbacks();
+    struct TorchEvent {
+        int cameraId;
+        int status;
+    };
+    android::Mutex m_lock;
+    std::deque<TorchEvent> m_pendingCallbacks;
+    bool m_dispatching;
     const camera_module_callbacks_t *m_callbacks;
     int32_t m_flashFds[MM_CAMERA_MAX_NUM_SENSORS];
     bool m_flashOn[MM_CAMERA_MAX_NUM_SENSORS];
+    bool m_flashModeValid[MM_CAMERA_MAX_NUM_SENSORS];
     bool m_cameraOpen[MM_CAMERA_MAX_NUM_SENSORS];
 };
 

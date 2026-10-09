@@ -30,10 +30,7 @@
 #ifndef __QCAMERA3CROPREGIONMAPPER_H__
 #define __QCAMERA3CROPREGIONMAPPER_H__
 
-// System dependencies
-#include <utils/Errors.h>
-
-using namespace android;
+#include <stdint.h>
 
 namespace qcamera {
 
@@ -43,7 +40,8 @@ public:
     virtual ~QCamera3CropRegionMapper();
 
     void update(uint32_t active_array_w, uint32_t active_array_h,
-            uint32_t sensor_w, uint32_t sensor_h);
+            uint32_t sensor_w, uint32_t sensor_h,
+            int32_t active_array_left = 0, int32_t active_array_top = 0);
     void toActiveArray(int32_t& crop_left, int32_t& crop_top,
             int32_t& crop_width, int32_t& crop_height);
     void toSensor(int32_t& crop_left, int32_t& crop_top,
@@ -57,6 +55,7 @@ private:
     /* sensor output size */
     int32_t mSensorW, mSensorH;
     int32_t mActiveArrayW, mActiveArrayH;
+    int32_t mActiveArrayLeft, mActiveArrayTop;
 
     void boundToSize(int32_t& left, int32_t& top, int32_t& width,
             int32_t& height, int32_t bound_w, int32_t bound_h);

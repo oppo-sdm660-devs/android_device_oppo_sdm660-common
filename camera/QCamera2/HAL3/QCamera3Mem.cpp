@@ -31,6 +31,10 @@
 
 // System dependencies
 #include <fcntl.h>
+#include <errno.h>
+#include <limits.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 #define MMAN_H <SYSTEM_HEADER_PREFIX/mman.h>
 #include MMAN_H
 #include "gralloc_priv.h"
@@ -70,8 +74,8 @@ QCamera3Memory::QCamera3Memory()
     mBufferCount = 0;
     for (int i = 0; i < MM_CAMERA_MAX_NUM_FRAMES; i++) {
         mMemInfo[i].fd = -1;
-        mMemInfo[i].main_ion_fd = -1;
-        mMemInfo[i].handle = 0;
+        mMemInfo[i].registered = false;
+        mPtr[i] = NULL;
         mMemInfo[i].size = 0;
         mCurrentFrameNumbers[i] = -1;
     }
@@ -108,78 +112,50 @@ int QCamera3Memory::cacheOpsInternal(uint32_t index, unsigned int cmd, void *vad
 {
     ATRACE_CALL();
     Mutex::Autolock lock(mLock);
+    (void)vaddr;
 
-    int ret = OK;
-#ifndef TARGET_ION_ABI_VERSION
-    struct ion_flush_data cache_inv_data;
-    struct ion_custom_data custom_data;
-
-    if (MM_CAMERA_MAX_NUM_FRAMES <= index) {
-        LOGE("index %d out of bound [0, %d)",
-                 index, MM_CAMERA_MAX_NUM_FRAMES);
+    if (index >= MM_CAMERA_MAX_NUM_FRAMES || !mMemInfo[index].registered ||
+            mMemInfo[index].fd < 0) {
         return BAD_INDEX;
     }
 
-    if (0 == mMemInfo[index].handle) {
-        LOGE("Buffer at %d not registered", index);
-        return BAD_INDEX;
+    uint64_t access;
+    switch (cmd) {
+    case CAM_INV_CACHE:
+        access = DMA_BUF_SYNC_READ;
+        break;
+    case CAM_CLEAN_CACHE:
+        access = DMA_BUF_SYNC_WRITE;
+        break;
+    case CAM_CLEAN_INV_CACHE:
+        access = DMA_BUF_SYNC_RW;
+        break;
+    default:
+        return BAD_VALUE;
     }
 
-    memset(&cache_inv_data, 0, sizeof(cache_inv_data));
-    memset(&custom_data, 0, sizeof(custom_data));
-    cache_inv_data.vaddr = vaddr;
-    cache_inv_data.fd = mMemInfo[index].fd;
-    cache_inv_data.handle = mMemInfo[index].handle;
-    cache_inv_data.length = (unsigned int)mMemInfo[index].size;
-    custom_data.cmd = cmd;
-    custom_data.arg = (unsigned long)&cache_inv_data;
+    struct dma_buf_sync sync = {};
+    sync.flags = DMA_BUF_SYNC_START | access;
+    int ret;
+    do {
+        ret = ioctl(mMemInfo[index].fd, DMA_BUF_IOCTL_SYNC, &sync);
+    } while (ret < 0 && (errno == EINTR || errno == EAGAIN));
+    if (ret < 0) {
+        const int error = errno;
+        LOGE("DMA_BUF_IOCTL_SYNC start failed: %s", strerror(error));
+        return -error;
+    }
 
-    LOGD("addr = %p, fd = %d, handle = %lx length = %d, ION Fd = %d",
-          cache_inv_data.vaddr, cache_inv_data.fd,
-         (unsigned long)cache_inv_data.handle, cache_inv_data.length,
-         mMemInfo[index].main_ion_fd);
-    ret = ioctl(mMemInfo[index].main_ion_fd, ION_IOC_CUSTOM, &custom_data);
-    if (ret < 0)
-        LOGE("Cache Invalidate failed: %s\n", strerror(errno));
-#else
-  struct dma_buf_sync buf_sync_start;
-  struct dma_buf_sync buf_sync_end;
-
-  /* ION_IOC_CLEAN_CACHES-->call the DMA_BUF_IOCTL_SYNC IOCTL with flags DMA_BUF_SYNC_START
-     and DMA_BUF_SYNC_WRITE and then call the DMA_BUF_IOCTL_SYNC IOCTL with flags DMA_BUF_SYNC_END
-     and DMA_BUF_SYNC_WRITE
-     ION_IOC_INV_CACHES-->call the DMA_BUF_IOCTL_SYNC IOCT with flags DMA_BUF_SYNC_START and
-     DMA_BUF_SYNC_WRITE and then call the DMA_BUF_IOCTL_SYNC IOCT with flags DMA_BUF_SYNC_END
-     and DMA_BUF_SYNC_READ
-  */
-
-  switch (cmd) {
-  case CAM_INV_CACHE:
-    buf_sync_start.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE;
-    buf_sync_end.flags   = DMA_BUF_SYNC_END   | DMA_BUF_SYNC_READ;
-    break;
-  case CAM_CLEAN_CACHE:
-    buf_sync_start.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE;
-    buf_sync_end.flags   = DMA_BUF_SYNC_END   | DMA_BUF_SYNC_WRITE;
-    break;
-  default:
-  case CAM_CLEAN_INV_CACHE:
-    buf_sync_start.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW;
-    buf_sync_end.flags   = DMA_BUF_SYNC_END   | DMA_BUF_SYNC_RW;
-    break;
-  }
-
-  ret = ioctl(mMemInfo[index].fd, DMA_BUF_IOCTL_SYNC, &buf_sync_start.flags);
-  if (ret) {
-      LOGE("Failed first DMA_BUF_IOCTL_SYNC start\n");
-  }
-  ret = ioctl(mMemInfo[index].fd, DMA_BUF_IOCTL_SYNC, &buf_sync_end.flags);
-  if (ret) {
-      LOGE("Failed first DMA_BUF_IOCTL_SYNC End\n");
-  }
-  (void) vaddr;
-#endif //TARGET_ION_ABI_VERSION
-    return ret;
+    sync.flags = DMA_BUF_SYNC_END | access;
+    do {
+        ret = ioctl(mMemInfo[index].fd, DMA_BUF_IOCTL_SYNC, &sync);
+    } while (ret < 0 && (errno == EINTR || errno == EAGAIN));
+    if (ret < 0) {
+        const int error = errno;
+        LOGE("DMA_BUF_IOCTL_SYNC end failed: %s", strerror(error));
+        return -error;
+    }
+    return OK;
 }
 
 /*===========================================================================
@@ -200,7 +176,7 @@ int QCamera3Memory::getFd(uint32_t index)
         return BAD_INDEX;
     }
 
-    if (0 == mMemInfo[index].handle) {
+    if (!mMemInfo[index].registered) {
         return BAD_INDEX;
     }
 
@@ -225,7 +201,7 @@ ssize_t QCamera3Memory::getSize(uint32_t index)
         return BAD_INDEX;
     }
 
-    if (0 == mMemInfo[index].handle) {
+    if (!mMemInfo[index].registered) {
         return BAD_INDEX;
     }
 
@@ -271,6 +247,26 @@ int32_t QCamera3Memory::getBufDef(const cam_frame_len_offset_t &offset,
         LOGE("Memory not allocated");
         return NO_INIT;
     }
+    if (index >= MM_CAMERA_MAX_NUM_FRAMES || !mMemInfo[index].registered ||
+            mMemInfo[index].fd < 0 ||
+            offset.num_planes == 0 ||
+            offset.num_planes > sizeof(bufDef.planes_buf.planes) /
+                    sizeof(bufDef.planes_buf.planes[0])) {
+        return BAD_VALUE;
+    }
+    const size_t backing_size = mMemInfo[index].size;
+    if (offset.frame_len > backing_size) {
+        return BAD_VALUE;
+    }
+    size_t plane_bytes = 0;
+    for (uint32_t i = 0; i < offset.num_planes; ++i) {
+        const size_t length = offset.mp[i].len;
+        if (length == 0 || offset.mp[i].offset > length ||
+                length > backing_size - plane_bytes) {
+            return BAD_VALUE;
+        }
+        plane_bytes += length;
+    }
 
     bufDef.fd = mMemInfo[index].fd;
     bufDef.frame_len = mMemInfo[index].size;
@@ -286,7 +282,7 @@ int32_t QCamera3Memory::getBufDef(const cam_frame_len_offset_t &offset,
     bufDef.planes_buf.planes[0].reserved[0] = 0;
     for (int i = 1; i < bufDef.planes_buf.num_planes; i++) {
          bufDef.planes_buf.planes[i].length = offset.mp[i].len;
-         bufDef.planes_buf.planes[i].m.userptr = (long unsigned int)mMemInfo[i].fd;
+         bufDef.planes_buf.planes[i].m.userptr = (long unsigned int)mMemInfo[index].fd;
          bufDef.planes_buf.planes[i].data_offset = offset.mp[i].offset;
          bufDef.planes_buf.planes[i].reserved[0] =
                  bufDef.planes_buf.planes[i-1].reserved[0] +
@@ -344,87 +340,52 @@ QCamera3HeapMemory::~QCamera3HeapMemory()
 int QCamera3HeapMemory::allocOneBuffer(QCamera3MemInfo &memInfo,
         unsigned int heap_id, size_t size)
 {
-    int rc = OK;
-    struct ion_handle_data handle_data;
-    struct ion_allocation_data allocData;
-    struct ion_fd_data ion_info_fd;
-    int main_ion_fd = -1;
-
-#ifndef TARGET_ION_ABI_VERSION
-    main_ion_fd = open("/dev/ion", O_RDONLY);
-#else
-    main_ion_fd = ion_open();
-#endif
-    if (main_ion_fd < 0) {
-        LOGE("Ion dev open failed: %s\n", strerror(errno));
-        goto ION_OPEN_FAILED;
-    }
-
-    memset(&ion_info_fd, 0, sizeof(ion_info_fd));
-    memset(&allocData, 0, sizeof(allocData));
-    allocData.len = size;
-    /* to make it page size aligned */
-    allocData.len = (allocData.len + 4095U) & (~4095U);
-    allocData.align = 4096;
-    allocData.heap_id_mask = heap_id;
-    allocData.flags = ION_FLAG_CACHED;
+    size_t alignment = 4096;
+    uint32_t heap_mask = heap_id;
+    uint32_t flags = ION_FLAG_CACHED;
 
     if (m_bIsSecureMode) {
-        LOGD("Allocate secure buffer\n");
-        if (QCameraCommon::is_target_SDM450())
-            allocData.heap_id_mask = ION_HEAP(ION_CP_MM_HEAP_ID);
-        else
-            allocData.heap_id_mask = ION_HEAP(ION_SECURE_DISPLAY_HEAP_ID);
-        allocData.flags = ION_FLAG_SECURE | ION_FLAG_CP_CAMERA;
-        allocData.align = 2097152; // 2 MiB alignment to be able to protect later
-        allocData.len = (allocData.len + 2097152U) & (~2097152U);
+        heap_mask = ION_HEAP(ION_SECURE_DISPLAY_HEAP_ID);
+        flags = ION_FLAG_SECURE | ION_FLAG_CP_CAMERA;
+        alignment = 2097152;
+    }
+    if (size == 0 || size > static_cast<size_t>(SSIZE_MAX) - (alignment - 1)) {
+        LOGE("Invalid ION allocation size %zu", size);
+        return BAD_VALUE;
+    }
+    const size_t allocation_size = (size + alignment - 1) & ~(alignment - 1);
+
+    const int allocator_fd = open("/dev/ion", O_RDONLY | O_CLOEXEC);
+    if (allocator_fd < 0) {
+        LOGE("Ion dev open failed: %s", strerror(errno));
+        return NO_MEMORY;
     }
 
-#ifndef TARGET_ION_ABI_VERSION
-    rc = ioctl(main_ion_fd, ION_IOC_ALLOC, &allocData);
-#else
-    rc = ion_alloc_fd(main_ion_fd, allocData.len, allocData.align, allocData.heap_id_mask,
-              allocData.flags, &ion_info_fd.fd);
-#endif //TARGET_ION_ABI_VERSION
+    struct ion_allocation_data allocation = {};
+    allocation.len = allocation_size;
+    allocation.heap_id_mask = heap_mask;
+    allocation.flags = flags;
+    int rc;
+    do {
+        rc = ioctl(allocator_fd, ION_IOC_ALLOC, &allocation);
+    } while (rc < 0 && errno == EINTR);
+    const int allocation_error = errno;
+    // Allocation returns an owned dma-buf fd.
+    close(allocator_fd);
     if (rc < 0) {
-        LOGE("ION allocation for len %d failed: %s\n", allocData.len,
-            strerror(errno));
-        goto ION_ALLOC_FAILED;
+        LOGE("ION allocation for len %zu failed: %s", allocation_size,
+                strerror(allocation_error));
+        return NO_MEMORY;
+    }
+    if (allocation.fd > static_cast<uint32_t>(INT_MAX)) {
+        LOGE("ION returned an invalid dma-buf descriptor");
+        return NO_MEMORY;
     }
 
-#ifndef TARGET_ION_ABI_VERSION
-    ion_info_fd.handle = allocData.handle;
-    rc = ioctl(main_ion_fd, ION_IOC_SHARE, &ion_info_fd);
-#else
-    ion_info_fd.handle = ion_info_fd.fd;
-#endif //TARGET_ION_ABI_VERSION
-    if (rc < 0) {
-        LOGE("ION map failed %s\n", strerror(errno));
-        goto ION_MAP_FAILED;
-    }
-
-    memInfo.main_ion_fd = main_ion_fd;
-    memInfo.fd = ion_info_fd.fd;
-    memInfo.handle = ion_info_fd.handle;
-    memInfo.size = allocData.len;
+    memInfo.fd = static_cast<int>(allocation.fd);
+    memInfo.registered = true;
+    memInfo.size = allocation_size;
     return OK;
-
-ION_MAP_FAILED:
-    memset(&handle_data, 0, sizeof(handle_data));
-    handle_data.handle = ion_info_fd.handle;
-#ifndef TARGET_ION_ABI_VERSION
-    ioctl(main_ion_fd, ION_IOC_FREE, &handle_data);
-#else
-    close(ion_info_fd.fd);
-#endif //TARGET_ION_ABI_VERSION
-ION_ALLOC_FAILED:
-#ifndef TARGET_ION_ABI_VERSION
-    close(main_ion_fd);
-#else
-    ion_close(main_ion_fd);
-#endif //TARGET_ION_ABI_VERSION
-ION_OPEN_FAILED:
-    return NO_MEMORY;
 }
 
 /*===========================================================================
@@ -439,25 +400,11 @@ ION_OPEN_FAILED:
  *==========================================================================*/
 void QCamera3HeapMemory::deallocOneBuffer(QCamera3MemInfo &memInfo)
 {
-    struct ion_handle_data handle_data;
-
-    if (memInfo.fd >= 0) {
+    if (memInfo.registered && memInfo.fd >= 0) {
         close(memInfo.fd);
-        memInfo.fd = -1;
     }
-
-    if (memInfo.main_ion_fd >= 0) {
-        memset(&handle_data, 0, sizeof(handle_data));
-        handle_data.handle = memInfo.handle;
-#ifndef TARGET_ION_ABI_VERSION
-        ioctl(memInfo.main_ion_fd, ION_IOC_FREE, &handle_data);
-        close(memInfo.main_ion_fd);
-#else
-       ion_close(memInfo.main_ion_fd);
-#endif //TARGET_ION_ABI_VERSION
-        memInfo.main_ion_fd = -1;
-    }
-    memInfo.handle = 0;
+    memInfo.fd = -1;
+    memInfo.registered = false;
     memInfo.size = 0;
 }
 
@@ -506,7 +453,7 @@ int32_t QCamera3HeapMemory::markFrameNumber(uint32_t index, uint32_t frameNumber
         return BAD_INDEX;
     }
 
-    if (0 == mMemInfo[index].handle) {
+    if (!mMemInfo[index].registered) {
         LOGE("Buffer at %d not allocated", index);
         return BAD_INDEX;
     }
@@ -541,7 +488,7 @@ int32_t QCamera3HeapMemory::getFrameNumber(uint32_t index)
         return -1;
     }
 
-    if (0 == mMemInfo[index].handle) {
+    if (!mMemInfo[index].registered) {
         LOGE("Buffer at %d not registered", index);
         return -1;
     }
@@ -571,7 +518,7 @@ int32_t QCamera3HeapMemory::getOldestFrameNumber(uint32_t &bufIndex)
 
     for (uint32_t index = 0;
             index < mBufferCount; index++) {
-        if (mMemInfo[index].handle) {
+        if (mMemInfo[index].registered) {
             if ((empty) || (!empty && oldest > mCurrentFrameNumbers[index]
                 && mCurrentFrameNumbers[index] != -1)) {
                 oldest = mCurrentFrameNumbers[index];
@@ -606,7 +553,7 @@ int32_t QCamera3HeapMemory::getBufferIndex(uint32_t frameNumber)
 
     for (uint32_t index = 0;
             index < mBufferCount; index++) {
-        if (mMemInfo[index].handle &&
+        if (mMemInfo[index].registered &&
                 mCurrentFrameNumbers[index] == (int32_t)frameNumber)
             return (int32_t)index;
     }
@@ -642,18 +589,14 @@ void *QCamera3HeapMemory::getPtr(uint32_t index)
  *==========================================================================*/
 int QCamera3HeapMemory::allocate(size_t size)
 {
-#ifndef TARGET_ION_ABI_VERSION
-    unsigned int heap_id_mask = 0x1 << ION_IOMMU_HEAP_ID;
-#else
-    uint32_t heap_id_mask = 0x1 << ION_SYSTEM_HEAP_ID;
-#endif // TARGET_ION_ABI_VERSION
+    const uint32_t heap_id_mask = ION_HEAP(ION_SYSTEM_HEAP_ID);
     uint32_t i;
     int rc = NO_ERROR;
 
     //Note that now we allow incremental allocation. In other words, we allow
     //multiple alloc being called as long as the sum of count does not exceed
     //mMaxCnt.
-    if (mBufferCount > 0) {
+    if (mBufferCount > 0 || mMaxCnt == 0) {
         LOGE("There is already buffer allocated.");
         return BAD_INDEX;
     }
@@ -712,17 +655,13 @@ ALLOC_FAILED:
 int QCamera3HeapMemory::allocateOne(size_t size)
 {
     void *vaddr = NULL;
-#ifndef TARGET_ION_ABI_VERSION
-    unsigned int heap_id_mask = 0x1 << ION_IOMMU_HEAP_ID;
-#else
-    uint32_t heap_id_mask = 0x1 << ION_SYSTEM_HEAP_ID;
-#endif // TARGET_ION_ABI_VERSION
+    const uint32_t heap_id_mask = ION_HEAP(ION_SYSTEM_HEAP_ID);
     int rc = NO_ERROR;
 
     //Note that now we allow incremental allocation. In other words, we allow
     //multiple alloc being called as long as the sum of count does not exceed
     //mMaxCnt.
-    if (mBufferCount + 1 > mMaxCnt) {
+    if (mBufferCount >= mMaxCnt) {
         LOGE("Buffer count %d + 1 out of bound. Max is %d",
                 mBufferCount, mMaxCnt);
         return BAD_INDEX;
@@ -883,98 +822,57 @@ QCamera3GrallocMemory::~QCamera3GrallocMemory()
 int QCamera3GrallocMemory::registerBuffer(buffer_handle_t *buffer,
         __unused cam_stream_type_t type)
 {
-    status_t ret = NO_ERROR;
-    struct ion_fd_data ion_info_fd;
-    void *vaddr = NULL;
-    int32_t colorSpace = ITU_R_601_FR;
-    int32_t idx = -1;
-
-    LOGD("E");
-
-    memset(&ion_info_fd, 0, sizeof(ion_info_fd));
-
-    if (0 <= getMatchBufIndex((void *) buffer)) {
-        LOGL("Buffer already registered");
-        return ALREADY_EXISTS;
+    if (buffer == NULL || private_handle_t::validate(*buffer) != 0) {
+        LOGE("Invalid Qualcomm gralloc buffer handle");
+        return BAD_VALUE;
+    }
+    const private_handle_t *handle =
+            static_cast<const private_handle_t *>(*buffer);
+    // The camera protocol requires the backing fd at offset zero.
+    if (handle->fd < 0 || handle->size == 0 ||
+            handle->size > static_cast<size_t>(SSIZE_MAX) || handle->offset != 0) {
+        LOGE("Invalid gralloc backing store: fd %d, size %u, offset %u",
+                handle->fd, handle->size, handle->offset);
+        return BAD_VALUE;
     }
 
     Mutex::Autolock lock(mLock);
-    if (mBufferCount >= (MM_CAMERA_MAX_NUM_FRAMES - mStartIdx)) {
-        LOGE("Number of buffers %d greater than what's supported %d",
-                 mBufferCount, MM_CAMERA_MAX_NUM_FRAMES - mStartIdx);
-        return BAD_INDEX;
-    }
-
-    idx = getFreeIndexLocked();
-    if (0 > idx) {
-        LOGE("No available memory slots");
-        return BAD_INDEX;
-    }
-
-    mBufferHandle[idx] = buffer;
-    mPrivateHandle[idx] = (struct private_handle_t *)(*mBufferHandle[idx]);
-
-    setMetaData(mPrivateHandle[idx], UPDATE_COLOR_SPACE, &colorSpace);
-
-#ifndef TARGET_ION_ABI_VERSION
-    mMemInfo[idx].main_ion_fd = open("/dev/ion", O_RDONLY);
-#else
-    mMemInfo[idx].main_ion_fd = ion_open();
-#endif //TARGET_ION_ABI_VERSION
-    if (mMemInfo[idx].main_ion_fd < 0) {
-        LOGE("failed: could not open ion device");
-        ret = NO_MEMORY;
-        goto end;
-    } else {
-        ion_info_fd.fd = mPrivateHandle[idx]->fd;
-#ifndef TARGET_ION_ABI_VERSION
-        if (ioctl(mMemInfo[idx].main_ion_fd,
-                  ION_IOC_IMPORT, &ion_info_fd) < 0) {
-            LOGE("ION import failed\n");
-            close(mMemInfo[idx].main_ion_fd);
-            ret = NO_MEMORY;
-            goto end;
+    for (uint32_t i = mStartIdx; i < MM_CAMERA_MAX_NUM_FRAMES; ++i) {
+        if (mBufferHandle[i] == buffer) {
+            return ALREADY_EXISTS;
         }
-#endif //TARGET_ION_ABI_VERSION
     }
-    LOGD("idx = %d, fd = %d, size = %d, offset = %d",
-             idx, mPrivateHandle[idx]->fd,
-            mPrivateHandle[idx]->size,
-            mPrivateHandle[idx]->offset);
-    mMemInfo[idx].fd = mPrivateHandle[idx]->fd;
-    mMemInfo[idx].size =
-            ( /* FIXME: Should update ION interface */ size_t)
-            mPrivateHandle[idx]->size;
-#ifndef TARGET_ION_ABI_VERSION
-    mMemInfo[idx].handle = ion_info_fd.handle;
-#else
-    mMemInfo[idx].handle = ion_info_fd.fd;
-#endif //TARGET_ION_ABI_VERSION
+    if (mStartIdx >= MM_CAMERA_MAX_NUM_FRAMES ||
+            mBufferCount >= MM_CAMERA_MAX_NUM_FRAMES - mStartIdx) {
+        return BAD_INDEX;
+    }
+    const int32_t idx = getFreeIndexLocked();
+    if (idx < 0) {
+        return BAD_INDEX;
+    }
 
-    mBufferCount++;
+    // Gralloc owns the fd; this object owns the CPU mapping.
+    void *vaddr = NULL;
+    if (!m_bIsSecureMode) {
+        vaddr = mmap(NULL, static_cast<size_t>(handle->size),
+                PROT_READ | PROT_WRITE, MAP_SHARED, handle->fd, 0);
+        if (vaddr == MAP_FAILED) {
+            LOGE("Gralloc mmap failed: %s", strerror(errno));
+            return NO_MEMORY;
+        }
+    }
+    mBufferHandle[idx] = buffer;
+    mPrivateHandle[idx] = const_cast<private_handle_t *>(handle);
+    mMemInfo[idx].fd = handle->fd;
+    mMemInfo[idx].size = static_cast<size_t>(handle->size);
+    mMemInfo[idx].registered = true;
+    mPtr[idx] = vaddr;
+    mCurrentFrameNumbers[idx] = -1;
 
-    if (m_bIsSecureMode) {
-        goto end;
-    }
-    vaddr = mmap(NULL,
-            mMemInfo[idx].size,
-            PROT_READ | PROT_WRITE,
-            MAP_SHARED,
-            mMemInfo[idx].fd, 0);
-    if (vaddr == MAP_FAILED) {
-        LOGE("mmap failed");
-        /* we have to close the main_ion_fd when mmap fails*/
-        close(mMemInfo[idx].main_ion_fd);
-        mMemInfo[idx].main_ion_fd = -1;
-        mMemInfo[idx].handle = 0;
-        ret = NO_MEMORY;
-        goto end;
-    } else {
-        mPtr[idx] = vaddr;
-    }
-end:
-    LOGD("X ");
-    return ret;
+    int32_t colorSpace = ITU_R_601_FR;
+    setMetaData(mPrivateHandle[idx], UPDATE_COLOR_SPACE, &colorSpace);
+    ++mBufferCount;
+    return NO_ERROR;
 }
 /*===========================================================================
  * FUNCTION   : unregisterBufferLocked
@@ -991,32 +889,21 @@ end:
  *==========================================================================*/
 int32_t QCamera3GrallocMemory::unregisterBufferLocked(size_t idx)
 {
+    if (idx >= MM_CAMERA_MAX_NUM_FRAMES || !mMemInfo[idx].registered) {
+        return BAD_INDEX;
+    }
     if (mPtr[idx] != NULL) {
         munmap(mPtr[idx], mMemInfo[idx].size);
         mPtr[idx] = NULL;
     }
-    /*This function is called to remove the fd from wrapper.
-    This will not close the fd.*/
     remFdCheck(mMemInfo[idx].fd);
-
-    struct ion_handle_data ion_handle;
-    memset(&ion_handle, 0, sizeof(ion_handle));
-    ion_handle.handle = mMemInfo[idx].handle;
-#ifndef TARGET_ION_ABI_VERSION
-    if (ioctl(mMemInfo[idx].main_ion_fd, ION_IOC_FREE, &ion_handle) < 0) {
-        LOGE("ion free failed");
-    }
-    close(mMemInfo[idx].main_ion_fd);
-#else
-    ion_close(mMemInfo[idx].main_ion_fd);
-#endif  // TARGET_ION_ABI_VERSION
-    memset(&mMemInfo[idx], 0, sizeof(struct QCamera3MemInfo));
-    mMemInfo[idx].main_ion_fd = -1;
+    mMemInfo[idx].fd = -1;
+    mMemInfo[idx].registered = false;
+    mMemInfo[idx].size = 0;
     mBufferHandle[idx] = NULL;
     mPrivateHandle[idx] = NULL;
     mCurrentFrameNumbers[idx] = -1;
-    mBufferCount--;
-
+    --mBufferCount;
     return NO_ERROR;
 }
 
@@ -1050,7 +937,7 @@ int32_t QCamera3GrallocMemory::unregisterBuffer(size_t idx)
         return BAD_INDEX;
     }
 
-    if (0 == mMemInfo[idx].handle) {
+    if (!mMemInfo[idx].registered) {
         LOGE("Trying to unregister buffer at %d which still not registered",
                  idx);
         return BAD_VALUE;
@@ -1080,7 +967,7 @@ void QCamera3GrallocMemory::unregisterBuffers()
     LOGD("E ", __FUNCTION__);
 
     for (uint32_t cnt = mStartIdx; cnt < MM_CAMERA_MAX_NUM_FRAMES; cnt++) {
-        if (0 == mMemInfo[cnt].handle) {
+        if (!mMemInfo[cnt].registered) {
             continue;
         }
         err = unregisterBufferLocked(cnt);
@@ -1123,7 +1010,7 @@ int32_t QCamera3GrallocMemory::markFrameNumber(uint32_t index, uint32_t frameNum
         return BAD_INDEX;
     }
 
-    if (0 == mMemInfo[index].handle) {
+    if (!mMemInfo[index].registered) {
         LOGE("Buffer at %d not registered", index);
         return BAD_INDEX;
     }
@@ -1161,7 +1048,7 @@ int32_t QCamera3GrallocMemory::getFrameNumber(uint32_t index)
         return BAD_INDEX;
     }
 
-    if (0 == mMemInfo[index].handle) {
+    if (!mMemInfo[index].registered) {
         LOGE("Buffer at %d not registered", index);
         return -1;
     }
@@ -1187,7 +1074,7 @@ int32_t QCamera3GrallocMemory::getOldestFrameNumber(uint32_t &bufIndex)
     bool empty = true;
     for (uint32_t index = mStartIdx;
             index < MM_CAMERA_MAX_NUM_FRAMES; index++) {
-        if (mMemInfo[index].handle) {
+        if (mMemInfo[index].registered) {
             if ((empty) ||
                 (!empty && oldest > mCurrentFrameNumbers[index]
                 && mCurrentFrameNumbers[index] != -1)) {
@@ -1221,7 +1108,7 @@ int32_t QCamera3GrallocMemory::getBufferIndex(uint32_t frameNumber)
 {
     for (uint32_t index = mStartIdx;
             index < MM_CAMERA_MAX_NUM_FRAMES; index++) {
-        if (mMemInfo[index].handle &&
+        if (mMemInfo[index].registered &&
                 mCurrentFrameNumbers[index] == (int32_t)frameNumber)
             return (int32_t)index;
     }
@@ -1243,40 +1130,13 @@ int32_t QCamera3GrallocMemory::getBufferIndex(uint32_t frameNumber)
  *==========================================================================*/
 int QCamera3GrallocMemory::cacheOps(uint32_t index, unsigned int cmd)
 {
-    int rc = 0;
-    bool needToInvalidate = false;
-    struct private_handle_t *privateHandle = NULL;
-
-    if (index >= MM_CAMERA_MAX_NUM_FRAMES) {
-        LOGE("Index out of bounds");
-        return -1;
-    }
-    if (index < mStartIdx) {
-        LOGE("buffer index %d less than starting index %d",
-                 index, mStartIdx);
+    if (index >= MM_CAMERA_MAX_NUM_FRAMES || index < mStartIdx) {
         return BAD_INDEX;
     }
-
-    privateHandle = mPrivateHandle[index];
-    if (privateHandle != NULL){
-        if(privateHandle->flags &
-             (private_handle_t::PRIV_FLAGS_NON_CPU_WRITER)){
-               needToInvalidate = true;
-        }
+    if (m_bIsSecureMode) {
+        return NO_ERROR;
     }
-#ifndef TARGET_ION_ABI_VERSION
-    LOGD("needToInvalidate %d buf idx %d", needToInvalidate, index);
-    if(((cmd == ION_IOC_INV_CACHES) || (cmd == ION_IOC_CLEAN_INV_CACHES))
-        && needToInvalidate) {
-        rc = cacheOpsInternal(index, cmd, mPtr[index]);
-    }
-    else if(cmd == ION_IOC_CLEAN_CACHES) {
-        rc = cacheOpsInternal(index, cmd, mPtr[index]);
-    }
-#else
-    (void) cmd;
-#endif //TARGET_ION_ABI_VERSION
-    return rc;
+    return cacheOpsInternal(index, cmd, NULL);
 }
 
 /*===========================================================================
@@ -1335,7 +1195,7 @@ int QCamera3GrallocMemory::getFreeIndexLocked()
     }
 
     for (size_t i = startIdx; i < MM_CAMERA_MAX_NUM_FRAMES; i++) {
-        if (0 == mMemInfo[i].handle) {
+        if (!mMemInfo[i].registered) {
             index = i;
             break;
         }
@@ -1369,7 +1229,7 @@ void *QCamera3GrallocMemory::getPtrLocked(uint32_t index)
     }
 
 
-    if (0 == mMemInfo[index].handle) {
+    if (!mMemInfo[index].registered) {
         LOGE("Buffer at %d not registered", index);
         return NULL;
     }
@@ -1419,7 +1279,7 @@ void *QCamera3GrallocMemory::getBufferHandle(uint32_t index)
         return NULL;
     }
 
-    if (0 == mMemInfo[index].handle) {
+    if (!mMemInfo[index].registered) {
         LOGE("Buffer at %d not registered", index);
         return NULL;
     }

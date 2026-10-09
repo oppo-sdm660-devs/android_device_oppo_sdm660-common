@@ -34,6 +34,7 @@
 
 // Camera dependencies
 #include "cam_types.h"
+#include "QCamera3AlgoTrace.h"
 
 extern "C" {
 #include "mm_jpeg_interface.h"
@@ -69,6 +70,35 @@ class QCamera3ProcessingChannel;
        REPROCESS_TYPE_RAW
     } reprocess_type_t;
 
+    // Request snapshot taken under the HWI mutex; still processing outlives it.
+    typedef struct {
+        int32_t auto_hdr_enable;
+        int32_t auto_night_enable;
+        uint8_t auto_capture_valid;
+        int32_t face_preview_param[4];
+        uint8_t face_preview_param_valid;
+        int32_t mirror_preview;
+        float sticker_rect[4];
+        uint8_t sticker_rect_valid;
+        int32_t exif_comment_length;
+        char exif_comment[256];
+        int32_t watermark_asset_length;
+        char watermark_asset[256];
+        int32_t sticker_asset_length;
+        char sticker_asset[256];
+    } native_stage_request_t;
+
+    // Written by the channel that owns the engine; read by select().
+    typedef struct {
+        uint8_t valid;
+        int32_t enabled;
+        int32_t configured;
+        int32_t coreStatus;
+        int32_t gyroValid;
+        int64_t gyroPeriodNs;
+        int32_t version;
+    } native_eis_state_t;
+
     typedef struct {
         uint32_t out_buf_index;
         int32_t jpeg_orientation;
@@ -82,6 +112,8 @@ class QCamera3ProcessingChannel;
         char gps_processing_method[GPS_PROCESSING_METHOD_SIZE];
         uint8_t image_desc_valid;
         char image_desc[EXIF_IMAGE_DESCRIPTION_SIZE];
+        QCamera3AlgoTrace native_trace;
+        uint8_t native_trace_valid;
         bool hdr_snapshot;
         bool multiframe_snapshot;
         cam_hal3_JPEG_type_t image_type;
@@ -97,6 +129,13 @@ class QCamera3ProcessingChannel;
         bool zsl_snapshot;
         uint32_t frame_number;
         bool raw_mfc_snapshot;
+        int32_t native_still_mode;
+        int32_t native_beauty_strength;
+        int32_t native_scene_strength;
+        uint32_t framework_frame_number;
+        bool framework_frame_number_valid;
+        // Controls the still path rebuilds its stage Options from.
+        native_stage_request_t native_stages;
     } jpeg_settings_t;
 
     typedef struct {

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     SPDX-FileCopyrightText: The LineageOS Project
+     SPDX-License-Identifier: Apache-2.0
+-->
+<!-- Video quality set comes from media_profiles_vendor.xml, not here. -->
+<resources>
+    <!-- Android Camera Extensions are not provided by this port. -->
+
+    <bool name="config_enableAuxCameras">true</bool>
+
+    <!-- Hide the duplicate/internally paired rear camera ids 3 and 4. -->
+    <string-array name="config_ignoredAuxCameraIds">
+        <item>3</item>
+        <item>4</item>
+    </string-array>
+</resources>
