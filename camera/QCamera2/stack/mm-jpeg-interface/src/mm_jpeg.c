@@ -48,6 +48,7 @@
 #include "mm_jpeg_interface.h"
 #include "mm_jpeg.h"
 #include "mm_jpeg_inlines.h"
+#include "mm_camera_oppo_metadata.h"
 #ifdef LIB2D_ROTATION_ENABLE
 #include "mm_lib2d.h"
 #endif
@@ -435,6 +436,8 @@ void mm_jpeg_session_destroy(mm_jpeg_job_session_t* p_session)
 
   LOGD("E");
   if (NULL == p_session->omx_handle) {
+    free(p_session->oppo_metadata);
+    p_session->oppo_metadata = NULL;
     LOGE("invalid handle");
     return;
   }
@@ -479,6 +482,8 @@ void mm_jpeg_session_destroy(mm_jpeg_job_session_t* p_session)
     LOGE("OMX_FreeHandle failed (%d)", rc);
   }
   p_session->omx_handle = NULL;
+  free(p_session->oppo_metadata);
+  p_session->oppo_metadata = NULL;
 
   pthread_mutex_destroy(&p_session->lock);
   pthread_cond_destroy(&p_session->cond);
@@ -826,10 +831,31 @@ OMX_ERRORTYPE mm_jpeg_metadata(
     return rc;
   }
 
-  lMeta.metadata = (OMX_U8 *)p_jobparams->p_metadata;
-  lMeta.metaPayloadSize = sizeof(*p_jobparams->p_metadata);
-  lMeta.mobicat_mask = p_jobparams->mobicat_mask;
-  lMeta.static_metadata = (OMX_U8 *)my_obj->jpeg_metadata;
+  /* OMX may retain metadata after SetConfig; storage is session-owned. */
+  if (p_session->oppo_metadata == NULL) {
+    p_session->oppo_metadata = calloc(1, MM_CAMERA_OPPO_METADATA_SIZE);
+    if (p_session->oppo_metadata == NULL)
+      return OMX_ErrorInsufficientResources;
+  }
+  if (mm_camera_oppo_metadata_encode(p_jobparams->p_metadata,
+      p_session->oppo_metadata) != 0)
+    return OMX_ErrorBadParameter;
+  lMeta.metadata = (OMX_U8 *)p_session->oppo_metadata;
+  lMeta.metaPayloadSize = MM_CAMERA_OPPO_METADATA_SIZE;
+  /* Stock appends 0x1ba bytes of dual calibration after flip/mount. */
+  memset(p_session->oppo_static_metadata, 0,
+      sizeof(p_session->oppo_static_metadata));
+  lMeta.static_metadata = NULL;
+  if (my_obj->jpeg_metadata != NULL) {
+    uint32_t geometry[2] = {
+      my_obj->jpeg_metadata->default_sensor_flip,
+      my_obj->jpeg_metadata->sensor_mount_angle,
+    };
+    memcpy(p_session->oppo_static_metadata, geometry, sizeof(geometry));
+    lMeta.static_metadata = p_session->oppo_static_metadata;
+  }
+  /* Stock debug tails are not translated. */
+  lMeta.mobicat_mask = 0;
 
   rc = OMX_SetConfig(p_session->omx_handle, indexType, &lMeta);
   if (rc != OMX_ErrorNone) {

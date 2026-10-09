@@ -553,6 +553,8 @@ private:
     uint32_t           mBlurLevel;
     cam_hal_pp_type_t m_halPPType;
     mm_camera_vtbl_t  *mCameraHandle;
+    bool               mFlashReserved;
+    bool               mDisplaySessionActive;
     bool               mCameraInitialized;
     camera_metadata_t *mDefaultMetadata[CAMERA3_TEMPLATE_COUNT];
     const camera3_callback_ops_t *mCallbackOps;

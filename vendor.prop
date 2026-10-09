@@ -103,6 +103,11 @@ bluetooth.profile.sap.server.enabled=true
 
 # Camera
 persist.vendor.camera.HAL3.enabled=1
+persist.vendor.camera.dual.camera=0
+persist.vendor.camera.expose.aux=1
+persist.vendor.camera.eis.enable=0
+persist.vendor.camera.is_type=0
+persist.vendor.camera.is_type_preview=0
 persist.vendor.qti.telephony.vt_cam_interface=1
 vidc.enc.dcvs.extra-buff-count=2
 

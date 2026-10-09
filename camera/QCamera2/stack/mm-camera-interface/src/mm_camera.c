@@ -428,6 +428,9 @@ int32_t mm_camera_close(mm_camera_obj_t *my_obj)
 #ifndef DAEMON_PRESENT
     mm_camera_module_close_session(my_obj->sessionid);
 #endif /* DAEMON_PRESENT */
+    mm_camera_oppo_buffer_release(&my_obj->oppo_parameters);
+    mm_camera_oppo_buffer_release(&my_obj->oppo_capability);
+    my_obj->oppo_capability_native = NULL;
 
     mm_camera_evt_sub(my_obj, FALSE);
 
@@ -657,6 +660,12 @@ int32_t mm_camera_query_capability(mm_camera_obj_t *my_obj)
 {
     int32_t rc = 0;
 
+    if (my_obj->oppo_capability.data == NULL ||
+            my_obj->oppo_capability_native == NULL) {
+        pthread_mutex_unlock(&my_obj->cam_lock);
+        return -EINVAL;
+    }
+
 #ifdef DAEMON_PRESENT
     struct v4l2_capability cap;
     /* get camera capabilities */
@@ -674,6 +683,9 @@ int32_t mm_camera_query_capability(mm_camera_obj_t *my_obj)
     rc = mm_camera_module_send_cmd(shim_cmd);
     mm_camera_destroy_shim_cmd_packet(shim_cmd);
 #endif /* DAEMON_PRESENT */
+    if (rc == 0)
+        rc = mm_camera_oppo_capability_decode(my_obj->oppo_capability.data,
+                my_obj->oppo_capability.size, my_obj->oppo_capability_native);
     if (rc != 0) {
         LOGE("cannot get camera capabilities, rc = %d, errno %d",
                 rc, errno);
@@ -704,8 +716,14 @@ int32_t mm_camera_set_parms(mm_camera_obj_t *my_obj,
     int32_t rc = -1;
     int32_t value = 0;
     if (parms !=  NULL) {
-        rc = mm_camera_util_s_ctrl(my_obj, 0, my_obj->ctrl_fd,
-            CAM_PRIV_PARM, &value);
+        if (my_obj->oppo_parameters.data == NULL) {
+            pthread_mutex_unlock(&my_obj->cam_lock);
+            return -EINVAL;
+        }
+        rc = mm_camera_oppo_metadata_encode(parms, my_obj->oppo_parameters.data);
+        if (rc == 0)
+            rc = mm_camera_util_s_ctrl(my_obj, 0, my_obj->ctrl_fd,
+                CAM_PRIV_PARM, &value);
     }
     pthread_mutex_unlock(&my_obj->cam_lock);
     return rc;
@@ -735,7 +753,15 @@ int32_t mm_camera_get_parms(mm_camera_obj_t *my_obj,
     int32_t rc = -1;
     int32_t value = 0;
     if (parms != NULL) {
-        rc = mm_camera_util_g_ctrl(my_obj, 0, my_obj->ctrl_fd, CAM_PRIV_PARM, &value);
+        if (my_obj->oppo_parameters.data == NULL) {
+            pthread_mutex_unlock(&my_obj->cam_lock);
+            return -EINVAL;
+        }
+        rc = mm_camera_oppo_metadata_encode(parms, my_obj->oppo_parameters.data);
+        if (rc == 0)
+            rc = mm_camera_util_g_ctrl(my_obj, 0, my_obj->ctrl_fd, CAM_PRIV_PARM, &value);
+        if (rc == 0)
+            mm_camera_oppo_metadata_decode(my_obj->oppo_parameters.data, parms);
     }
     pthread_mutex_unlock(&my_obj->cam_lock);
     return rc;
@@ -1933,6 +1959,50 @@ int32_t mm_camera_map_buf(mm_camera_obj_t *my_obj,
 {
     int32_t rc = 0;
 
+    if (buf_type == CAM_MAPPING_BUF_TYPE_CAPABILITY) {
+        if (buffer == NULL || size != sizeof(cam_capability_t)) {
+            pthread_mutex_unlock(&my_obj->cam_lock);
+            return -EINVAL;
+        }
+        if (my_obj->oppo_capability.data != NULL) {
+            pthread_mutex_unlock(&my_obj->cam_lock);
+            return -EBUSY;
+        }
+        rc = mm_camera_oppo_buffer_alloc(&my_obj->oppo_capability,
+                MM_CAMERA_OPPO_CAPABILITY_SIZE);
+        if (rc != 0) {
+            pthread_mutex_unlock(&my_obj->cam_lock);
+            return rc;
+        }
+        my_obj->oppo_capability_native = buffer;
+        rc = mm_camera_oppo_capability_init(my_obj->oppo_capability.data,
+                my_obj->oppo_capability.size,
+                my_obj->oppo_capability_native->camera_index);
+        if (rc != 0) {
+            mm_camera_oppo_buffer_release(&my_obj->oppo_capability);
+            my_obj->oppo_capability_native = NULL;
+            pthread_mutex_unlock(&my_obj->cam_lock);
+            return rc;
+        }
+        fd = my_obj->oppo_capability.fd;
+        size = my_obj->oppo_capability.size;
+        buffer = my_obj->oppo_capability.data;
+    } else if (buf_type == CAM_MAPPING_BUF_TYPE_PARM_BUF) {
+        if (my_obj->oppo_parameters.data != NULL) {
+            pthread_mutex_unlock(&my_obj->cam_lock);
+            return -EBUSY;
+        }
+        rc = mm_camera_oppo_buffer_alloc(&my_obj->oppo_parameters,
+                MM_CAMERA_OPPO_METADATA_SIZE);
+        if (rc != 0) {
+            pthread_mutex_unlock(&my_obj->cam_lock);
+            return rc;
+        }
+        fd = my_obj->oppo_parameters.fd;
+        size = my_obj->oppo_parameters.size;
+        buffer = my_obj->oppo_parameters.data;
+    }
+
     cam_sock_packet_t packet;
     memset(&packet, 0, sizeof(cam_sock_packet_t));
     packet.msg_type = CAM_MAPPING_TYPE_FD_MAPPING;
@@ -1952,6 +2022,12 @@ int32_t mm_camera_map_buf(mm_camera_obj_t *my_obj,
     rc = mm_camera_module_send_cmd(shim_cmd);
     mm_camera_destroy_shim_cmd_packet(shim_cmd);
 #endif
+    if (rc != 0 && buf_type == CAM_MAPPING_BUF_TYPE_PARM_BUF)
+        mm_camera_oppo_buffer_release(&my_obj->oppo_parameters);
+    if (rc != 0 && buf_type == CAM_MAPPING_BUF_TYPE_CAPABILITY) {
+        mm_camera_oppo_buffer_release(&my_obj->oppo_capability);
+        my_obj->oppo_capability_native = NULL;
+    }
     pthread_mutex_unlock(&my_obj->cam_lock);
     return rc;
 }
@@ -1973,6 +2049,19 @@ int32_t mm_camera_map_bufs(mm_camera_obj_t *my_obj,
                            const cam_buf_map_type_list* buf_map_list)
 {
     int32_t rc = 0;
+    if (buf_map_list == NULL ||
+            buf_map_list->length > CAM_MAX_NUM_BUFS_PER_STREAM) {
+        pthread_mutex_unlock(&my_obj->cam_lock);
+        return -EINVAL;
+    }
+    /* These descriptors require the stock layout conversion in map_buf. */
+    for (uint32_t i = 0; i < buf_map_list->length; i++) {
+        if (buf_map_list->buf_maps[i].type == CAM_MAPPING_BUF_TYPE_CAPABILITY ||
+                buf_map_list->buf_maps[i].type == CAM_MAPPING_BUF_TYPE_PARM_BUF) {
+            pthread_mutex_unlock(&my_obj->cam_lock);
+            return -EINVAL;
+        }
+    }
     cam_sock_packet_t packet;
     memset(&packet, 0, sizeof(cam_sock_packet_t));
     packet.msg_type = CAM_MAPPING_TYPE_FD_BUNDLED_MAPPING;
@@ -2045,6 +2134,14 @@ int32_t mm_camera_unmap_buf(mm_camera_obj_t *my_obj,
     rc = mm_camera_module_send_cmd(shim_cmd);
     mm_camera_destroy_shim_cmd_packet(shim_cmd);
 #endif
+    if (rc == 0 && buf_type == CAM_MAPPING_BUF_TYPE_PARM_BUF)
+        mm_camera_oppo_buffer_release(&my_obj->oppo_parameters);
+    if (buf_type == CAM_MAPPING_BUF_TYPE_CAPABILITY) {
+        if (rc == 0)
+            mm_camera_oppo_buffer_release(&my_obj->oppo_capability);
+        /* getCapabilities frees the native heap even if unmap fails. */
+        my_obj->oppo_capability_native = NULL;
+    }
     pthread_mutex_unlock(&my_obj->cam_lock);
     return rc;
 }

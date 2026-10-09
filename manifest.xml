@@ -154,11 +154,6 @@
         <fqname>@2.0::IBTConfigStore/default</fqname>
     </hal>
     <hal format="hidl">
-        <name>vendor.oppo.hardware.camera.oppopostproc</name>
-        <transport>hwbinder</transport>
-        <fqname>@1.0::ICameraPostProc/default</fqname>
-    </hal>
-    <hal format="hidl">
         <name>vendor.qti.data.factory</name>
         <transport>hwbinder</transport>
         <fqname>@2.2::IFactory/default</fqname>

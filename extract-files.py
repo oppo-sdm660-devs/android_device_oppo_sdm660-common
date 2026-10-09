@@ -51,78 +51,29 @@ blob_fixups: blob_fixups_user_type = {
         .add_needed('libgui_shim.so'),
     'vendor/bin/pm-service': blob_fixup()
         .replace_needed('libutils.so', 'libutils-v33.so'),
-    'vendor/lib/hw/camera.sdm660.so': blob_fixup()
-        .sig_replace(
-            "4F F4 51 73 C1 68 D0 E9 0D 20 CD E9 03 20 4B 48",
-            "4F F4 51 73 C1 68 D0 E9 12 20 CD E9 03 20 4B 48"
-        )
-        .sig_replace(
-            "C0 68 CB F8 08 00 31 68 08 9A 00 26 49 6B CB E9 04 21",
-            "C0 68 CB F8 08 00 31 68 08 9A 00 26 89 6C CB E9 04 21"
-        )
-        .sig_replace(
-            "D4 F8 7C 39 01 22 C8 68 49 6B E0 47 C5 F8 80 09 3E E0",
-            "D4 F8 7C 39 01 22 C8 68 89 6C E0 47 C5 F8 80 09 3E E0"
-        )
-        .sig_replace(
-            "DB F8 00 00 CA 68 D1 E9 0D 31 05 91 CD E9 03 03 20 48",
-            "DB F8 00 00 CA 68 D1 E9 12 31 05 91 CD E9 03 03 20 48"
-        )
-        .sig_replace(
-            "30 68 3D 46 C0 68 CA F8 08 00 30 68 06 99 40 6B CA E9 04 10",
-            "30 68 3D 46 C0 68 CA F8 08 00 30 68 06 99 80 6C CA E9 04 10"
-        )
-        .sig_replace(
-            "D4 F8 7C 39 01 22 C8 68 49 6B E0 47 C5 F8 80 09 5A E0",
-            "D4 F8 7C 39 01 22 C8 68 89 6C E0 47 C5 F8 80 09 5A E0"
-        )
-        .sig_replace(
-            "DB F8 00 00 CA 68 D1 E9 0D 31 05 91 CD E9 03 03 21 48",
-            "DB F8 00 00 CA 68 D1 E9 12 31 05 91 CD E9 03 03 21 48"
-        )
-        .sig_replace(
-            "38 68 C0 68 CA F8 08 00 38 68 06 99 40 6B CA E9 04 10 B2 46",
-            "38 68 C0 68 CA F8 08 00 38 68 06 99 80 6C CA E9 04 10 B2 46"
-        )
-        .sig_replace(
-            "CD F8 2C 80 C8 68 49 6B B8 47 DD F8 2C 80 C5 F8 80 09",
-            "CD F8 2C 80 C8 68 89 6C B8 47 DD F8 2C 80 C5 F8 80 09"
-        )
-        .sig_replace(
-            "DF F8 B0 76 E0 68 CA 68 7F 44 D1 E9 0D 31 CD E9 00 78",
-            "DF F8 B0 76 E0 68 CA 68 7F 44 D1 E9 12 31 CD E9 00 78"
-        )
-        .sig_replace(
-            "D6 F8 58 08 10 99 40 6B C4 E9 04 10 01 20",
-            "D6 F8 58 08 10 99 80 6C C4 E9 04 10 01 20"
-        ),
     (
         'vendor/lib/libarcsoft_dualcam_bokeh_api.so',
-        'vendor/lib/libarcsoft_dualcam_refocus_left.so',
-        'vendor/lib/libarcsoft_dualcam_refocus_preview.so',
-        'vendor/lib/libarcsoft_dualcam_refocus_right.so',
-        'vendor/lib/libarcsoft_smart_denoise.so',
-        'vendor/lib/libfilter.so'
+        'vendor/lib/libSonyIMX376RmscLibrary.so',
     ): blob_fixup()
         .replace_needed('libstdc++.so', 'libstdc++_vendor.so'),
     'vendor/lib/libmmcamera_hdr_gb_lib.so': blob_fixup()
         .add_needed('liblog.so')
         .replace_needed('libstdc++.so', 'libstdc++_vendor.so'),
-    'vendor/lib/libmmcamera_interface.so': blob_fixup()
-        .binary_regex_replace(
-            b'/system/etc/camera',
-            b'/vendor/etc/camera'
-        ),
     (
         'vendor/lib/libmmcamera_pdaf.so',
-        'vendor/lib/libmmcamera_pdafcamif.so'
+        'vendor/lib/libmmcamera_pdafcamif.so',
+        'vendor/lib/libmmcamera_tintless_bg_pca_algo.so',
     ): blob_fixup()
         .add_needed('liblog.so'),
-    'vendor/lib/libmmcamera2_sensor_modules.so': blob_fixup()
-        .sig_replace(
-            '32 D8 DF E8 07 F0 36 03 03 3B 3E 00 00 26 9D 20 39 E0',
-            '32 D8 DF E8 07 F0 36 31 31 3B 3E 00 00 26 9D 20 39 E0'
-        ),
+    'vendor/lib/libmmcamera_faceproc.so': blob_fixup()
+        .clear_symbol_version('__aeabi_memcpy')
+        .clear_symbol_version('__aeabi_memset')
+        .clear_symbol_version('__gnu_Unwind_Find_exidx'),
+    # Stock SDSPRPC imports resolve to libcdsprpc's unversioned exports.
+    'vendor/lib/libthread_blur.so': blob_fixup()
+        .clear_symbol_version('remote_handle_open')
+        .clear_symbol_version('remote_handle_invoke')
+        .clear_symbol_version('remote_handle_close'),
     'vendor/lib64/libcdsprpc.so': blob_fixup()
         .sig_replace(
             'FD 7B 02 A9 FD 83 00 91 13 04 00 12 7F 0E 00 71 C1 01 00 54 A9 00 00 B0 68 02 1F 52 29 81 00 91 20 59 68 F8',

@@ -7,6 +7,10 @@ cc_library_shared {
     ],
     c_std: "gnu11",
     srcs: [
+        "mm-camera-interface/src/mm_camera_oppo_format.c",
+        "mm-camera-interface/src/mm_camera_oppo_capability.c",
+        "mm-camera-interface/src/mm_camera_oppo_metadata.c",
+        "mm-camera-interface/src/mm_camera_oppo_stream.c",
         "mm-camera-interface/src/mm_camera_interface.c",
         "mm-camera-interface/src/mm_camera.c",
         "mm-camera-interface/src/mm_camera_muxer.c",

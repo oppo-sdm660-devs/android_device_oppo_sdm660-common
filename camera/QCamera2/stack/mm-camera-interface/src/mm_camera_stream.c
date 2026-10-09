@@ -46,6 +46,108 @@
 #include "mm_camera_interface.h"
 #include "mm_camera.h"
 #include "mm_camera_muxer.h"
+#include "mm_camera_oppo_stream.h"
+
+static int mm_stream_oppo_map_info(mm_stream_t *stream, cam_buf_map_type *map)
+{
+    if (map->type != CAM_MAPPING_BUF_TYPE_STREAM_INFO)
+        return 0;
+    if (map->buffer == NULL || map->size < sizeof(cam_stream_info_t) ||
+            stream->oppo_stream_info.data != NULL)
+        return -EINVAL;
+    int rc = mm_camera_oppo_buffer_alloc(&stream->oppo_stream_info,
+            MM_CAMERA_OPPO_STREAM_INFO_SIZE);
+    if (rc != 0)
+        return rc;
+    rc = mm_camera_oppo_stream_encode(map->buffer, stream->oppo_stream_info.data);
+    if (rc != 0) {
+        mm_camera_oppo_buffer_release(&stream->oppo_stream_info);
+        return rc;
+    }
+    map->buffer = stream->oppo_stream_info.data;
+    map->fd = stream->oppo_stream_info.fd;
+    map->size = stream->oppo_stream_info.size;
+    return 0;
+}
+
+static void mm_stream_oppo_unmap_info(mm_stream_t *stream, unsigned type)
+{
+    if (type == CAM_MAPPING_BUF_TYPE_STREAM_INFO)
+        mm_camera_oppo_buffer_release(&stream->oppo_stream_info);
+}
+/* Stock metadata uses ION; the decoded native shadow is CPU-only. */
+static int mm_stream_oppo_is_metadata(const mm_stream_t *stream)
+{
+    const cam_stream_info_t *info = stream->stream_info;
+    return info != NULL && (info->stream_type == CAM_STREAM_TYPE_METADATA ||
+            (info->stream_type == CAM_STREAM_TYPE_OFFLINE_PROC &&
+             info->reprocess_config.pp_type == CAM_OFFLINE_REPROCESS_TYPE &&
+             info->reprocess_config.offline.input_type == CAM_STREAM_TYPE_METADATA));
+}
+
+static int mm_stream_oppo_map_metadata(mm_stream_t *stream, cam_buf_map_type *map)
+{
+    uint32_t index = map->frame_idx;
+    if (map->type == CAM_MAPPING_BUF_TYPE_STREAM_BUF &&
+            mm_stream_oppo_is_metadata(stream)) {
+        if (index >= CAM_MAX_NUM_BUFS_PER_STREAM || map->buffer == NULL ||
+                map->size < MM_CAMERA_OPPO_METADATA_SIZE ||
+                stream->oppo_metadata_native[index] != NULL)
+            return -EINVAL;
+        metadata_buffer_t *native = calloc(1, sizeof(*native));
+        if (native == NULL)
+            return -ENOMEM;
+        stream->oppo_metadata_wire[index] = map->buffer;
+        stream->oppo_metadata_native[index] = native;
+        memset(map->buffer, 0, MM_CAMERA_OPPO_METADATA_SIZE);
+        map->size = MM_CAMERA_OPPO_METADATA_SIZE;
+        return 0;
+    }
+    if (map->type == CAM_MAPPING_BUF_TYPE_OFFLINE_META_BUF ||
+            (map->type == CAM_MAPPING_BUF_TYPE_OFFLINE_INPUT_BUF &&
+             mm_stream_oppo_is_metadata(stream))) {
+        if (index >= CAM_MAX_NUM_BUFS_PER_STREAM || map->buffer == NULL ||
+                map->size < sizeof(metadata_buffer_t))
+            return -EINVAL;
+        unsigned slot = map->type == CAM_MAPPING_BUF_TYPE_OFFLINE_META_BUF;
+        mm_camera_oppo_buffer_t *wire = &stream->oppo_offline_metadata[slot][index];
+        if (wire->data != NULL)
+            return -EBUSY;
+        int result = mm_camera_oppo_buffer_alloc(wire, MM_CAMERA_OPPO_METADATA_SIZE);
+        if (result != 0)
+            return result;
+        result = mm_camera_oppo_metadata_encode(map->buffer, wire->data);
+        if (result != 0) {
+            mm_camera_oppo_buffer_release(wire);
+            return result;
+        }
+        map->fd = wire->fd;
+        map->buffer = wire->data;
+        map->size = wire->size;
+    }
+    return 0;
+}
+
+static void mm_stream_oppo_unmap_metadata(mm_stream_t *stream, unsigned type,
+        unsigned index)
+{
+    if (index >= CAM_MAX_NUM_BUFS_PER_STREAM)
+        return;
+    if (type == CAM_MAPPING_BUF_TYPE_STREAM_BUF &&
+            stream->oppo_metadata_native[index] != NULL) {
+        if (stream->buf != NULL && index < stream->total_buf_cnt)
+            stream->buf[index].buffer = stream->oppo_metadata_wire[index];
+        free(stream->oppo_metadata_native[index]);
+        stream->oppo_metadata_native[index] = NULL;
+        stream->oppo_metadata_wire[index] = NULL;
+    }
+    if (type == CAM_MAPPING_BUF_TYPE_OFFLINE_META_BUF ||
+            type == CAM_MAPPING_BUF_TYPE_OFFLINE_INPUT_BUF) {
+        unsigned slot = type == CAM_MAPPING_BUF_TYPE_OFFLINE_META_BUF;
+        mm_camera_oppo_buffer_release(&stream->oppo_offline_metadata[slot][index]);
+    }
+}
+
 /* internal function decalre */
 int32_t mm_stream_qbuf(mm_stream_t *my_obj,
                        mm_camera_buf_def_t *buf);
@@ -1340,6 +1442,8 @@ int32_t mm_stream_release(mm_stream_t *my_obj)
                 my_obj->master_str_obj->num_s_cnt] = NULL;
     }
     mm_stream_deinit(my_obj);
+    /* DEL_STREAM/close releases server ownership after a failed unmap. */
+    mm_camera_oppo_buffer_release(&my_obj->oppo_stream_info);
 
     /* reset stream obj */
     memset(my_obj, 0, sizeof(mm_stream_t));
@@ -1742,6 +1846,11 @@ int32_t mm_stream_read_msm_frame(mm_stream_t * my_obj,
         }
         pthread_mutex_unlock(&my_obj->buf_lock);
         uint32_t idx = vb.index;
+        if (idx >= CAM_MAX_NUM_BUFS_PER_STREAM || idx >= my_obj->total_buf_cnt ||
+                my_obj->buf == NULL) {
+            LOGE("Invalid dequeued buffer index %u", idx);
+            return -EINVAL;
+        }
         buf_info->buf = &my_obj->buf[idx];
         buf_info->frame_idx = vb.sequence;
         buf_info->stream_id = my_obj->my_hdl;
@@ -1782,6 +1891,17 @@ int32_t mm_stream_read_msm_frame(mm_stream_t * my_obj,
         if (rc != 0) {
             LOGE("Error cleaning/invalidating the buffer");
         }
+        if (mm_stream_oppo_is_metadata(my_obj)) {
+            if (idx >= CAM_MAX_NUM_BUFS_PER_STREAM ||
+                    my_obj->oppo_metadata_wire[idx] == NULL ||
+                    my_obj->oppo_metadata_native[idx] == NULL) {
+                LOGE("Missing metadata conversion storage for index %u", idx);
+                return -EINVAL;
+            }
+            mm_camera_oppo_metadata_decode(my_obj->oppo_metadata_wire[idx],
+                    my_obj->oppo_metadata_native[idx]);
+            buf_info->buf->buffer = my_obj->oppo_metadata_native[idx];
+        }
     }
 
     LOGD("X rc = %d",rc);
@@ -1810,12 +1930,21 @@ int32_t mm_stream_set_parm(mm_stream_t *my_obj,
     int32_t rc = -1;
     int32_t value = 0;
     if (in_value != NULL) {
+      if (my_obj->oppo_stream_info.data == NULL || my_obj->stream_info == NULL)
+          return -EINVAL;
+      void *wire = (unsigned char *)my_obj->oppo_stream_info.data +
+              MM_CAMERA_OPPO_STREAM_PARM_OFFSET;
+      rc = mm_camera_oppo_stream_parm_encode(in_value, wire);
+      if (rc != 0)
+          return rc;
       mm_camera_obj_t *cam_obj = my_obj->ch_obj->cam_obj;
       int stream_id = my_obj->server_stream_id;
       rc = mm_camera_util_s_ctrl(cam_obj, stream_id, my_obj->fd,
               CAM_PRIV_STREAM_PARM, &value);
       if (rc < 0) {
         LOGE("Failed to set stream parameter type = %d", in_value->type);
+      } else {
+        mm_camera_oppo_stream_parm_decode(wire, in_value);
       }
     }
     return rc;
@@ -1843,10 +1972,19 @@ int32_t mm_stream_get_parm(mm_stream_t *my_obj,
     int32_t rc = -1;
     int32_t value = 0;
     if (in_value != NULL) {
+        if (my_obj->oppo_stream_info.data == NULL || my_obj->stream_info == NULL)
+            return -EINVAL;
+        void *wire = (unsigned char *)my_obj->oppo_stream_info.data +
+                MM_CAMERA_OPPO_STREAM_PARM_OFFSET;
+        rc = mm_camera_oppo_stream_parm_encode(in_value, wire);
+        if (rc != 0)
+            return rc;
         mm_camera_obj_t *cam_obj = my_obj->ch_obj->cam_obj;
         int stream_id = my_obj->server_stream_id;
-        rc = mm_camera_util_g_ctrl(cam_obj, stream_id, my_obj->fd,
+      rc = mm_camera_util_g_ctrl(cam_obj, stream_id, my_obj->fd,
               CAM_PRIV_STREAM_PARM, &value);
+      if (rc == 0)
+          mm_camera_oppo_stream_parm_decode(wire, in_value);
     }
     return rc;
 }
@@ -1870,15 +2008,7 @@ int32_t mm_stream_get_parm(mm_stream_t *my_obj,
 int32_t mm_stream_do_action(mm_stream_t *my_obj,
                             void *in_value)
 {
-    int32_t rc = -1;
-    int32_t value = 0;
-    if (in_value != NULL) {
-        mm_camera_obj_t *cam_obj = my_obj->ch_obj->cam_obj;
-        int stream_id = my_obj->server_stream_id;
-        rc = mm_camera_util_s_ctrl(cam_obj, stream_id, my_obj->fd,
-              CAM_PRIV_STREAM_PARM, &value);
-    }
-    return rc;
+    return mm_stream_set_parm(my_obj, in_value);
 }
 
 /*===========================================================================
@@ -1950,6 +2080,13 @@ int32_t mm_stream_qbuf(mm_stream_t *my_obj, mm_camera_buf_def_t *buf)
     uint32_t length = 0;
     struct v4l2_buffer buffer;
     struct v4l2_plane planes[VIDEO_MAX_PLANES];
+    if (mm_stream_oppo_is_metadata(my_obj) &&
+            buf->buf_idx < CAM_MAX_NUM_BUFS_PER_STREAM &&
+            my_obj->oppo_metadata_wire[buf->buf_idx] != NULL) {
+        /* Reset stock results without overwriting the native shadow. */
+        memset(my_obj->oppo_metadata_wire[buf->buf_idx], 0,
+                MM_CAMERA_OPPO_METADATA_SIZE);
+    }
     LOGD("E, my_handle = 0x%x, fd = %d, state = %d, stream type = %d",
           my_obj->my_hdl, my_obj->fd, my_obj->state,
          my_obj->stream_info->stream_type);
@@ -2136,6 +2273,7 @@ int32_t mm_stream_map_buf(mm_stream_t *my_obj,
         return -1;
     }
 
+
     cam_sock_packet_t packet;
     memset(&packet, 0, sizeof(cam_sock_packet_t));
     packet.msg_type = CAM_MAPPING_TYPE_FD_MAPPING;
@@ -2146,6 +2284,13 @@ int32_t mm_stream_map_buf(mm_stream_t *my_obj,
     packet.payload.buf_map.frame_idx = frame_idx;
     packet.payload.buf_map.plane_idx = plane_idx;
     packet.payload.buf_map.buffer = buffer;
+    rc = mm_stream_oppo_map_info(my_obj, &packet.payload.buf_map);
+    if (rc != 0)
+        return rc;
+    rc = mm_stream_oppo_map_metadata(my_obj, &packet.payload.buf_map);
+    if (rc != 0)
+        return rc;
+    fd = packet.payload.buf_map.fd;
     LOGD("mapping buf_type %d, stream_id %d, frame_idx %d, fd %d, size %d",
              buf_type, my_obj->server_stream_id, frame_idx, fd, size);
 
@@ -2159,6 +2304,10 @@ int32_t mm_stream_map_buf(mm_stream_t *my_obj,
     rc = mm_camera_module_send_cmd(shim_cmd);
     mm_camera_destroy_shim_cmd_packet(shim_cmd);
 #endif
+    if (rc != 0) {
+        mm_stream_oppo_unmap_info(my_obj, buf_type);
+        mm_stream_oppo_unmap_metadata(my_obj, buf_type, frame_idx);
+    }
     if ((buf_type == CAM_MAPPING_BUF_TYPE_STREAM_BUF)
             || ((buf_type
             == CAM_MAPPING_BUF_TYPE_STREAM_USER_BUF)
@@ -2203,6 +2352,8 @@ int32_t mm_stream_map_bufs(mm_stream_t * my_obj,
         LOGE("NULL obj of stream/channel/camera");
         return -1;
     }
+    if (buf_map_list == NULL || buf_map_list->length > CAM_MAX_NUM_BUFS_PER_STREAM)
+        return -EINVAL;
 
     cam_sock_packet_t packet;
     memset(&packet, 0, sizeof(cam_sock_packet_t));
@@ -2218,9 +2369,25 @@ int32_t mm_stream_map_bufs(mm_stream_t * my_obj,
       return 0;
     }
 
+    if (numbufs > CAM_MAX_NUM_BUFS_PER_STREAM)
+        return -EINVAL;
     uint32_t i;
     for (i = 0; i < numbufs; i++) {
         packet.payload.buf_map_list.buf_maps[i].stream_id = my_obj->server_stream_id;
+        int result = mm_stream_oppo_map_info(my_obj,
+                &packet.payload.buf_map_list.buf_maps[i]);
+        if (result == 0)
+            result = mm_stream_oppo_map_metadata(my_obj,
+                    &packet.payload.buf_map_list.buf_maps[i]);
+        if (result != 0) {
+            while (i > 0) {
+                --i;
+                cam_buf_map_type *mapped = &packet.payload.buf_map_list.buf_maps[i];
+                mm_stream_oppo_unmap_info(my_obj, mapped->type);
+                mm_stream_oppo_unmap_metadata(my_obj, mapped->type, mapped->frame_idx);
+            }
+            return result;
+        }
         sendfds[i] = packet.payload.buf_map_list.buf_maps[i].fd;
     }
 
@@ -2239,6 +2406,13 @@ int32_t mm_stream_map_bufs(mm_stream_t * my_obj,
     int32_t ret = mm_camera_module_send_cmd(shim_cmd);
     mm_camera_destroy_shim_cmd_packet(shim_cmd);
 #endif
+    if (ret != 0) {
+        for (i = 0; i < numbufs; ++i) {
+            cam_buf_map_type *mapped = &packet.payload.buf_map_list.buf_maps[i];
+            mm_stream_oppo_unmap_info(my_obj, mapped->type);
+            mm_stream_oppo_unmap_metadata(my_obj, mapped->type, mapped->frame_idx);
+        }
+    }
     if ((numbufs > 0) && ((buf_map_list->buf_maps[0].type
             == CAM_MAPPING_BUF_TYPE_STREAM_BUF)
             || ((buf_map_list->buf_maps[0].type ==
@@ -2314,6 +2488,10 @@ int32_t mm_stream_unmap_buf(mm_stream_t * my_obj,
     ret = mm_camera_module_send_cmd(shim_cmd);
     mm_camera_destroy_shim_cmd_packet(shim_cmd);
 #endif
+    if (ret == 0) {
+        mm_stream_oppo_unmap_info(my_obj, buf_type);
+        mm_stream_oppo_unmap_metadata(my_obj, buf_type, frame_idx);
+    }
     if ((buf_type == CAM_MAPPING_BUF_TYPE_STREAM_BUF) ||
             (buf_type == CAM_MAPPING_BUF_TYPE_STREAM_USER_BUF)) {
         pthread_mutex_lock(&my_obj->buf_lock);
@@ -2430,6 +2608,11 @@ int32_t mm_stream_deinit_bufs(mm_stream_t * my_obj)
         return rc;
     }
 
+    for (unsigned index = 0; index < my_obj->total_buf_cnt &&
+            index < CAM_MAX_NUM_BUFS_PER_STREAM; ++index) {
+        if (my_obj->oppo_metadata_native[index] != NULL)
+            my_obj->buf[index].buffer = my_obj->oppo_metadata_wire[index];
+    }
     if ((!my_obj->is_res_shared) &&
             (my_obj->mem_vtbl.put_bufs != NULL)) {
         rc = my_obj->mem_vtbl.put_bufs(&my_obj->map_ops,
@@ -2445,6 +2628,11 @@ int32_t mm_stream_deinit_bufs(mm_stream_t * my_obj)
         rc = mm_camera_muxer_put_stream_bufs(my_obj);
     }
 
+    for (unsigned index = 0; index < CAM_MAX_NUM_BUFS_PER_STREAM; ++index) {
+        mm_stream_oppo_unmap_metadata(my_obj, CAM_MAPPING_BUF_TYPE_STREAM_BUF, index);
+        mm_stream_oppo_unmap_metadata(my_obj, CAM_MAPPING_BUF_TYPE_OFFLINE_INPUT_BUF, index);
+        mm_stream_oppo_unmap_metadata(my_obj, CAM_MAPPING_BUF_TYPE_OFFLINE_META_BUF, index);
+    }
     return rc;
 }
 
@@ -4419,10 +4607,15 @@ int32_t mm_stream_calc_offset_metadata(cam_dimension_t *dim,
                                        cam_stream_buf_plane_info_t *buf_planes)
 {
     int32_t rc = 0;
+    /* The stock DMA buffer includes private tails beyond native metadata. */
+    uint32_t wire_len = MM_CAMERA_OPPO_METADATA_SIZE;
+    uint32_t native_len = (uint32_t)(dim->width * dim->height);
+    if (native_len > wire_len)
+        wire_len = native_len;
     buf_planes->plane_info.num_planes = 1;
     buf_planes->plane_info.mp[0].offset = 0;
     buf_planes->plane_info.mp[0].len =
-            PAD_TO_SIZE((uint32_t)(dim->width * dim->height),
+            PAD_TO_SIZE(wire_len,
                     padding->plane_padding);
     buf_planes->plane_info.frame_len =
         buf_planes->plane_info.mp[0].len;
@@ -5010,6 +5203,12 @@ int32_t mm_stream_sync_info(mm_stream_t *my_obj)
     rc = mm_stream_calc_offset(my_obj);
 
     if (rc == 0) {
+        if (my_obj->oppo_stream_info.data == NULL)
+            return -EINVAL;
+        rc = mm_camera_oppo_stream_encode(my_obj->stream_info,
+                my_obj->oppo_stream_info.data);
+        if (rc != 0)
+            return rc;
         mm_camera_obj_t *cam_obj = my_obj->ch_obj->cam_obj;
         int stream_id  =  my_obj->server_stream_id;
         if (my_obj->ch_obj->match_meta &&
@@ -5019,6 +5218,11 @@ int32_t mm_stream_sync_info(mm_stream_t *my_obj)
         }
         rc = mm_camera_util_s_ctrl(cam_obj, stream_id, my_obj->fd,
                 CAM_PRIV_STREAM_INFO_SYNC, &value);
+        if (rc == 0)
+            rc = mm_camera_oppo_stream_decode(my_obj->oppo_stream_info.data,
+                    my_obj->stream_info);
+        if (rc == 0)
+            my_obj->frame_offset = my_obj->stream_info->buf_planes.plane_info;
     }
     return rc;
 }
@@ -5350,4 +5554,3 @@ int32_t mm_stream_handle_cache_ops(mm_stream_t* my_obj,
 
     return rc;
 }
-
