@@ -13,7 +13,6 @@ cc_defaults {
         "-DVENUS_PRESENT",
         "-DUBWC_PRESENT",
         "-D_ANDROID_",
-        "-DQCAMERA_REDEFINE_LOG",
     ],
     header_libs: [
         "generated_kernel_headers",
@@ -23,6 +22,13 @@ cc_defaults {
         "libutils_headers",
         "oppo_camera_headers",
     ],
+}
+
+// The custom logger is provided by libmmcamera_interface. Keep it out of
+// libhal_dbg, which is itself a dependency of that interface library.
+cc_defaults {
+    name: "oppo_camera_logging_defaults",
+    cflags: ["-DQCAMERA_REDEFINE_LOG"],
 }
 
 cc_library_headers {
@@ -71,12 +77,14 @@ cc_library_shared {
     name: "camera.sdm660",
     defaults: [
         "oppo_camera_defaults",
+        "oppo_camera_logging_defaults",
         "oppo_camera_leak_defaults",
     ],
     relative_install_path: "hw",
     srcs: [
         "QCamera2/QCamera2Factory.cpp",
         "QCamera2/QCamera2Hal.cpp",
+        "QCamera2/HAL/QCameraThermalAdapter.cpp",
         "QCamera2/HAL3/QCamera3Channel.cpp",
         "QCamera2/HAL3/QCamera3CropRegionMapper.cpp",
         "QCamera2/HAL3/QCamera3HWI.cpp",
@@ -89,6 +97,8 @@ cc_library_shared {
         "QCamera2/util/QCameraCmdThread.cpp",
         "QCamera2/util/QCameraCommon.cpp",
         "QCamera2/util/QCameraDisplay.cpp",
+        "QCamera2/util/QCameraExtZoomTranslator.cpp",
+        "QCamera2/util/QCameraFOVControl.cpp",
         "QCamera2/util/QCameraFlash.cpp",
         "QCamera2/util/QCameraPerf.cpp",
         "QCamera2/util/QCameraPerfTranslator.cpp",

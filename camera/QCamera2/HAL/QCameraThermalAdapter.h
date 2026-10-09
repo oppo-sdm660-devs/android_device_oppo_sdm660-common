@@ -30,6 +30,9 @@
 #ifndef __QCAMERA_THERMAL_ADAPTER__
 #define __QCAMERA_THERMAL_ADAPTER__
 
+#include <stdint.h>
+#include <utils/Mutex.h>
+
 namespace qcamera {
 
 typedef enum {
@@ -84,7 +87,7 @@ private:
     int mCameraHandle;
     int mCamcorderHandle;
     uint8_t mInstanceCount;
-    Mutex mInstanceLock;
+    android::Mutex mInstanceLock;
 
     QCameraThermalAdapter();
     QCameraThermalAdapter(QCameraThermalAdapter const& copy); // not implemented
