@@ -1,0 +1,5 @@
+# Camera property labels, matching the stock R11/R11s vendor_property_contexts.
+persist.camera.            u:object_r:exported_system_prop:s0
+persist.camera.aifb        u:object_r:exported_system_prop:s0 exact bool
+persist.camera.expose.aux  u:object_r:exported_system_prop:s0 exact bool
+ro.camera.dualcam.type     u:object_r:exported_system_prop:s0 exact int

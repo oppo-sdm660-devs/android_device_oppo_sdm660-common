@@ -58,6 +58,8 @@ QCameraThermalAdapter::QCameraThermalAdapter() :
                                         mHandle(NULL),
                                         mRegister(NULL),
                                         mUnregister(NULL),
+                                        mSetPerfLevel(NULL),
+                                        mReset(NULL),
                                         mCameraHandle(0),
                                         mCamcorderHandle(0),
                                         mInstanceCount(0)
@@ -71,13 +73,11 @@ int QCameraThermalAdapter::init(QCameraThermalCallback *thermalCb)
 
     LOGD("E");
 
-    {
-        Mutex::Autolock l(mInstanceLock);
+    Mutex::Autolock l(mInstanceLock);
+    if (mInstanceCount > 0) {
         mInstanceCount++;
-        if (mInstanceCount > 1) {
-            LOGD("Thermal adapter already initialized, skip this");
-            return NO_ERROR;
-        }
+        LOGD("Thermal adapter already initialized, skip this");
+        return NO_ERROR;
     }
 
     mHandle = dlopen("/vendor/lib/libthermalclient.so", RTLD_NOW);
@@ -139,6 +139,7 @@ int QCameraThermalAdapter::init(QCameraThermalCallback *thermalCb)
         goto error3;
     }
 
+    mInstanceCount++;
     LOGD("X");
     return rc;
 
@@ -150,6 +151,12 @@ error2:
     dlclose(mHandle);
     mHandle = NULL;
 error:
+    mCallback = NULL;
+    mHandle = NULL;
+    mRegister = NULL;
+    mUnregister = NULL;
+    mSetPerfLevel = NULL;
+    mReset = NULL;
     LOGD("X");
     return rc;
 }
@@ -157,13 +164,14 @@ error:
 void QCameraThermalAdapter::deinit()
 {
     LOGD("E");
-    {
-        Mutex::Autolock l(mInstanceLock);
-        mInstanceCount--;
-        if (mInstanceCount > 0) {
-            LOGD("Still active clients, skip this");
-            return;
-        }
+    Mutex::Autolock l(mInstanceLock);
+    if (mInstanceCount == 0) {
+        return;
+    }
+    mInstanceCount--;
+    if (mInstanceCount > 0) {
+        LOGD("Still active clients, skip this");
+        return;
     }
     Reset();
     if (mUnregister) {
@@ -182,6 +190,8 @@ void QCameraThermalAdapter::deinit()
     mHandle = NULL;
     mRegister = NULL;
     mUnregister = NULL;
+    mSetPerfLevel = NULL;
+    mReset = NULL;
     mCallback = NULL;
     LOGD("X");
 }
@@ -208,6 +218,9 @@ int QCameraThermalAdapter::thermalCallback(int level,
 }
 
 int QCameraThermalAdapter::SetPerfLevel(int level) {
+    if (!mSetPerfLevel) {
+        return NO_INIT;
+    }
     // Change has been done to handle the use case
     // When modem changes from say level 2 to level 1
     // It has to send level 0 then level 1.
@@ -236,7 +249,10 @@ int QCameraThermalAdapter::SetPerfLevel(int level) {
 }
 
 void QCameraThermalAdapter::Reset() {
-    return mReset((char*)CLIENT_NAME);
+    if (mReset) {
+        mReset((char*)CLIENT_NAME);
+    }
+    prevPerfLevel = -1;
 }
 
 qcamera_thermal_level_enum_t *QCameraThermalCallback::getThermalLevel() {

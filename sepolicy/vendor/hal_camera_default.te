@@ -1,0 +1,7 @@
+# persist.camera.* is labelled exported_system_prop (stock parity); the camera
+# provider reads those properties.
+get_prop(hal_camera_default, exported_system_prop)
+
+# EGL/GLES stabiliser path reads sysfs_kgsl.
+allow hal_camera_default sysfs_kgsl:dir r_dir_perms;
+allow hal_camera_default sysfs_kgsl:file r_file_perms;

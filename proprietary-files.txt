@@ -110,7 +110,8 @@ vendor/lib/libmdsprpc.so
 vendor/lib/libsdsprpc.so
 vendor/lib/libsysmon_cdsp_skel.so
 vendor/lib64/libcdsp_default_listener.so
-vendor/lib64/libcdsprpc.so
+# libcdsprpc.so: two-part pin (pre-fixup dump | shipped).
+vendor/lib64/libcdsprpc.so|44e6a3aec6457464ac87f71680e443fd1c933d16|1ca45185dde15b43cc94317af0c7e68820388fbd
 vendor/lib64/libfastcvadsp_stub.so
 vendor/lib64/libfastcvopt.so
 vendor/lib64/libfastrpc_utf_stub.so
@@ -177,16 +178,49 @@ vendor/lib64/vendor.qti.hardware.data.qmi@1.0.so|851db5940d5e9e4330e16221be114ae
 vendor/lib64/vendor.qti.hardware.slmadapter@1.0.so|000e0d2ac4450c0ad8baca06985bc9065e119f1e
 vendor/lib64/vendor.qti.latency@2.0.so|60ab3143325e855f8c72e3f603c28efe2e7227b9
 
-# Camera
-vendor/lib/hw/camera.sdm660.so|ae20a7d10c919b1dfe585b59781bf0ae8e3fcbbf
+# Camera - R11 / R11s C.19 stock daemon and JPEG dependencies
+# Pins are path|sha1, or path|pre_fixup_sha1|post_fixup_sha1 for fixupped blobs.
+system/etc/vstab_configs/vstab_db_900p_video_0.config:vendor/etc/vstab_configs/vstab_db_900p_video_0.config|76f00b0a7140cfdd8eddc57cec8f25c05b21f4e9
+system/etc/vstab_configs/vstab_db_900p_video_0_s5k2p7sq.config:vendor/etc/vstab_configs/vstab_db_900p_video_0_s5k2p7sq.config|76f00b0a7140cfdd8eddc57cec8f25c05b21f4e9
+system/etc/vstab_configs/vstab_db_1350p_video_0.config:vendor/etc/vstab_configs/vstab_db_1350p_video_0.config|abdd494b2dd07c5fb80af63c2a9ebe09dc096ff7
+system/etc/vstab_configs/vstab_db_1350p_video_0_s5k2p7sq.config:vendor/etc/vstab_configs/vstab_db_1350p_video_0_s5k2p7sq.config|abdd494b2dd07c5fb80af63c2a9ebe09dc096ff7
+vendor/lib/libmms_gyro_vstab.so|c9988b7ac2bb5f32d00d658889f2a4d4e425eb83
+vendor/lib/libmms_gyro_vstab_auth.so|7b5d26dbf3f020dd5e4536d4cd0063fe4402a7ad
+system/etc/firmware/cpp_firmware_v1_12_0.fw:vendor/firmware/cpp_firmware_v1_12_0.fw
+vendor/lib/libOppoPreviewBokeh.so
 vendor/lib/libPolarrRender.so
-vendor/lib/libStDualCam.so
-vendor/lib/libVDUpScale.so
-vendor/lib/libarc_sensor_adapter.so
-vendor/lib/libarcvs.dep.so
-vendor/lib/libarcvs.so
-vendor/lib/libcamera_core_hwi.so
-vendor/lib/libfilter.so
+# libVDSuperPhotoAPI.so: stock R11/R11s bytes with the clear_symbol_version fixup.
+vendor/lib/libVDSuperPhotoAPI.so|34494a0cae6541b79e0731dc621443440fe82125|2c9c9bd1220c339e0833bf3d9a35cfa992443a05
+# libfilter.so: stock-derived bytes with the libstdc++_vendor fixup.
+vendor/lib/libfilter.so|471aeebff4c5bd96bd7facee805f52104f84c88d|94215aade9cdd843f53ca35a96663dd066cc2ccc
+vendor/lib/libarcsoft_aiscenedetection.so
+vendor/lib/libSTDualCamPreviewBokeh.so
+vendor/lib/libSTdisp.so
+# libSonyIMX376RmscLibrary.so + libarcsoft_dualcam_bokeh_api.so: stock bytes with
+# the libstdc++_vendor fixup.
+vendor/lib/libSonyIMX376RmscLibrary.so|85633a80dd4ab9a7cd0f723c3fa79e5e3b7ed678|7e95492cee3d517d62ccefbee787f43fe42cb6b1
+vendor/lib/libarcsoft_dualcam_bokeh_api.so|08f01388df757b880910b27ee6c614e1c755cbc4|babd7a7654865c3e4ffb6eb2370d59a3346f9236
+vendor/lib/libarcsoft_dualcam_refocus.so|cfc8846dee79c2209e0ccba89a6186d79d0e667f
+vendor/lib/libarcsoft_hdr_denoise_api.so
+vendor/lib/libarcsoft_high_dynamic_range.so
+vendor/lib/libarcsoft_low_light_hdr.so|afa15debdab01d665e87ca56e99045077f34c1e8
+vendor/lib/libarcsoft_smart_denoise.so
+# HAL3 direct-call ArcSoft cores and their DT_NEEDED closure.
+vendor/lib/libarcsoft_beautyshot.so
+vendor/lib/libarcsoft_blink_detection.so
+vendor/lib/libarcsoft_blink_detection_CoupleDis.so
+vendor/lib/libarcsoft_detection_base.so
+vendor/lib/libarcsoft_dualcam_portrait_shot.so
+vendor/lib/libarcsoft_dualcam_portraitlighting.so
+# libarcsoft_dualcam_refocus_{left,preview,right}.so: stock bytes with the
+# libstdc++_vendor fixup.
+vendor/lib/libarcsoft_dualcam_refocus_left.so|4071b9d96850fc941135491bf2dc681422134a46|3fba7675d93d661368193684be461a6a37deb36d
+vendor/lib/libarcsoft_dualcam_refocus_preview.so|2e0de2d604e28a2723de13c66156d62d484d945a|d4917ce06fb233591cd22ab165ffd53d50442544
+vendor/lib/libarcsoft_dualcam_refocus_right.so|8dc1faa789cb0549fe4c2d763cc080deeffe28c7|f62697d3a09404f6c0a54f98246be0c8c9a474f4
+vendor/lib/libarcsoft_picbest.so
+vendor/lib/libblur_channel.so
+# OPPO platform algorithm layer (HAL-side client); not wired on the default path.
+vendor/lib/libcamera_core_hwi.so|0daa287dfa7beaa90938a528ecd0889eb4712722
 vendor/lib/libflash_pmic.so
 vendor/lib/libjpegdhw.so
 vendor/lib/libjpegdmahw.so
@@ -199,77 +233,25 @@ vendor/lib/libmmcamera2_imglib_modules.so
 vendor/lib/libmmcamera2_is.so
 vendor/lib/libmmcamera2_isp_modules.so
 vendor/lib/libmmcamera2_mct.so
-vendor/lib/libmmcamera2_mct_shimlayer.so
 vendor/lib/libmmcamera2_pp_buf_mgr.so
 vendor/lib/libmmcamera2_pproc_modules.so
-vendor/lib/libmmcamera2_q3a_core.so
-vendor/lib/libmmcamera2_sensor_modules.so
+# libmmcamera2_sensor_modules.so: stock R11s bytes; only .shstrtab differs.
+vendor/lib/libmmcamera2_sensor_modules.so|0c740a54db41a10671826eb630a04af94bf6f606
 vendor/lib/libmmcamera2_stats_algorithm.so
 vendor/lib/libmmcamera2_stats_lib.so
-vendor/lib/libmmcamera2_stats_modules.so
 vendor/lib/libmmcamera_dbg.so
+vendor/lib/libmmcamera_dummyalgo.so
 vendor/lib/libmmcamera_eebinparse.so
 vendor/lib/libmmcamera_eeprom_util.so
 vendor/lib/libmmcamera_eztune_module.so
 vendor/lib/libmmcamera_facedetection_lib.so
+# libmmcamera_faceproc.so: stock R11s bytes; only .gnu.version differs.
+vendor/lib/libmmcamera_faceproc.so|ac9c20af20272a35eb4eef227187572adbab81f7|fc103eef3c59e16def33d4b4fc1ef81e84c2e766
 vendor/lib/libmmcamera_faceproc2.so
-vendor/lib/libmmcamera_hdr_gb_lib.so
+# libmmcamera_hdr_gb_lib.so: stock bytes with the liblog and libstdc++_vendor fixups.
+vendor/lib/libmmcamera_hdr_gb_lib.so|0a2ba78f26b29d4498bf5a151e23e1e426da2f5b|98954eead64d1e545792ae2a1128b58ae4c32b65
 vendor/lib/libmmcamera_imglib.so
 vendor/lib/libmmcamera_imglib_faceproc_adspstub.so
-vendor/lib/libmmcamera_interface.so
-vendor/lib/libmmcamera_paaf_lib.so
-vendor/lib/libmmcamera_pdaf.so
-vendor/lib/libmmcamera_pdafcamif.so
-vendor/lib/libmmcamera_ppbase_module.so
-vendor/lib/libmmcamera_ppeiscore.so
-vendor/lib/libmmcamera_quadracfa.so
-vendor/lib/libmmcamera_sw2d_lib.so
-vendor/lib/libmmcamera_thread_services.so
-vendor/lib/libmmcamera_tintless_algo.so
-vendor/lib/libmmjpeg.so
-vendor/lib/libmmjpeg_interface.so
-vendor/lib/libmmlib2d_interface.so
-vendor/lib/libmmqjpeg_codec.so
-vendor/lib/libmmqjpegdma.so
-vendor/lib/libmpbase.so
-vendor/lib/libocam_common.so
-vendor/lib/liboppo_platform_hwi.so
-vendor/lib/liboppoalgolib.so
-vendor/lib/liboppocamalgo_daemon.so
-vendor/lib/libopposfr.so
-vendor/lib/libqomx_core.so
-vendor/lib/libqomx_jpegdec.so
-vendor/lib/libqomx_jpegenc.so
-vendor/lib/libqomx_jpegenc_pipe.so
-vendor/lib/libstface_fd_api.so
-
-# Camera Arcsoft
-vendor/lib/libarcsoft_aiscenedetection.so
-vendor/lib/libarcsoft_beautyshot.so
-vendor/lib/libarcsoft_blink_detection.so
-vendor/lib/libarcsoft_blink_detection_CoupleDis.so
-vendor/lib/libarcsoft_detection_base.so
-vendor/lib/libarcsoft_dualcam_bokeh_api.so
-vendor/lib/libarcsoft_dualcam_portrait_shot.so
-vendor/lib/libarcsoft_dualcam_portraitlighting.so
-vendor/lib/libarcsoft_dualcam_refocus.so
-vendor/lib/libarcsoft_dualcam_refocus_left.so
-vendor/lib/libarcsoft_dualcam_refocus_preview.so
-vendor/lib/libarcsoft_dualcam_refocus_right.so
-vendor/lib/libarcsoft_hdr_couple_api.so
-vendor/lib/libarcsoft_hdr_denoise_api.so
-vendor/lib/libarcsoft_high_dynamic_range.so
-vendor/lib/libarcsoft_high_dynamic_range_couple.so
-vendor/lib/libarcsoft_low_light_hdr.so
-vendor/lib/libarcsoft_picbest.so
-vendor/lib/libarcsoft_relighting_pro_image.so
-vendor/lib/libarcsoft_smart_denoise.so
-vendor/lib/libarcsoft_videostabilizer.so
-
-# Camera firmware - from OPPO R11
-system/etc/firmware/cpp_firmware_v1_12_0.fw:vendor/firmware/cpp_firmware_v1_12_0.fw|c7939d46f9875054c5b30c3280862e7d9df3dcf9
-
-# Camera sensors
 vendor/lib/libmmcamera_isp_abf48.so
 vendor/lib/libmmcamera_isp_aec_bg_stats47.so
 vendor/lib/libmmcamera_isp_bf_stats47.so
@@ -314,6 +296,38 @@ vendor/lib/libmmcamera_isp_scaler_viewfinder46.so
 vendor/lib/libmmcamera_isp_sce40.so
 vendor/lib/libmmcamera_isp_snr47.so
 vendor/lib/libmmcamera_isp_sub_module.so
+vendor/lib/libmmcamera_paaf_lib.so
+# libmmcamera_pdaf.so + libmmcamera_pdafcamif.so: stock bytes with the liblog fixup.
+vendor/lib/libmmcamera_pdaf.so|b29094a87b7a24cf1b061881e88fa6cfd688d34c|9a4765ac158ddc00cae7c3744dac571cb28f39fb
+vendor/lib/libmmcamera_pdafcamif.so|626a56e07fa5d264d82f70fc7e79aea902c74095|59d0f31d76d8562307c85e31ef286cce29733c86
+vendor/lib/libmmcamera_ppbase_module.so
+vendor/lib/libmmcamera_ppeiscore.so
+vendor/lib/libmmcamera_quadracfa.so
+vendor/lib/libmmcamera_sw2d_lib.so
+vendor/lib/libmmcamera_thread_services.so
+vendor/lib/libmmcamera_tintless_algo.so
+# libmmcamera_tintless_bg_pca_algo.so: stock bytes with the liblog fixup.
+vendor/lib/libmmcamera_tintless_bg_pca_algo.so|b2867474a88d38e2c611512bb44c6d36a781b5f5|068e66296894cb663636d422439ca59dbcd9dc59
+vendor/lib/libmmjpeg.so
+vendor/lib/libmmqjpeg_codec.so
+vendor/lib/libmmqjpegdma.so
+vendor/lib/libmpbase.so
+# Rest of the OPPO platform algorithm layer (HAL-side client closure).
+vendor/lib/libocam_common.so|9ea16f961082f05b7ff068985a93bf2cb6a85165
+vendor/lib/liboppo_platform_hwi.so|d0f1d5c59555b10afc9e41251dbff3c20330cdba
+vendor/lib/liboppoalgolib.so|20f5246463f09833e39a9597117e3e68db870581
+vendor/lib/liboppocamalgo_daemon.so|37887ace67b32b01c8ce7cd153f4c0df3eec13eb
+vendor/lib/libopposfr.so
+vendor/lib/libqomx_jpegdec.so
+vendor/lib/libqomx_jpegenc.so
+vendor/lib/libqomx_jpegenc_pipe.so
+vendor/lib/libremosaic_daemon.so
+vendor/lib/libremosaic_tuning.so
+vendor/lib/libremosaiclib.so
+vendor/lib/libsensor1.so
+vendor/lib/libstface_fd_api.so
+# libthread_blur.so: stock R11s bytes; only .gnu.version differs.
+vendor/lib/libthread_blur.so|c15a5ba0ae8c398859afb2dbfa99aee0c1ab0e39|22dde245ca56dac0112697dd5a6c1e5f46088820
 
 # Charger
 vendor/bin/hvdcp_opti
@@ -360,7 +374,8 @@ vendor/lib64/libssd.so|774488b88c37053067b3cad551ac95360c03edd3
 vendor/bin/hw/android.hardware.drm@1.3-service.widevine|2158f47423c723a9da29bb81bb16987a1e715c21
 vendor/etc/init/android.hardware.drm@1.3-service.widevine.rc|c35e1a6f9a6faff19064a81e07c4be82ceaf4bb5
 vendor/etc/vintf/manifest/manifest_android.hardware.drm@1.3-service.widevine.xml|ebebcf8f367641480cf7d512fc06e6ab777527be
-vendor/lib64/libwvhidl.so|acf4870a0b10af74a40a4c6180f2c10a1706ddbd
+# libwvhidl.so: post-fixup sha1 (add_needed libcrypto_shim.so).
+vendor/lib64/libwvhidl.so|513593d421e18b4d33c575fa84d967206f8feb4a
 
 # DRM (widevine firmware)
 vendor/firmware/widevine.b00
@@ -562,7 +577,8 @@ vendor/lib64/libqcbor.so
 
 # Peripheral manager
 vendor/bin/pm-proxy
-vendor/bin/pm-service
+# pm-service: two-part pin (pre-fixup dump | shipped).
+vendor/bin/pm-service|4c9c601cb5a35717d0fa0f6718180c849c2419c7|c6e75652a3b9528d6e25c03e7b3cdf5ae6867218
 vendor/lib64/libperipheral_client.so
 
 # QMI - from Cat S62Pro
@@ -603,6 +619,7 @@ vendor/lib64/libqmi_common_so.so|d817b576a054dd91e8e4346d73e6d635d221bfde
 vendor/lib64/libqmi_csi.so|7e19c2266b7f63f3f9e69c039b1446acd460231b
 vendor/lib64/libqmi_encdec.so|a18bb21e5b9b53e3dc8dc45f6e7e65e32a467607
 vendor/lib64/libqmi_legacy.so|f324c6701ecf78ff50975c0bc7f99aea09cb3539
+# libqmiservices.so (64-bit): post-fixup sha1 only; pre-fixup source not available.
 vendor/lib64/libqmiservices.so|e159ca743e6c7904a405ce64af0b7448be31c007
 
 # Remote storage - OPPO version with OEM NV backup/restore
@@ -654,6 +671,7 @@ vendor/lib64/libqcrilFramework.so|dc62bd4f3685c420d43f4f5f4141d5908212df86
 vendor/lib64/libqcrildatactl.so|612f31db78dd262a349c093c1a5071e4fd89450d
 vendor/lib64/libqrtr.so|b22ee7df87b35ba88b518f0b821cc601cd612183
 vendor/lib64/libqsocket.so|3fa01c9aff6ed96a5ea9886c7696a046c929e339
+# libril-qc-hal-qmi.so: post-fixup sha1 only; pre-fixup source not available.
 vendor/lib64/libril-qc-hal-qmi.so|11b544bc0b70bcce47688e983ef5778833a27170
 vendor/lib64/libril-qc-logger.so|5622a5aa1eb7fc6c6241c0033e27272084d235c6
 vendor/lib64/libril-qc-ltedirectdisc.so|b3990ccf919b742b9a756654bfaf9d23682ff1db
@@ -710,7 +728,6 @@ vendor/etc/seccomp_policy/mediacodec.policy
 # Sensors
 vendor/bin/init.qcom.sensors.sh
 vendor/bin/sensors.qti
-vendor/lib/libsensor1.so
 vendor/lib/libsensor_reg.so
 vendor/lib/sensors.ssc.so
 vendor/lib64/libsensor1.so
@@ -732,6 +749,9 @@ vendor/etc/sensors/sensor_def_18316.conf
 vendor/etc/sensors/sensor_def_18321.conf
 vendor/etc/sensors/sensor_def_18323.conf
 vendor/etc/sensors/sensor_def_qcomdev.conf
+
+# Camera HDR noise configuration - identical in R11/R11s C.19
+system/etc/camera/ashdr/ncf_pack.ncf:vendor/etc/camera/ashdr/ncf_pack.ncf
 
 # Thermal
 vendor/bin/thermal-engine

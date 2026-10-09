@@ -38,6 +38,9 @@
 #include "cam_semaphore.h"
 #include "mm_camera_interface.h"
 #include "mm_camera_shim.h"
+#include "mm_camera_oppo_metadata.h"
+#include "mm_camera_oppo_capability.h"
+#include "mm_camera_oppo_dual.h"
 
 /**********************************************************************************
 * Data structure declarations
@@ -295,6 +298,7 @@ typedef struct mm_stream {
 
     /* stream info*/
     cam_stream_info_t *stream_info;
+    mm_camera_oppo_buffer_t oppo_stream_info;
 
     /* padding info */
     cam_padding_info_t padding_info;
@@ -317,6 +321,9 @@ typedef struct mm_stream {
     uint8_t buf_idx; /* starting buffer index */
 
     mm_camera_buf_def_t* buf; /* ptr to buf array */
+    void *oppo_metadata_wire[CAM_MAX_NUM_BUFS_PER_STREAM];
+    metadata_buffer_t *oppo_metadata_native[CAM_MAX_NUM_BUFS_PER_STREAM];
+    mm_camera_oppo_buffer_t oppo_offline_metadata[2][CAM_MAX_NUM_BUFS_PER_STREAM];
     mm_stream_buf_status_t buf_status[CAM_MAX_NUM_BUFS_PER_STREAM]; /* ptr to buf status array */
 
     uint8_t plane_buf_num; /* num of plane buffers allocated  Used only in Batch mode*/
@@ -604,6 +611,11 @@ typedef struct mm_camera_obj {
     int ref_count;
     int32_t ctrl_fd;
     int32_t ds_fd; /* domain socket fd */
+    mm_camera_oppo_buffer_t oppo_parameters;
+    mm_camera_oppo_buffer_t oppo_capability;
+    cam_capability_t *oppo_capability_native;
+    mm_camera_oppo_buffer_t oppo_dual_command;
+    cam_dual_camera_cmd_info_t *oppo_dual_command_native;
     pthread_mutex_t cam_lock;
     pthread_mutex_t cb_lock; /* lock for evt cb */
     mm_channel_t ch[MM_CAMERA_CHANNEL_MAX];

@@ -682,6 +682,10 @@ typedef struct cam_capability{
     uint8_t is_mono_stats_suport;
     uint8_t is_depth_sensor;
     cam_dimension_t single_isp_max_size;
+
+    /* Source-HAL sideband, not a native daemon record; the stock capability's
+     * sensor-name prefix selects the MMS calibration. */
+    char oppo_sensor_name[32];
 } cam_capability_t;
 
 typedef enum {
@@ -1214,6 +1218,12 @@ typedef struct {
         uint8_t         is_reqd[CAM_INTF_PARM_MAX];
     };
     metadata_data_t data;
+    /* Source-HAL sideband only, never on the stock wire ABI; carries algorithm
+     * inputs for the same frame as the standard sensor metadata. */
+    struct {
+        float llhdr_drc_gain;
+        uint8_t llhdr_drc_valid;
+    } oppo_algorithm;
 } metadata_buffer_t;
 
 typedef metadata_buffer_t parm_buffer_t;
@@ -1228,6 +1238,7 @@ static inline void clear_metadata_buffer(metadata_buffer_t *meta)
 {
     if (meta) {
       memset(meta->is_valid, 0, CAM_INTF_PARM_MAX);
+      memset(&meta->oppo_algorithm, 0, sizeof(meta->oppo_algorithm));
     }
 }
 

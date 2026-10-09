@@ -2329,7 +2329,9 @@ static int32_t mm_camera_intf_set_dual_cam_cmd(uint32_t camera_handle)
         }
     }
 
+    const int32_t main_rc = rc;
     if (aux_handle) {
+        rc = -1;
         pthread_mutex_lock(&g_intf_lock);
         my_obj = mm_camera_util_get_camera_head(aux_handle);
         if (my_obj) {
@@ -2341,7 +2343,8 @@ static int32_t mm_camera_intf_set_dual_cam_cmd(uint32_t camera_handle)
             pthread_mutex_unlock(&g_intf_lock);
         }
     }
-    return rc;
+    /* Success on aux must never hide a failed or missing main endpoint. */
+    return handle && main_rc != 0 ? main_rc : rc;
 }
 
 /*===========================================================================
@@ -2468,7 +2471,6 @@ void sort_camera_info(int num_cam)
     uint8_t temp_is_yuv[MM_CAMERA_MAX_NUM_SENSORS];
     char temp_dev_name[MM_CAMERA_MAX_NUM_SENSORS][MM_CAMERA_DEV_NAME_LEN];
     uint32_t cam_idx[MM_CAMERA_MAX_NUM_SENSORS] = {0};
-    uint8_t b_prime_idx = 0, b_aux_idx = 0, f_prime_idx = 0, f_aux_idx = 0;
     int8_t expose_aux = 0;
     char prop[PROPERTY_VALUE_MAX];
 
@@ -2487,9 +2489,9 @@ void sort_camera_info(int num_cam)
         1  - Front Main Camera
         ++  - Back Aux Camera
         ++  - Front Aux Camera
-        ++  - Back Main + Back Aux camera
-        ++  - Front Main + Front Aux camera
         ++  - Secure Camera
+       The verified rear paired device is appended by the HAL3 factory after
+       physical capability discovery; properties cannot publish a paired ID.
        */
     for (i = 0; i < num_cam; i++) {
         if ((g_cam_ctrl.info[i].facing == CAMERA_FACING_BACK) &&
@@ -2499,7 +2501,6 @@ void sort_camera_info(int num_cam)
             temp_mode[idx] = g_cam_ctrl.cam_mode[i];
             temp_is_yuv[idx] = g_cam_ctrl.is_yuv[i];
             cam_idx[idx] = idx;
-            b_prime_idx = idx;
             LOGH("Found Back Main Camera: i: %d idx: %d", i, idx);
             memcpy(temp_dev_name[idx],g_cam_ctrl.video_dev_name[i],
                 MM_CAMERA_DEV_NAME_LEN);
@@ -2515,7 +2516,6 @@ void sort_camera_info(int num_cam)
             temp_mode[idx] = g_cam_ctrl.cam_mode[i];
             temp_is_yuv[idx] = g_cam_ctrl.is_yuv[i];
             cam_idx[idx] = idx;
-            f_prime_idx = idx;
             LOGH("Found Front Main Camera: i: %d idx: %d", i, idx);
             memcpy(temp_dev_name[idx],g_cam_ctrl.video_dev_name[i],
                 MM_CAMERA_DEV_NAME_LEN);
@@ -2532,7 +2532,6 @@ void sort_camera_info(int num_cam)
             temp_mode[idx] = g_cam_ctrl.cam_mode[i];
             temp_is_yuv[idx] = g_cam_ctrl.is_yuv[i];
             cam_idx[idx] = idx;
-            b_aux_idx = idx;
             LOGH("Found Back Aux Camera: i: %d idx: %d", i, idx);
             memcpy(temp_dev_name[idx],g_cam_ctrl.video_dev_name[i],
                 MM_CAMERA_DEV_NAME_LEN);
@@ -2549,40 +2548,7 @@ void sort_camera_info(int num_cam)
             temp_mode[idx] = g_cam_ctrl.cam_mode[i];
             temp_is_yuv[idx] = g_cam_ctrl.is_yuv[i];
             cam_idx[idx] = idx;
-            f_aux_idx = idx;
             LOGH("Found front Aux Camera: i: %d idx: %d", i, idx);
-            memcpy(temp_dev_name[idx],g_cam_ctrl.video_dev_name[i],
-                MM_CAMERA_DEV_NAME_LEN);
-            idx++;
-        }
-    }
-
-    for (i = 0; i < num_cam; i++) {
-        if ((g_cam_ctrl.info[i].facing == CAMERA_FACING_BACK) &&
-            (g_cam_ctrl.cam_type[i] & CAM_TYPE_AUX)
-            && expose_aux) { // Need Main check here after sensor change
-            temp_info[idx] = g_cam_ctrl.info[i];
-            temp_type[idx] = CAM_TYPE_MAIN | CAM_TYPE_AUX;
-            temp_mode[idx] = g_cam_ctrl.cam_mode[i];
-            temp_is_yuv[idx] = g_cam_ctrl.is_yuv[i];
-            cam_idx[idx] = (b_aux_idx << MM_CAMERA_HANDLE_SHIFT_MASK) | b_prime_idx;
-            LOGH("Found Back Main+AUX Camera: i: %d idx: %d", i, idx);
-            memcpy(temp_dev_name[idx],g_cam_ctrl.video_dev_name[i],
-                MM_CAMERA_DEV_NAME_LEN);
-            idx++;
-        }
-    }
-
-    for (i = 0; i < num_cam; i++) {
-        if ((g_cam_ctrl.info[i].facing == CAMERA_FACING_FRONT) &&
-            (g_cam_ctrl.cam_type[i] & CAM_TYPE_AUX)
-            &&expose_aux) { // Need Main check here after sensor change
-            temp_info[idx] = g_cam_ctrl.info[i];
-            temp_type[idx] = CAM_TYPE_MAIN | CAM_TYPE_AUX;
-            temp_mode[idx] = g_cam_ctrl.cam_mode[i];
-            temp_is_yuv[idx] = g_cam_ctrl.is_yuv[i];
-            cam_idx[idx] = (f_aux_idx << MM_CAMERA_HANDLE_SHIFT_MASK) | f_prime_idx;
-            LOGH("Found Back Main Camera: i: %d idx: %d", i, idx);
             memcpy(temp_dev_name[idx],g_cam_ctrl.video_dev_name[i],
                 MM_CAMERA_DEV_NAME_LEN);
             idx++;
@@ -2656,8 +2622,15 @@ uint8_t get_num_of_cameras()
      return 0;
     pthread_mutex_lock(&g_intf_lock);
 
+#ifndef DAEMON_PRESENT
+    /* May run more than once (dual-camera publication); the shim is loaded only
+     * on the first call, so preserve its ops table across the memset. */
+    mm_camera_shim_ops_t saved_shim_ops = g_cam_ctrl.cam_shim_ops;
+#endif
+
     memset (&g_cam_ctrl, 0, sizeof (g_cam_ctrl));
 #ifndef DAEMON_PRESENT
+    g_cam_ctrl.cam_shim_ops = saved_shim_ops;
     if (g_shim_initialized == FALSE) {
         if (mm_camera_load_shim_lib() < 0) {
             LOGE("Failed to module shim library");
@@ -2819,6 +2792,57 @@ uint8_t get_num_of_cameras_to_expose()
         get_num_of_cameras();
     }
     return g_cam_ctrl.num_cam_to_expose;
+}
+
+int32_t publish_hal3_dual_camera(void)
+{
+    int32_t rc = -EINVAL;
+    uint32_t i;
+    /* R11 topology only: keep discovered ID order and backend associations. */
+    pthread_mutex_lock(&g_intf_lock);
+    if (MM_CAMERA_MAX_NUM_SENSORS < 4 ||
+            (g_cam_ctrl.num_cam != 3 && g_cam_ctrl.num_cam != 4) ||
+            g_cam_ctrl.num_cam_to_expose != g_cam_ctrl.num_cam ||
+            g_cam_ctrl.cam_type[0] != CAM_TYPE_MAIN ||
+            g_cam_ctrl.cam_type[1] != CAM_TYPE_MAIN ||
+            g_cam_ctrl.cam_type[2] != CAM_TYPE_AUX ||
+            g_cam_ctrl.info[0].facing != CAMERA_FACING_BACK ||
+            g_cam_ctrl.info[1].facing != CAMERA_FACING_FRONT ||
+            g_cam_ctrl.info[2].facing != CAMERA_FACING_BACK ||
+            g_cam_ctrl.is_yuv[0] || g_cam_ctrl.is_yuv[2] ||
+            g_cam_ctrl.cam_index[0] != 0 || g_cam_ctrl.cam_index[1] != 1 ||
+            g_cam_ctrl.cam_index[2] != 2 || !g_cam_ctrl.video_dev_name[0][0] ||
+            !g_cam_ctrl.video_dev_name[2][0]) goto done;
+    if (g_cam_ctrl.num_cam == 4) {
+        /* Do not mistake another fourth physical device for our paired ID. */
+        if (g_cam_ctrl.cam_type[3] == (CAM_TYPE_MAIN | CAM_TYPE_AUX) &&
+                g_cam_ctrl.cam_index[3] == (2U << MM_CAMERA_HANDLE_SHIFT_MASK) &&
+                g_cam_ctrl.info[3].facing == g_cam_ctrl.info[0].facing &&
+                g_cam_ctrl.info[3].orientation == g_cam_ctrl.info[0].orientation &&
+                g_cam_ctrl.cam_mode[3] == g_cam_ctrl.cam_mode[0] &&
+                g_cam_ctrl.is_yuv[3] == g_cam_ctrl.is_yuv[0] &&
+                memcmp(g_cam_ctrl.video_dev_name[3], g_cam_ctrl.video_dev_name[0],
+                    MM_CAMERA_DEV_NAME_LEN) == 0) rc = 0;
+        goto done;
+    }
+    /* Publication runs before a real session starts. */
+    for (i = 0; i < MM_CAMERA_MAX_NUM_SENSORS; ++i) {
+        if (g_cam_ctrl.cam_obj[i] != NULL) {
+            rc = -EBUSY;
+            goto done;
+        }
+    }
+    g_cam_ctrl.info[3] = g_cam_ctrl.info[0];
+    g_cam_ctrl.cam_type[3] = CAM_TYPE_MAIN | CAM_TYPE_AUX;
+    g_cam_ctrl.cam_mode[3] = g_cam_ctrl.cam_mode[0];
+    g_cam_ctrl.is_yuv[3] = g_cam_ctrl.is_yuv[0];
+    g_cam_ctrl.cam_index[3] = (2U << MM_CAMERA_HANDLE_SHIFT_MASK) | 0U;
+    memcpy(g_cam_ctrl.video_dev_name[3], g_cam_ctrl.video_dev_name[0], MM_CAMERA_DEV_NAME_LEN);
+    g_cam_ctrl.num_cam = g_cam_ctrl.num_cam_to_expose = 4;
+    rc = 0;
+done:
+    pthread_mutex_unlock(&g_intf_lock);
+    return rc;
 }
 
 /*===========================================================================
