@@ -1,0 +1,84 @@
+cc_library_shared {
+    name: "libmmcamera_interface",
+    defaults: [
+        "oppo_camera_defaults",
+        "oppo_camera_logging_defaults",
+        "oppo_camera_leak_defaults",
+    ],
+    c_std: "gnu11",
+    srcs: [
+        "mm-camera-interface/src/mm_camera_interface.c",
+        "mm-camera-interface/src/mm_camera.c",
+        "mm-camera-interface/src/mm_camera_muxer.c",
+        "mm-camera-interface/src/mm_camera_channel.c",
+        "mm-camera-interface/src/mm_camera_stream.c",
+        "mm-camera-interface/src/mm_camera_thread.c",
+        "mm-camera-interface/src/mm_camera_sock.c",
+    ],
+    cflags: [
+        "-DUSE_KERNEL_VERSION_GE_4_4_DEFS",
+        "-DUSE_4_9_DEFS",
+    ],
+    shared_libs: [
+        // mm_camera.h includes camera_common.h, whose system camera headers
+        // are exported by libcamera_metadata rather than libhardware_headers.
+        "libcamera_metadata",
+        "libdl",
+        "libcutils",
+        "liblog",
+    ],
+}
+
+cc_library_shared {
+    name: "libmmjpeg_interface",
+    defaults: [
+        "oppo_camera_defaults",
+        "oppo_camera_logging_defaults",
+    ],
+    c_std: "gnu11",
+    srcs: [
+        "mm-jpeg-interface/src/mm_jpeg_queue.c",
+        "mm-jpeg-interface/src/mm_jpeg_exif.c",
+        "mm-jpeg-interface/src/mm_jpeg.c",
+        "mm-jpeg-interface/src/mm_jpeg_interface.c",
+        "mm-jpeg-interface/src/mm_jpeg_ionbuf.c",
+        "mm-jpeg-interface/src/mm_jpegdec_interface.c",
+        "mm-jpeg-interface/src/mm_jpegdec.c",
+        "mm-jpeg-interface/src/mm_jpeg_mpo_composer.c",
+    ],
+    header_libs: [
+        "media_plugin_headers",
+    ],
+    cflags: [
+        "-Wno-unused-parameter",
+        "-DMM_JPEG_CONCURRENT_SESSIONS_COUNT=1",
+        "-DMM_JPEG_USE_PIPELINE",
+    ],
+    shared_libs: [
+        "libdl",
+        "libcutils",
+        "liblog",
+        "libqomx_core",
+        "libmmcamera_interface",
+    ],
+}
+
+cc_library_shared {
+    name: "libhal_dbg",
+    defaults: ["oppo_camera_defaults"],
+    srcs: [
+        "common/leak/fdleak.cpp",
+        "common/leak/memleak.cpp",
+    ],
+    header_libs: [
+        "oppo_camera_leak_headers",
+    ],
+    cflags: [
+        "-Wunused-parameter",
+    ],
+    shared_libs: [
+        "libdl",
+        "libcutils",
+        "liblog",
+    ],
+}

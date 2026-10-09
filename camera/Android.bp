@@ -1,0 +1,179 @@
+// SPDX-License-Identifier: BSD-3-Clause
+
+cc_defaults {
+    name: "oppo_camera_defaults",
+    vendor: true,
+    compile_multilib: "32",
+    cpp_std: "gnu++17",
+    cflags: [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-DSYSTEM_HEADER_PREFIX=sys",
+        "-DVENUS_PRESENT",
+        "-DUBWC_PRESENT",
+        "-D_ANDROID_",
+    ],
+    header_libs: [
+        "generated_kernel_headers",
+        "libcutils_headers",
+        "libhardware_headers",
+        "libsystem_headers",
+        "libutils_headers",
+        "oppo_camera_headers",
+    ],
+}
+
+// The custom logger is provided by libmmcamera_interface. Keep it out of
+// libhal_dbg, which is itself a dependency of that interface library.
+cc_defaults {
+    name: "oppo_camera_logging_defaults",
+    cflags: ["-DQCAMERA_REDEFINE_LOG"],
+}
+
+cc_library_headers {
+    name: "oppo_camera_headers",
+    vendor: true,
+    export_include_dirs: [
+        "QCamera2/stack/common",
+        "QCamera2/stack/mm-camera-interface/inc",
+        "QCamera2/stack/mm-jpeg-interface/inc",
+        "mm-image-codec/qexif",
+        "mm-image-codec/qomx_core",
+    ],
+    header_libs: ["generated_kernel_headers"],
+    export_header_lib_headers: ["generated_kernel_headers"],
+}
+
+cc_library_headers {
+    name: "oppo_camera_leak_headers",
+    vendor: true,
+    export_include_dirs: ["QCamera2/stack/common/leak"],
+}
+
+cc_defaults {
+    name: "oppo_camera_leak_defaults",
+    cflags: [
+        "-DFDLEAK_FLAG",
+        "-DMEMLEAK_FLAG",
+    ],
+    header_libs: ["oppo_camera_leak_headers"],
+    shared_libs: ["libhal_dbg"],
+    ldflags: [
+        "-Wl,--wrap=open",
+        "-Wl,--wrap=close",
+        "-Wl,--wrap=socket",
+        "-Wl,--wrap=pipe",
+        "-Wl,--wrap=mmap",
+        "-Wl,--wrap=__open_2",
+        "-Wl,--wrap=malloc",
+        "-Wl,--wrap=free",
+        "-Wl,--wrap=realloc",
+        "-Wl,--wrap=calloc",
+    ],
+}
+
+cc_library_shared {
+    name: "camera.sdm660",
+    defaults: [
+        "oppo_camera_defaults",
+        "oppo_camera_logging_defaults",
+        "oppo_camera_leak_defaults",
+    ],
+    relative_install_path: "hw",
+    srcs: [
+        "QCamera2/QCamera2Factory.cpp",
+        "QCamera2/QCamera2Hal.cpp",
+        "QCamera2/HAL/QCameraThermalAdapter.cpp",
+        "QCamera2/HAL3/QCamera3Channel.cpp",
+        "QCamera2/HAL3/QCamera3CropRegionMapper.cpp",
+        "QCamera2/HAL3/QCamera3HWI.cpp",
+        "QCamera2/HAL3/QCamera3Mem.cpp",
+        "QCamera2/HAL3/QCamera3PostProc.cpp",
+        "QCamera2/HAL3/QCamera3Stream.cpp",
+        "QCamera2/HAL3/QCamera3StreamMem.cpp",
+        "QCamera2/HAL3/QCamera3VendorTags.cpp",
+        "QCamera2/util/QCameraBufferMaps.cpp",
+        "QCamera2/util/QCameraCmdThread.cpp",
+        "QCamera2/util/QCameraCommon.cpp",
+        "QCamera2/util/QCameraDisplay.cpp",
+        "QCamera2/util/QCameraExtZoomTranslator.cpp",
+        "QCamera2/util/QCameraFOVControl.cpp",
+        "QCamera2/util/QCameraFlash.cpp",
+        "QCamera2/util/QCameraPerf.cpp",
+        "QCamera2/util/QCameraPerfTranslator.cpp",
+        "QCamera2/util/QCameraQueue.cpp",
+        "QCamera2/util/QCameraTrace.cpp",
+        "QCamera2/util/camscope_packet_type.cpp",
+    ],
+    local_include_dirs: [
+        "QCamera2",
+        "QCamera2/HAL",
+        "QCamera2/HAL3",
+        "QCamera2/util",
+    ],
+    cflags: [
+        "-Wno-compound-token-split-by-macro",
+        "-D_ANDROID",
+        "-DQCAMERA_HAL3_SUPPORT",
+        "-DSUPPORT_ONLY_HAL3",
+        "-DHAL3",
+        "-DHAS_MULTIMEDIA_HINTS",
+        "-DUSE_CAMERA_METABUFFER_UTILS",
+        "-DUSE_DISPLAY_SERVICE",
+        "-DUSE_VENDOR_PROP",
+        "-DVIDEO_EXPLICIT_UBWC",
+        "-DSUPPORT_POWER_HINT_XML",
+    ],
+    header_libs: [
+        "display_headers",
+        "display_intf_headers",
+        "media_plugin_headers",
+    ],
+    shared_libs: [
+        "android.frameworks.displayservice@1.0",
+        "android.hidl.base@1.0",
+        "android.hidl.manager@1.0",
+        "libbinder",
+        "libcamera_metadata",
+        "libcutils",
+        "libdl",
+        "libhardware",
+        "libhidlbase",
+        "liblog",
+        "libmmcamera_interface",
+        "libmmjpeg_interface",
+        "libqdMetaData",
+        "libqservice",
+        "libsync",
+        "libui",
+        "libutils",
+    ],
+    static_libs: ["android.hardware.camera.common-helper"],
+    required: ["cameraconfig.txt"],
+}
+
+cc_library_shared {
+    name: "libqomx_core",
+    vendor: true,
+    compile_multilib: "32",
+    srcs: ["mm-image-codec/qomx_core/qomx_core.c"],
+    cflags: ["-Werror"],
+    header_libs: [
+        "libutils_headers",
+        "media_plugin_headers",
+        "oppo_camera_headers",
+    ],
+    shared_libs: [
+        "libcutils",
+        "libdl",
+        "liblog",
+    ],
+}
+
+prebuilt_etc {
+    name: "cameraconfig.txt",
+    vendor: true,
+    src: "QCamera2/util/cameraconfig.txt",
+    sub_dir: "camera",
+}
