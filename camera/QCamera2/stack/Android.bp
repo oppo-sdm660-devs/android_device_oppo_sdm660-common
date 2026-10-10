@@ -21,7 +21,6 @@ cc_library_shared {
     ],
     cflags: [
         "-DUSE_KERNEL_VERSION_GE_4_4_DEFS",
-        "-DUSE_4_9_DEFS",
     ],
     shared_libs: [
         // mm_camera.h includes camera_common.h, whose system camera headers
