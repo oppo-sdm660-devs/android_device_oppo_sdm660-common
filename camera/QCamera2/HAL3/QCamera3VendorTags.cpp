@@ -374,18 +374,24 @@ vendor_tag_info_t qcamera3_postprocess[QCAMERA3_POSTPROCESS_END -
     { "exifUserComment", TYPE_BYTE },
 };
 
+// ORDER IS THE ABI: entry i is the name/type of QCAMERA3_STREAM_START + i, so this
+// list must stay in the exact order of the enum in QCamera3VendorTags.h. Seven
+// entries were rotated here (vstab* last) while the enum had them in the middle,
+// so `lowPowerMode` resolved to the id of vstabOffset, the byte[] physical id was
+// written into a FLOAT-registered tag, and every by-name consumer saw the wrong
+// tag. Enforced by device-tree-nonsource-20261017/camera/tests/test_vendor_tag_tables.py.
 vendor_tag_info_t qcamera3_stream[QCAMERA3_STREAM_END -
         QCAMERA3_STREAM_START] = {
     { "slowMotionRatio", TYPE_INT32 },
     { "availableSlowMotionRatios", TYPE_INT32 },
     { "videoHdrProfile", TYPE_INT32 },
+    { "vstabCropFactor", TYPE_FLOAT },
+    { "vstabOffset", TYPE_FLOAT },
     { "logicalZoomHint", TYPE_FLOAT },
     { "lowPowerMode", TYPE_INT32 },
     { "depthStreamEnabled", TYPE_INT32 },
     { "irStreamMode", TYPE_INT32 },
     { "activePhysicalId", TYPE_BYTE },
-    { "vstabCropFactor", TYPE_FLOAT },
-    { "vstabOffset", TYPE_FLOAT },
 };
 
 vendor_tag_info_t qcamera3_diagnostics[QCAMERA3_DIAGNOSTICS_END -

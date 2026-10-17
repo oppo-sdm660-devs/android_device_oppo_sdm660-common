@@ -833,14 +833,20 @@ static bool oppoBasicRequestSettings(const camera_metadata_t *settings,
     // left; effects 2/4/5/6/7/8/9 and their controls were deleted with the
     // 2026-10-17 B2-b/B2-c batch, so the filter and scene tags are refused by
     // unsupportedTags above.
+    //
+    // The effect ids are explicitly paired with their tags - they are NOT i+1.
+    // The tone tag is effect 3, and 3 is the only advertised effect, so a
+    // positional mapping made the one advertised effect impossible to set
+    // (tone -> 2 -> "not advertised" -> request refused).
     const uint32_t continuousTags[] = {static_cast<uint32_t>(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_BEAUTY_STRENGTH),
             static_cast<uint32_t>(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_TONE_STRENGTH)};
+    const int32_t continuousEffects[] = {1, 3}; // rear beauty, SDR tone
     for (size_t i = 0; i < 2; ++i) {
         if (find_camera_metadata_ro_entry(settings, continuousTags[i], &entry) != 0) continue;
         if (entry.count != 1 || entry.data.i32[0] < 0 || entry.data.i32[0] > 100) return false;
         // The control must resolve to the continuous effect that really
         // executes it; effect 1 and effect 3 are the ids of these two tags.
-        const int32_t effect = int32_t(i + 1);
+        const int32_t effect = continuousEffects[i];
         if (entry.data.i32[0] != 0 && !oppoAdvertisesInt32(characteristics,
                 QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_AVAILABLE_EFFECTS, effect)) return false;
     }
@@ -1303,8 +1309,10 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
                 basicKeys.add(QCAMERA3_VIDEO_HDR_MODE);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_MODE);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH);
-            basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_FILTER_TYPE);
-            basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_FILTER_FLIP_MODE);
+            // FILTER_TYPE / FILTER_FLIP_MODE are refused by unsupportedTags (the
+            // filter stage went away with the B2 batches), so they must not be
+            // advertised here: an advertised key the validator rejects turns a
+            // legal client request into a hard capture failure.
             if (continuousEffects.size()) {
                 // Only effect 3 (SDR tone curve) is advertised, so only its
                 // enable switch and its strength stay on the request surface.
@@ -11081,6 +11089,10 @@ int QCamera3HardwareInterface::flush(bool restartChannels)
     mPerfLockMgr.acquirePerfLock(PERF_LOCK_FLUSH, DEFAULT_PERF_LOCK_TIMEOUT_MS);
     KPI_ATRACE_CAMSCOPE_CALL(CAMSCOPE_HAL3_STOP_PREVIEW);
     int32_t rc = NO_ERROR;
+    // mRemosaicLock is only taken when a QCFA still is in flight, but flush() used
+    // to unlock it unconditionally (undefined behaviour: unlocking a mutex that was
+    // never locked) and to leak it on the early-return paths. Track it instead.
+    bool remosaicLocked = false;
     Mutex::Autolock lock(mMultiFrameReqLock);
     LOGD("Unblocking Process Capture Request");
     pthread_mutex_lock(&mMutex);
@@ -11089,6 +11101,7 @@ int QCamera3HardwareInterface::flush(bool restartChannels)
         LOGD("Flush while remosaic is processing. lets wait on remosaic lock");
         pthread_mutex_unlock(&mMutex);
         pthread_mutex_lock(&mRemosaicLock);
+        remosaicLocked = true;
         mFlush = true;
     } else {
         LOGD("Unblocking Process Capture Request");
@@ -11113,6 +11126,7 @@ int QCamera3HardwareInterface::flush(bool restartChannels)
     rc = setBundleInfo();
     if (rc < 0) {
         LOGE("setBundleInfo failed %d", rc);
+        if (remosaicLocked) pthread_mutex_unlock(&mRemosaicLock);
         return rc;
     }
 
@@ -11139,6 +11153,7 @@ int QCamera3HardwareInterface::flush(bool restartChannels)
     if (rc < 0) {
         LOGE("notifyErrorForPendingRequests failed");
         pthread_mutex_unlock(&mMutex);
+        if (remosaicLocked) pthread_mutex_unlock(&mRemosaicLock);
         return rc;
     }
 
@@ -11148,7 +11163,7 @@ int QCamera3HardwareInterface::flush(bool restartChannels)
         mStreamOnPending = restartChannels;
     }
     pthread_mutex_unlock(&mMutex);
-    pthread_mutex_unlock(&mRemosaicLock);
+    if (remosaicLocked) pthread_mutex_unlock(&mRemosaicLock);
     mPerfLockMgr.releasePerfLock(PERF_LOCK_FLUSH);
     if(!m_bRecoveryDone)
     {
@@ -15811,12 +15826,16 @@ camera_metadata_t* QCamera3HardwareInterface::translateCapabilityToMetadata(int 
     int32_t defaultRequestID = 0;
     settings.update(ANDROID_REQUEST_ID, &defaultRequestID, 1);
     const int32_t nativeOff = OPPO_NATIVE_OFF;
-    const int32_t nativeDefault = 0;
     const int32_t defaultStrength = isVerifiedPairedSession() ? 50 : 0;
     settings.update(QCAMERA3_NATIVE_ALGORITHM_MODE, &nativeOff, 1);
     settings.update(QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH, &defaultStrength, 1);
-    settings.update(QCAMERA3_NATIVE_ALGORITHM_FILTER_TYPE, &nativeDefault, 1);
-    settings.update(QCAMERA3_NATIVE_ALGORITHM_FILTER_FLIP_MODE, &nativeDefault, 1);
+    // FILTER_TYPE / FILTER_FLIP_MODE are deliberately NOT seeded here and are NOT
+    // advertised in available_request_keys: the filter stage was deleted, so
+    // oppoBasicRequestSettings() refuses both keys unconditionally
+    // (unsupportedTags). Seeding them in the default template put them into every
+    // request the framework builds from this template, so every capture failed
+    // validation with BAD_VALUE. A client that sets them anyway still gets the
+    // documented refusal instead of a silent no-op.
 
     /* OIS disable */
     char ois_prop[PROPERTY_VALUE_MAX];
