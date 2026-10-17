@@ -45,17 +45,13 @@ enum qcamera3_ext_tags qcamera3_ext3_section_bounds[QCAMERA3_SECTIONS_END -
     VENDOR_SECTION] = {
         QCAMERA3_PRIVATEDATA_END,
         QCAMERA3_CDS_END,
-        QCAMERA3_OPAQUE_RAW_END,
         QCAMERA3_CROP_END,
-        QCAMERA3_TUNING_META_DATA_END,
         QCAMERA3_TEMPORAL_DENOISE_END,
         QCAMERA3_ISO_EXP_PRIORITY_END,
         QCAMERA3_SATURATION_END,
         QCAMERA3_EXPOSURE_METER_END,
         QCAMERA3_AV_TIMER_END,
-        QCAMERA3_SENSOR_META_DATA_END,
         QCAMERA3_DUALCAM_LINK_META_DATA_END,
-        QCAMERA3_DUALCAM_CALIB_META_DATA_END,
         QCAMERA3_HAL_PRIVATEDATA_END,
         QCAMERA3_JPEG_ENCODE_CROP_END,
         QCAMERA3_VIDEO_HDR_END,
@@ -70,7 +66,6 @@ enum qcamera3_ext_tags qcamera3_ext3_section_bounds[QCAMERA3_SECTIONS_END -
         QCAMERA3_SIMULTANEOUS_CAMERA_END,
         QCAMERA3_QUADRA_CFA_DATA_END,
         QCAMERA3_BOKEH_END,
-        QCAMERA3_FUSION_END,
         QCAMERA3_LOGICAL_CAM_END,
         QCAMERA3_MANUAL_WB_END,
         QCAMERA3_SAT_MODE_END,
@@ -92,17 +87,13 @@ const char *qcamera3_ext_section_names[QCAMERA3_SECTIONS_END -
         VENDOR_SECTION] = {
     "org.codeaurora.qcamera3.privatedata",
     "org.codeaurora.qcamera3.CDS",
-    "org.codeaurora.qcamera3.opaque_raw",
     "org.codeaurora.qcamera3.crop",
-    "org.codeaurora.qcamera3.tuning_meta_data",
     "org.codeaurora.qcamera3.temporal_denoise",
     "org.codeaurora.qcamera3.iso_exp_priority",
     "org.codeaurora.qcamera3.saturation",
     "org.codeaurora.qcamera3.exposure_metering",
     "org.codeaurora.qcamera3.av_timer",
-    "org.codeaurora.qcamera3.sensor_meta_data",
     "org.codeaurora.qcamera3.dualcam_link_meta_data",
-    "org.codeaurora.qcamera3.dualcam_calib_meta_data",
     "org.codeaurora.qcamera3.hal_private_data",
     "org.codeaurora.qcamera3.jpeg_encode_crop",
     "org.codeaurora.qcamera3.video_hdr_mode",
@@ -117,7 +108,6 @@ const char *qcamera3_ext_section_names[QCAMERA3_SECTIONS_END -
     "org.codeaurora.qcamera3.simultaneous_camera",
     "org.codeaurora.qcamera3.quadra_cfa",
     "org.codeaurora.qcamera3.bokeh",
-    "org.codeaurora.qcamera3.fusion",
     "org.codeaurora.qcamera3.logical",
     "org.codeaurora.qcamera3.manualWB",
     "org.codeaurora.qcamera3.sat",
@@ -139,21 +129,10 @@ vendor_tag_info_t qcamera3_cds[QCAMERA3_CDS_END - QCAMERA3_CDS_START] = {
     { "cds_info", TYPE_BYTE }
 };
 
-vendor_tag_info_t qcamera3_opaque_raw[QCAMERA3_OPAQUE_RAW_END -
-        QCAMERA3_OPAQUE_RAW_START] = {
-    { "opaque_raw_strides", TYPE_INT32 },
-    { "opaque_raw_format", TYPE_BYTE }
-};
-
 vendor_tag_info_t qcamera3_crop[QCAMERA3_CROP_END- QCAMERA3_CROP_START] = {
     { "count", TYPE_INT32 },
     { "data", TYPE_INT32},
     { "roimap", TYPE_INT32 }
-};
-
-vendor_tag_info_t qcamera3_tuning_meta_data[QCAMERA3_TUNING_META_DATA_END -
-        QCAMERA3_TUNING_META_DATA_START] = {
-    { "tuning_meta_data_blob", TYPE_INT32 }
 };
 
 vendor_tag_info_t qcamera3_temporal_denoise[QCAMERA3_TEMPORAL_DENOISE_END -
@@ -187,24 +166,12 @@ vendor_tag_info qcamera3_av_timer[QCAMERA3_AV_TIMER_END -
    {"use_av_timer", TYPE_BYTE }
 };
 
-vendor_tag_info qcamera3_sensor_meta_data[QCAMERA3_SENSOR_META_DATA_END -
-                                  QCAMERA3_SENSOR_META_DATA_START] = {
-   {"dynamic_black_level_pattern", TYPE_FLOAT },
-   {"is_mono_only",                TYPE_BYTE }
-};
-
 vendor_tag_info_t
         qcamera3_dualcam_link_meta_data[QCAMERA3_DUALCAM_LINK_META_DATA_END -
         QCAMERA3_DUALCAM_LINK_META_DATA_START] = {
     { "enable",            TYPE_BYTE },
     { "is_main",           TYPE_BYTE },
     { "related_camera_id", TYPE_INT32 }
-};
-
-vendor_tag_info_t
-        qcamera3_dualcam_calib_meta_data[QCAMERA3_DUALCAM_CALIB_META_DATA_END -
-        QCAMERA3_DUALCAM_CALIB_META_DATA_START] = {
-    { "dualcam_calib_meta_data_blob", TYPE_BYTE }
 };
 
 vendor_tag_info_t
@@ -304,11 +271,6 @@ vendor_tag_info_t qcamera3_bokeh[QCAMERA3_BOKEH_END -
     { "enable", TYPE_BYTE },
     { "blurLevel", TYPE_INT32 },
     { "status", TYPE_INT32 }
-};
-
-vendor_tag_info_t qcamera3_fusion[QCAMERA3_FUSION_END -
-        QCAMERA3_FUSION_START] = {
-    { "status", TYPE_BYTE }
 };
 
 vendor_tag_info_t qcamera3_logical_cam[QCAMERA3_LOGICAL_CAM_END -
@@ -465,17 +427,13 @@ vendor_tag_info_t *qcamera3_tag_info[QCAMERA3_SECTIONS_END -
         VENDOR_SECTION] = {
     qcamera3_privatedata,
     qcamera3_cds,
-    qcamera3_opaque_raw,
     qcamera3_crop,
-    qcamera3_tuning_meta_data,
     qcamera3_temporal_denoise,
     qcamera3_iso_exp_priority,
     qcamera3_saturation,
     qcamera3_exposure_metering,
     qcamera3_av_timer,
-    qcamera3_sensor_meta_data,
     qcamera3_dualcam_link_meta_data,
-    qcamera3_dualcam_calib_meta_data,
     qcamera3_hal_privatedata,
     qcamera3_jpep_encode_crop,
     qcamera3_video_hdr,
@@ -490,7 +448,6 @@ vendor_tag_info_t *qcamera3_tag_info[QCAMERA3_SECTIONS_END -
     qcamera3_simultaneous_camera,
     qcamera3_quadra_cfa,
     qcamera3_bokeh,
-    qcamera3_fusion,
     qcamera3_logical_cam,
     qcamera3_manual_wb,
     qcamera3_sat_cam,
@@ -511,17 +468,10 @@ uint32_t qcamera3_all_tags[] = {
     (uint32_t)QCAMERA3_CDS_MODE,
     (uint32_t)QCAMERA3_CDS_INFO,
 
-    // QCAMERA3_OPAQUE_RAW
-    (uint32_t)QCAMERA3_OPAQUE_RAW_STRIDES,
-    (uint32_t)QCAMERA3_OPAQUE_RAW_FORMAT,
-
     // QCAMERA3_CROP
     (uint32_t)QCAMERA3_CROP_COUNT_REPROCESS,
     (uint32_t)QCAMERA3_CROP_REPROCESS,
     (uint32_t)QCAMERA3_CROP_ROI_MAP_REPROCESS,
-
-    // QCAMERA3_TUNING_META_DATA
-    (uint32_t)QCAMERA3_TUNING_META_DATA_BLOB,
 
     // QCAMERA3_TEMPORAL_DENOISE
     (uint32_t)QCAMERA3_TEMPORAL_DENOISE_ENABLE,
@@ -544,17 +494,10 @@ uint32_t qcamera3_all_tags[] = {
     //QCAMERA3_AVTIMER
     (uint32_t)QCAMERA3_USE_AV_TIMER,
 
-    //QCAMERA3_SENSOR_META_DATA
-    (uint32_t)QCAMERA3_SENSOR_DYNAMIC_BLACK_LEVEL_PATTERN,
-    (uint32_t)QCAMERA3_SENSOR_IS_MONO_ONLY,
-
     // QCAMERA3_DUALCAM_LINK_META_DATA
     (uint32_t)QCAMERA3_DUALCAM_LINK_ENABLE,
     (uint32_t)QCAMERA3_DUALCAM_LINK_IS_MAIN,
     (uint32_t)QCAMERA3_DUALCAM_LINK_RELATED_CAMERA_ID,
-
-    // QCAMERA3_DUALCAM_CALIB_META_DATA
-    (uint32_t)QCAMERA3_DUALCAM_CALIB_META_DATA_BLOB,
 
     // QCAMERA3_HAL_PRIVATEDATA
     (uint32_t)QCAMERA3_HAL_PRIVATEDATA_REPROCESS_FLAGS,
@@ -623,9 +566,6 @@ uint32_t qcamera3_all_tags[] = {
     (uint32_t)QCAMERA3_BOKEH_ENABLE,
     (uint32_t)QCAMERA3_BOKEH_BLURLEVEL,
     (uint32_t)QCAMERA3_BOKEH_STATUS,
-
-    //QCAMERA3_FUSION
-    (uint32_t)QCAMERA3_FUSION_STATUS,
 
     //QCAMERA3_LOGICAL_CAM
     (uint32_t)QCAMERA3_LOGICAL_CAM_MODE,

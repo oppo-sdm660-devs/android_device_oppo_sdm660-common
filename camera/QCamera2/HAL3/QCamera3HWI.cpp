@@ -1231,9 +1231,6 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
     if (!hasScenes) {
         info.erase(ANDROID_CONTROL_SCENE_MODE_OVERRIDES);
     }
-    info.erase(QCAMERA3_OPAQUE_RAW_FORMAT);
-    info.erase(QCAMERA3_OPAQUE_RAW_STRIDES);
-    info.erase(QCAMERA3_DUALCAM_CALIB_META_DATA_BLOB);
     if (oppoSensorVideoHdrSupported(sensorCapability)) {
         const int32_t modes[] = {QCAMERA3_VIDEO_HDR_MODE_OFF, QCAMERA3_VIDEO_HDR_MODE_ON};
         info.update(QCAMERA3_AVAILABLE_VIDEO_HDR_MODES, modes, 2);
@@ -12111,7 +12108,6 @@ QCamera3HardwareInterface::translateFromHalMetadata(
           blackLevelAppliedPattern->cam_black_level[1],
           blackLevelAppliedPattern->cam_black_level[2],
           blackLevelAppliedPattern->cam_black_level[3]);
-        camMetadata.update(QCAMERA3_SENSOR_DYNAMIC_BLACK_LEVEL_PATTERN, fwk_blackLevelInd, 4);
 
 #ifndef USE_HAL_3_3
         // Update the ANDROID_SENSOR_DYNAMIC_BLACK_LEVEL
@@ -12544,71 +12540,6 @@ QCamera3HardwareInterface::translateFromHalMetadata(
 
 
 
-    IF_META_AVAILABLE(tuning_params_t, tuning_ptr, CAM_INTF_META_TUNING_PARAMS, metadata) {
-        uint8_t tuning_meta_data_blob[sizeof(tuning_params_t)];
-        uint8_t *data = (uint8_t *)&tuning_meta_data_blob[0];
-        tuning_ptr->tuning_data_version = TUNING_DATA_VERSION;
-
-
-        memcpy(data, ((uint8_t *)&tuning_ptr->tuning_data_version),
-                sizeof(uint32_t));
-        data += sizeof(uint32_t);
-
-        memcpy(data, ((uint8_t *)&tuning_ptr->tuning_sensor_data_size),
-                sizeof(uint32_t));
-        LOGD("tuning_sensor_data_size %d",(int)(*(int *)data));
-        data += sizeof(uint32_t);
-
-        memcpy(data, ((uint8_t *)&tuning_ptr->tuning_vfe_data_size),
-                sizeof(uint32_t));
-        LOGD("tuning_vfe_data_size %d",(int)(*(int *)data));
-        data += sizeof(uint32_t);
-
-        memcpy(data, ((uint8_t *)&tuning_ptr->tuning_cpp_data_size),
-                sizeof(uint32_t));
-        LOGD("tuning_cpp_data_size %d",(int)(*(int *)data));
-        data += sizeof(uint32_t);
-
-        memcpy(data, ((uint8_t *)&tuning_ptr->tuning_cac_data_size),
-                sizeof(uint32_t));
-        LOGD("tuning_cac_data_size %d",(int)(*(int *)data));
-        data += sizeof(uint32_t);
-
-        tuning_ptr->tuning_mod3_data_size = 0;
-        memcpy(data, ((uint8_t *)&tuning_ptr->tuning_mod3_data_size),
-                sizeof(uint32_t));
-        LOGD("tuning_mod3_data_size %d",(int)(*(int *)data));
-        data += sizeof(uint32_t);
-
-        size_t count = MIN(tuning_ptr->tuning_sensor_data_size,
-                TUNING_SENSOR_DATA_MAX);
-        memcpy(data, ((uint8_t *)&tuning_ptr->data),
-                count);
-        data += count;
-
-        count = MIN(tuning_ptr->tuning_vfe_data_size,
-                TUNING_VFE_DATA_MAX);
-        memcpy(data, ((uint8_t *)&tuning_ptr->data[TUNING_VFE_DATA_OFFSET]),
-                count);
-        data += count;
-
-        count = MIN(tuning_ptr->tuning_cpp_data_size,
-                TUNING_CPP_DATA_MAX);
-        memcpy(data, ((uint8_t *)&tuning_ptr->data[TUNING_CPP_DATA_OFFSET]),
-                count);
-        data += count;
-
-        count = MIN(tuning_ptr->tuning_cac_data_size,
-                TUNING_CAC_DATA_MAX);
-        memcpy(data, ((uint8_t *)&tuning_ptr->data[TUNING_CAC_DATA_OFFSET]),
-                count);
-        data += count;
-
-        camMetadata.update(QCAMERA3_TUNING_META_DATA_BLOB,
-                (int32_t *)(void *)tuning_meta_data_blob,
-                (size_t)(data-tuning_meta_data_blob) / sizeof(uint32_t));
-    }
-
     IF_META_AVAILABLE(cam_neutral_col_point_t, neuColPoint,
             CAM_INTF_META_NEUTRAL_COL_POINT, metadata) {
         camMetadata.update(ANDROID_SENSOR_NEUTRAL_COLOR_POINT,
@@ -12992,12 +12923,6 @@ QCamera3HardwareInterface::translateFromHalMetadata(
         LOGD("Bokeh status %d", *rtbStatus);
         mRTBStatus = *rtbStatus;
         camMetadata.update(QCAMERA3_BOKEH_STATUS, (int32_t*)rtbStatus, 1);
-    }
-
-    if(isDualCamera() && (getHalPPType() == CAM_HAL_PP_TYPE_DUAL_FOV) )
-    {
-        uint8_t status = mBundledSnapshot;
-        camMetadata.update(QCAMERA3_FUSION_STATUS, (uint8_t *)&status, 1);
     }
 
     camMetadata.update(ANDROID_CONTROL_ENABLE_ZSL, (uint8_t*)&enableZSL, 1);
@@ -15219,8 +15144,7 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
                       available_stall_durations.array(),
                       available_stall_durations.size());
 
-    //QCAMERA3_OPAQUE_RAW
-    uint8_t raw_format = QCAMERA3_OPAQUE_RAW_FORMAT_LEGACY;
+    // Opaque-raw layout, still needed for ANDROID_SENSOR_OPAQUE_RAW_SIZE below.
     cam_format_t fmt = CAM_FORMAT_BAYER_QCOM_RAW_10BPP_GBRG;
     switch (gCamCapability[cameraId]->opaque_raw_fmt) {
     case LEGACY_RAW:
@@ -15230,7 +15154,6 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
             fmt = CAM_FORMAT_BAYER_QCOM_RAW_10BPP_GBRG;
         else if (gCamCapability[cameraId]->white_level == MAX_VALUE_12BIT)
             fmt = CAM_FORMAT_BAYER_QCOM_RAW_12BPP_GBRG;
-        raw_format = QCAMERA3_OPAQUE_RAW_FORMAT_LEGACY;
         break;
     case MIPI_RAW:
         if (gCamCapability[cameraId]->white_level == MAX_VALUE_8BIT)
@@ -15239,27 +15162,12 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
             fmt = CAM_FORMAT_BAYER_MIPI_RAW_10BPP_GBRG;
         else if (gCamCapability[cameraId]->white_level == MAX_VALUE_12BIT)
             fmt = CAM_FORMAT_BAYER_MIPI_RAW_12BPP_GBRG;
-        raw_format = QCAMERA3_OPAQUE_RAW_FORMAT_MIPI;
         break;
     default:
         LOGE("unknown opaque_raw_format %d",
                 gCamCapability[cameraId]->opaque_raw_fmt);
         break;
     }
-    staticInfo.update(QCAMERA3_OPAQUE_RAW_FORMAT, &raw_format, 1);
-
-    Vector<int32_t> strides;
-    for (size_t i = 0; i < MIN(MAX_SIZES_CNT,
-            gCamCapability[cameraId]->supported_raw_dim_cnt); i++) {
-        cam_stream_buf_plane_info_t buf_planes;
-        strides.add(gCamCapability[cameraId]->raw_dim[i].width);
-        strides.add(gCamCapability[cameraId]->raw_dim[i].height);
-        mm_stream_calc_offset_raw(fmt, &gCamCapability[cameraId]->raw_dim[i],
-            &gCamCapability[cameraId]->padding_info, &buf_planes);
-        strides.add(buf_planes.plane_info.mp[0].stride);
-    }
-    staticInfo.update(QCAMERA3_OPAQUE_RAW_STRIDES, strides.array(),
-            strides.size());
 
     //Video HDR default
     if ((gCamCapability[cameraId]->qcom_supported_feature_mask) &
@@ -15273,15 +15181,6 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
         staticInfo.update(QCAMERA3_AVAILABLE_VIDEO_HDR_MODES,
                     vhdr_mode, vhdr_mode_count);
     }
-
-    staticInfo.update(QCAMERA3_DUALCAM_CALIB_META_DATA_BLOB,
-            (const uint8_t*)&gCamCapability[cameraId]->related_cam_calibration,
-            sizeof(gCamCapability[cameraId]->related_cam_calibration));
-
-    uint8_t isMonoOnly =
-            (gCamCapability[cameraId]->color_arrangement == CAM_FILTER_ARRANGEMENT_Y);
-    staticInfo.update(QCAMERA3_SENSOR_IS_MONO_ONLY,
-            &isMonoOnly, 1);
 
 #ifndef USE_HAL_3_3
     Vector<int32_t> opaque_size;

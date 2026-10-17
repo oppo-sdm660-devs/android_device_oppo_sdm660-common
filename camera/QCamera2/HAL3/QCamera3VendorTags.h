@@ -38,17 +38,13 @@ namespace qcamera {
 enum qcamera3_ext_section {
     QCAMERA3_PRIVATEDATA = VENDOR_SECTION,
     QCAMERA3_CDS,
-    QCAMERA3_OPAQUE_RAW,
     QCAMERA3_CROP,
-    QCAMERA3_TUNING_META_DATA,
     QCAMERA3_TEMPORAL_DENOISE,
     QCAMERA3_ISO_EXP_PRIORITY,
     QCAMERA3_SATURATION,
     QCAMERA3_EXPOSURE_METERING_MODE,
     QCAMERA3_AV_TIMER,
-    QCAMERA3_SENSOR_META_DATA,
     QCAMERA3_DUALCAM_LINK_META_DATA,
-    QCAMERA3_DUALCAM_CALIB_META_DATA,
     QCAMERA3_HAL_PRIVATEDATA,
     QCAMERA3_JPEG_ENCODE_CROP,
     QCAMERA3_VIDEO_HDR,
@@ -63,7 +59,6 @@ enum qcamera3_ext_section {
     QCAMERA3_SIMULTANEOUS_CAMERA,
     QCAMERA3_QUADRA_CFA_DATA,
     QCAMERA3_BOKEH,
-    QCAMERA3_FUSION,
     QCAMERA3_LOGICAL_CAM,
     QCAMERA3_MANUAL_WB,
     QCAMERA3_SAT_MODE,
@@ -82,17 +77,13 @@ enum qcamera3_ext_section {
 enum qcamera3_ext_section_ranges {
     QCAMERA3_PRIVATEDATA_START = QCAMERA3_PRIVATEDATA << 16,
     QCAMERA3_CDS_START = QCAMERA3_CDS << 16,
-    QCAMERA3_OPAQUE_RAW_START = QCAMERA3_OPAQUE_RAW << 16,
     QCAMERA3_CROP_START = QCAMERA3_CROP << 16,
-    QCAMERA3_TUNING_META_DATA_START = QCAMERA3_TUNING_META_DATA << 16,
     QCAMERA3_TEMPORAL_DENOISE_START = QCAMERA3_TEMPORAL_DENOISE << 16,
     QCAMERA3_ISO_EXP_PRIORITY_START = QCAMERA3_ISO_EXP_PRIORITY << 16,
     QCAMERA3_SATURATION_START = QCAMERA3_SATURATION << 16,
     QCAMERA3_EXPOSURE_METER_START = QCAMERA3_EXPOSURE_METERING_MODE << 16,
     QCAMERA3_AV_TIMER_START = QCAMERA3_AV_TIMER << 16,
-    QCAMERA3_SENSOR_META_DATA_START = QCAMERA3_SENSOR_META_DATA << 16,
     QCAMERA3_DUALCAM_LINK_META_DATA_START = QCAMERA3_DUALCAM_LINK_META_DATA << 16,
-    QCAMERA3_DUALCAM_CALIB_META_DATA_START = QCAMERA3_DUALCAM_CALIB_META_DATA << 16,
     QCAMERA3_HAL_PRIVATEDATA_START = QCAMERA3_HAL_PRIVATEDATA << 16,
     QCAMERA3_JPEG_ENCODE_CROP_START = QCAMERA3_JPEG_ENCODE_CROP << 16,
     QCAMERA3_VIDEO_HDR_START = QCAMERA3_VIDEO_HDR << 16,
@@ -107,7 +98,6 @@ enum qcamera3_ext_section_ranges {
     QCAMERA3_SIMULTANEOUS_CAMERA_START = QCAMERA3_SIMULTANEOUS_CAMERA << 16,
     QCAMERA3_QUADRA_CFA_DATA_START = QCAMERA3_QUADRA_CFA_DATA << 16,
     QCAMERA3_BOKEH_START = QCAMERA3_BOKEH << 16,
-    QCAMERA3_FUSION_START = QCAMERA3_FUSION << 16,
     QCAMERA3_LOGICAL_CAM_START = QCAMERA3_LOGICAL_CAM << 16,
     QCAMERA3_MANUAL_WB_START = QCAMERA3_MANUAL_WB << 16,
     QCAMERA3_SAT_MODE_START = QCAMERA3_SAT_MODE << 16,
@@ -127,65 +117,10 @@ enum qcamera3_ext_tags {
     QCAMERA3_CDS_INFO,
     QCAMERA3_CDS_END,
 
-    //Property Name:  org.codeaurora.qcamera3.opaque_raw.opaque_raw_strides
-    //
-    //Type: int32 * n * 3 [public]
-    //
-    //Description: Distance in bytes from the beginning of one row of opaque
-    //raw image data to the beginning of next row.
-    //
-    //Details: The strides are listed as (raw_width, raw_height, stride)
-    //triplets. For each supported raw size, there will be a stride associated
-    //with it.
-    QCAMERA3_OPAQUE_RAW_STRIDES = QCAMERA3_OPAQUE_RAW_START,
-
-    //Property Name: org.codeaurora.qcamera3.opaque_raw.opaque_raw_format
-    //
-    //Type: byte(enum) [public]
-    //  * LEGACY - The legacy raw format where 8, 10, or 12-bit
-    //    raw data is packed into a 64-bit word.
-    //  * MIPI - raw format matching the data packing described
-    //    in MIPI CSI-2 specification. In memory, the data
-    //    is constructed by packing sequentially received pixels
-    //    into least significant parts of the words first.
-    //    Within each pixel, the least significant bits are also
-    //    placed towards the least significant part of the word.
-    //
-    //Details: Lay out of opaque raw data in memory is decided by two factors:
-    //         opaque_raw_format and bit depth (implied by whiteLevel). Below
-    //         list illustrates their relationship:
-    //  LEGACY8:  P7(7:0) P6(7:0) P5(7:0) P4(7:0) P3(7:0) P2(7:0) P1(7:0) P0(7:0)
-    //            8 pixels occupy 8 bytes, no padding needed
-    //            min_stride = CEILING8(raw_width)
-    // LEGACY10:  0000 P5(9:0) P4(9:0) P3(9:0) P2(9:0) P1(9:0) P0(9:0)
-    //            6 pixels occupy 8 bytes, 4 bits padding at MSB
-    //            min_stride = (raw_width+5)/6 * 8
-    // LEGACY12:  0000 P4(11:0) P3(11:0) P2(11:0) P1(11:0) P0(11:0)
-    //            5 pixels occupy 8 bytes, 4 bits padding at MSB
-    //            min_stride = (raw_width+4)/5 * 8
-    //    MIPI8:  P0(7:0)
-    //            1 pixel occupy 1 byte
-    //            min_stride = raw_width
-    //   MIPI10:  P3(1:0) P2(1:0) P1(1:0) P0(1:0) P3(9:2) P2(9:2) P1(9:2) P0(9:2)
-    //            4 pixels occupy 5 bytes
-    //            min_stride = (raw_width+3)/4 * 5
-    //   MIPI12:  P1(3:0) P0(3:0) P1(11:4) P0(11:4)
-    //            2 pixels occupy 3 bytes
-    //            min_stride = (raw_width+1)/2 * 3
-    //Note that opaque_raw_stride needs to be at least the required minimum
-    //stride from the table above. ISP hardware may need more generous stride
-    //setting. For example, for LEGACY8, the actual stride may be
-    //CEILING16(raw_width) due to bus burst length requirement.
-    QCAMERA3_OPAQUE_RAW_FORMAT,
-    QCAMERA3_OPAQUE_RAW_END,
-
     QCAMERA3_CROP_COUNT_REPROCESS = QCAMERA3_CROP_START,
     QCAMERA3_CROP_REPROCESS,
     QCAMERA3_CROP_ROI_MAP_REPROCESS,
     QCAMERA3_CROP_END,
-
-    QCAMERA3_TUNING_META_DATA_BLOB = QCAMERA3_TUNING_META_DATA_START,
-    QCAMERA3_TUNING_META_DATA_END,
 
     QCAMERA3_TEMPORAL_DENOISE_ENABLE = QCAMERA3_TEMPORAL_DENOISE_START,
     QCAMERA3_TEMPORAL_DENOISE_PROCESS_TYPE,
@@ -245,17 +180,10 @@ enum qcamera3_ext_tags {
     QCAMERA3_USE_AV_TIMER = QCAMERA3_AV_TIMER_START,
     QCAMERA3_AV_TIMER_END,
 
-    QCAMERA3_SENSOR_DYNAMIC_BLACK_LEVEL_PATTERN = QCAMERA3_SENSOR_META_DATA_START,
-    QCAMERA3_SENSOR_IS_MONO_ONLY,
-    QCAMERA3_SENSOR_META_DATA_END,
-
     QCAMERA3_DUALCAM_LINK_ENABLE = QCAMERA3_DUALCAM_LINK_META_DATA_START,
     QCAMERA3_DUALCAM_LINK_IS_MAIN,
     QCAMERA3_DUALCAM_LINK_RELATED_CAMERA_ID,
     QCAMERA3_DUALCAM_LINK_META_DATA_END,
-
-    QCAMERA3_DUALCAM_CALIB_META_DATA_BLOB = QCAMERA3_DUALCAM_CALIB_META_DATA_START,
-    QCAMERA3_DUALCAM_CALIB_META_DATA_END,
 
     QCAMERA3_HAL_PRIVATEDATA_REPROCESS_FLAGS = QCAMERA3_HAL_PRIVATEDATA_START,
     QCAMERA3_HAL_PRIVATEDATA_REPROCESS_DATA_BLOB,
@@ -386,9 +314,6 @@ enum qcamera3_ext_tags {
     QCAMERA3_BOKEH_BLURLEVEL,
     QCAMERA3_BOKEH_STATUS,
     QCAMERA3_BOKEH_END,
-
-    QCAMERA3_FUSION_STATUS = QCAMERA3_FUSION_START,
-    QCAMERA3_FUSION_END,
 
     QCAMERA3_LOGICAL_CAM_MODE = QCAMERA3_LOGICAL_CAM_START,
     QCAMERA3_LOGICAL_CAM_END,
@@ -525,13 +450,6 @@ enum qcamera3_ext_tags {
     QCAMERA3_AR_GRAVITY_AIDED,                         // byte result 0/1
     QCAMERA3_AR_END
 };
-
-// QCAMERA3_OPAQUE_RAW_FORMAT
-typedef enum qcamera3_ext_opaque_raw_format {
-    QCAMERA3_OPAQUE_RAW_FORMAT_LEGACY,
-    QCAMERA3_OPAQUE_RAW_FORMAT_MIPI
-} qcamera3_ext_opaque_raw_format_t;
-
 
 // QCAMERA3_VIDEO_HDR_MODE
 typedef enum camera_metadata_enum_android_video_hdr_mode {
