@@ -460,6 +460,7 @@ public:
     int32_t getNativeStillMode() { return mNativeStillMode; }
     int32_t getNativeDualBindStatus() { return mNativeDualBindStatus; }
     int32_t getNativeBeautyStrength() { return mNativeBeautyStrength; }
+    int32_t getNativeSceneStrength() { return mNativeSceneStrength; }
     // Round-2 request snapshot, taken under the same request mutex as the
     // fields above. The still processor rebuilds each stage's Options from it.
     const native_stage_request_t &getNativeStageRequest() { return mNativeStages; }
@@ -686,8 +687,6 @@ private:
     bool m_bEisSupportedSize;
     bool m_bEisEnable;
     bool mMmsVideoConfigured = false;
-    bool mContinuousModeChosen = false;
-    bool mContinuousEnabled = false;
     bool mSensorVideoHdrChosen = false;
     int32_t mSensorVideoHdrMode = 0;
     uint8_t mMmsRequestedMode = ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF;
@@ -980,6 +979,7 @@ private:
     QCamera3DualGeometry::Profile mPairedProfile;
     bool mPairedProfileValid = false;
     int32_t mNativeBeautyStrength = 0;
+    int32_t mNativeSceneStrength = 0;
     native_stage_request_t mNativeStages = {};
     bool mRestoreFrameworkSettings = false;
     uint32_t mSubmittingBurstFrameNumber = UINT32_MAX;

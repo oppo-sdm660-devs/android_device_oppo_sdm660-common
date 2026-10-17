@@ -29,20 +29,8 @@ enum QCamera3NativeAlgorithm {
     OPPO_NATIVE_REMOSAIC = 20,
 };
 
-// Continuous (preview/video) effect identifiers carried by
-// org.lineageos.camera.algorithms.continuousAvailableEffects. 1..4 are the
-// round-1 effects; 5..9 are owned by the HAL3 stages in this round.
-enum QCamera3NativeContinuousEffect {
-    OPPO_CONTINUOUS_OFF = 0,
-    OPPO_CONTINUOUS_REAR_BEAUTY = 1,
-    OPPO_CONTINUOUS_FILTER = 2,
-    OPPO_CONTINUOUS_TONE = 3,
-    OPPO_CONTINUOUS_SCENE = 4,
-    OPPO_CONTINUOUS_FRONT_BEAUTY = 5,
-    OPPO_CONTINUOUS_VIDEO_FILTER = 6,
-    OPPO_CONTINUOUS_THIRD_PARTY_BEAUTY = 7,
-    OPPO_CONTINUOUS_SINGLE_BOKEH_PREVIEW = 8,
-    OPPO_CONTINUOUS_AR_TRACK = 9,
-};
+// The continuous (preview/video) effect identifiers were deleted with the B6
+// batch (2026-10-17): the enum, the vendor tags they named and the effect chain
+// that executed them are gone. The still-mode enum above keeps its numbering.
 }
 #endif

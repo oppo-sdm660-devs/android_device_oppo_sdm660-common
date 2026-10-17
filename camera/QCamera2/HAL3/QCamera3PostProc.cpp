@@ -47,6 +47,7 @@
 #include "QCamera3StillAlgo.h"
 #include "QCamera3StockBeauty.h"
 #include "QCamera3StockSuperPhoto.h"
+#include "QCamera3StockScene.h"
 #include "QCamera3EisSnapshot.h"
 #include "QCamera3FlashSequence.h"
 #include "QCamera3SceneBrightness.h"
@@ -3324,6 +3325,50 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
         nativeAlgorithmTrace(jpeg_settings, "ARCRLP", beautyStatus,
                 jpeg_settings->frame_number, 1,
                 static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
+    }
+    // Mode 9: semantic scene classification and its tuning. Restored 2026-10-17
+    // (batch B7): the stage was deleted with the B2-b/B2-c batch, but Aperture's
+    // AUTO stills really do reach it - the CameraX provider writes sceneStrength=35
+    // on every automatic still while mode 9 is advertised.
+    if (jpeg_settings && (jpeg_settings->native_still_mode == OPPO_NATIVE_SCENE ||
+            jpeg_settings->native_scene_strength > 0)) {
+        // encodeData receives the final reprocessed frame, including HDR,
+        // LLHDR/MFNR/SuperPhoto fusion. Tune that actual NV21 once, never its
+        // individual bracket inputs. Settings were snapshotted at submission.
+        QCamera3HdrAlgo::Image image;
+        QCamera3StreamMem *memory = nullptr;
+        QCamera3StockScene scene;
+        QCamera3StockScene::Result detected;
+        struct timespec now = {};
+        int32_t sceneStatus = -ENOTSUP;
+        if (!clock_gettime(CLOCK_BOOTTIME, &now) && getHdrImage(recvd_frame, image, memory)) {
+            sceneStatus = scene.process(image, jpeg_settings->native_scene_strength,
+                jpeg_settings->framework_frame_number_valid ? jpeg_settings->framework_frame_number :
+                    jpeg_settings->frame_number,
+                int64_t(now.tv_sec) * 1000000000LL + now.tv_nsec, detected);
+            if (sceneStatus == NO_ERROR && detected.applied) {
+                sceneStatus = memory->cleanCache(main_frame->buf_idx);
+                if (sceneStatus != NO_ERROR) return sceneStatus;
+            }
+        }
+        if (jpeg_settings->native_still_mode == OPPO_NATIVE_SCENE)
+            nativeAlgorithmTrace(jpeg_settings, "ArcSoftScene", sceneStatus,
+                jpeg_settings->frame_number, 1,
+                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
+        // Keep the fusion trace and append independently observed scene state.
+        // A failed scene core preserves that preceding stage's complete frame.
+        size_t used = jpeg_settings->image_desc_valid ?
+            strnlen(jpeg_settings->image_desc, sizeof(jpeg_settings->image_desc)) : 0;
+        if (used < sizeof(jpeg_settings->image_desc))
+            snprintf(jpeg_settings->image_desc + used, sizeof(jpeg_settings->image_desc) - used,
+                "%ssc=%d:%d:%d:%d",
+                used ? " " : "OPPO_HAL3 ", sceneStatus, detected.type,
+                detected.confidence, sceneStatus ? 0 : detected.applied);
+        jpeg_settings->image_desc_valid = 1;
+        LOGI("HAL3 scene frame=%u status=%d type=%d score=%d strength=%d",
+            jpeg_settings->framework_frame_number_valid ? jpeg_settings->framework_frame_number :
+                jpeg_settings->frame_number,
+            sceneStatus, detected.type, detected.confidence, sceneStatus ? 0 : detected.applied);
     }
     // Graphical watermark / sticker / mirror on the real JPEG edit surface: the
     // unrotated NV21 frame this path is about to encode. The rectangles are

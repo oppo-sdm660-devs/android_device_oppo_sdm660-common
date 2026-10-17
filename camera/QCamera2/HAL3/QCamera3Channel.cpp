@@ -6707,6 +6707,7 @@ int32_t QCamera3PicChannel::queueJpegSetting(uint32_t index, uint32_t frame_numb
     // HAL-owned controls never enter the stock daemon metadata ABI.
     settings->native_still_mode = hal_obj->getNativeStillMode();
     settings->native_beauty_strength = hal_obj->getNativeBeautyStrength();
+    settings->native_scene_strength = hal_obj->getNativeSceneStrength();
     // Round-2 stage controls, captured under the same request mutex as the
     // fields above. The still processor rebuilds its stage Options from this.
     settings->native_stages = hal_obj->getNativeStageRequest();

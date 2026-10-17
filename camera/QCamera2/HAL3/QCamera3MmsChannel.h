@@ -8,7 +8,6 @@
 #include "QCamera3MmsGyroSource.h"
 #include "QCamera3EisSnapshot.h"
 #include "QCamera3GyroVstab.h"
-#include "QCamera3VideoEffects.h"
 
 namespace qcamera {
 // A video-only channel with separately negotiated acquisition and framework
@@ -24,8 +23,11 @@ public:
     ~QCamera3MmsChannel() override;
     int32_t prepare();
     bool usesMmsVstab() const override { return true; }
-    bool usesVideoEffects() const override { return true; }
-    void setVideoEffects(const QCamera3VideoEffects::Options &options) override;
+    // Real calibration of the streaming output for the gyro stabiliser, in
+    // destination pixels: f_px = width / (2 * tan(horizontal_fov / 2)), decoded
+    // from the capability. 0 means "not decoded": the stabiliser then refuses the
+    // frames instead of guessing. It used to travel inside the effect options.
+    void setStabilizationCalibration(float focalLengthPx);
     // Real EIS/MMS state of this seam.
     bool getEisState(native_eis_state_t &state) override;
     // Real EIS still selection over the frames this engine really warped. The
@@ -59,7 +61,7 @@ private:
         bool active, imageReady, metadataReady, enqueued, enabled, failed;
         QCamera3MmsVstab::Image image;
         QCamera3MmsVstab::Frame frame;
-        QCamera3VideoEffects::Options effects;
+        float focalLengthPx = 0.0f;
     } mPending[kBuffers] = {};
     bool mInputBusy[kBuffers] = {};
     QCamera3MmsProfile mProfile;
@@ -86,7 +88,7 @@ private:
     pthread_t mWorker = {};
     bool mWorkerStarted = false, mStopping = true, mEnabled = false;
     float mZoom = 1.0f;
-    QCamera3VideoEffects::Options mEffects;
+    float mFocalLengthPx = 0.0f;
     std::atomic<bool> mEffectCancelled{true};
     uint64_t mOrder = 0;
     static void *workerEntry(void *user);

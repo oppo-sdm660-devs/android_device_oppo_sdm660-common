@@ -45,7 +45,6 @@
 #include "QCamera3Mem.h"
 #include "QCamera3PostProc.h"
 #include "QCamera3DualCapture.h"
-#include "QCamera3VideoEffects.h"
 #include "QCamera3Stream.h"
 #include "QCamera3StreamMem.h"
 
@@ -143,9 +142,8 @@ public:
     virtual void putStreamBufs() = 0;
     virtual int32_t flush();
     virtual bool usesMmsVstab() const { return false; }
-    virtual bool usesVideoEffects() const { return false; }
-    virtual void setVideoEffectsEnabled(bool) {}
-    virtual void setVideoEffects(const QCamera3VideoEffects::Options &) {}
+    // The continuous-effect hooks (usesVideoEffects / setVideoEffectsEnabled /
+    // setVideoEffects) were removed with the B6 batch.
     // Real EIS/MMS state of this channel's stabilisation seam, consumed by
     // QCamera3EisSnapshot. False when the channel owns no stabilisation engine.
     virtual bool getEisState(native_eis_state_t & /*state*/) { return false; }

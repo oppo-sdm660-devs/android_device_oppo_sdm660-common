@@ -67,6 +67,7 @@
 #include "QCamera3NativeAlgorithms.h"
 #include "QCamera3StockBeauty.h"
 #include "QCamera3StockSuperPhoto.h"
+#include "QCamera3StockScene.h"
 #include "QCamera3ExifExtras.h"
 #include "QCamera3EisSnapshot.h"
 #include "QCamera3FlashSequence.h"
@@ -79,7 +80,6 @@
 #include "QCamera3PostprocessAssets.h"
 #include "QCamera3AutoCapturePolicy.h"
 #include "QCamera3MmsChannel.h"
-#include "QCamera3VideoEffectsChannel.h"
 #include "QCamera3VendorTags.h"
 #include "QCameraTrace.h"
 
@@ -421,35 +421,12 @@ static int32_t oppoRequestedVideoHdr(const CameraMetadata &settings)
     return mode.count == 1 ? mode.data.i32[0] : 0;
 }
 
-static QCamera3VideoEffects::Options oppoContinuousOptions(const CameraMetadata &settings,
-        const cam_capability_t *capability = NULL, uint32_t outputWidth = 0)
-{
-    QCamera3VideoEffects::Options options;
-    const uint32_t tags[] = {static_cast<uint32_t>(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_BEAUTY_STRENGTH),
-            static_cast<uint32_t>(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_TONE_STRENGTH)};
-    int32_t *values[] = {&options.beauty, &options.tone};
-    for (size_t i = 0; i < 2; ++i) {
-        const auto entry = settings.find(tags[i]);
-        if (entry.count == 1) *values[i] = entry.data.i32[0];
-    }
-    // The continuous stages of effects 2/4/5/6/7/8/9 (single-image filter,
-    // semantic scene, front beauty, video filter, third-party beauty, preview
-    // bokeh, AR pose) were deleted with the 2026-10-17 B2-b/B2-c batch, so
-    // their request keys are refused by unsupportedTags and no option field
-    // remains for them: only the legacy single-pass effects 1 and 3 are built
-    // here.
-    // Real calibration of the streaming output for the gyro stabiliser, from
-    // the decoded horizontal field of view. 0 (refused by the stage) when the
-    // capability carries no usable angle.
-    if (capability != NULL) options.focalLengthPx = oppoFocalLengthPx(capability, outputWidth);
-    return options;
-}
+// The continuous-effect chain (QCamera3VideoEffects / QCamera3VideoEffectsChannel,
+// effects 1..9) was deleted on 2026-10-17 with the B6 batch: effect 3 was the last
+// advertised one and no in-tree client ever enabled it. The gyro stabiliser's
+// focal-length calibration, which used to travel in the effect options, is now
+// passed to the MMS channel directly (setStabilizationCalibration).
 
-static bool oppoContinuousEnabled(const CameraMetadata &settings, bool fallback)
-{
-    const auto entry = settings.find(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_ENABLED);
-    return entry.count == 1 ? entry.data.i32[0] != 0 : fallback;
-}
 
 // ---------------------------------------------------------------------------
 // Round-2 request controls (docs/HAL3_PORT_PLATFORM.md section 3.1).
@@ -764,9 +741,6 @@ static bool oppoBasicRequestSettings(const camera_metadata_t *settings,
         QCAMERA3_NATIVE_ALGORITHM_RELIGHT_ELEVATION,
         QCAMERA3_NATIVE_ALGORITHM_FILTER_TYPE,
         QCAMERA3_NATIVE_ALGORITHM_FILTER_FLIP_MODE,
-        QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH,
-        QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_FILTER_TYPE,
-        QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_SCENE_STRENGTH,
         QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH,
         QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_TEMPORAL_SMOOTHING,
         QCAMERA3_AR_TRACKING_ENABLE,
@@ -826,36 +800,27 @@ static bool oppoBasicRequestSettings(const camera_metadata_t *settings,
     if (find_camera_metadata_ro_entry(settings, ANDROID_CONTROL_AE_MODE, &entry) == 0) {
         aeMode = entry.data.u8[0];
     }
-    if (find_camera_metadata_ro_entry(settings,
-            QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_ENABLED, &entry) == 0 &&
-            (entry.count != 1 || entry.data.i32[0] < 0 || entry.data.i32[0] > 1)) return false;
-    // Only the legacy continuous effects 1 (rear beauty) and 3 (SDR tone) are
-    // left; effects 2/4/5/6/7/8/9 and their controls were deleted with the
-    // 2026-10-17 B2-b/B2-c batch, so the filter and scene tags are refused by
-    // unsupportedTags above.
-    //
-    // The effect ids are explicitly paired with their tags - they are NOT i+1.
-    // The tone tag is effect 3, and 3 is the only advertised effect, so a
-    // positional mapping made the one advertised effect impossible to set
-    // (tone -> 2 -> "not advertised" -> request refused).
-    const uint32_t continuousTags[] = {static_cast<uint32_t>(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_BEAUTY_STRENGTH),
-            static_cast<uint32_t>(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_TONE_STRENGTH)};
-    const int32_t continuousEffects[] = {1, 3}; // rear beauty, SDR tone
-    for (size_t i = 0; i < 2; ++i) {
-        if (find_camera_metadata_ro_entry(settings, continuousTags[i], &entry) != 0) continue;
-        if (entry.count != 1 || entry.data.i32[0] < 0 || entry.data.i32[0] > 100) return false;
-        // The control must resolve to the continuous effect that really
-        // executes it; effect 1 and effect 3 are the ids of these two tags.
-        const int32_t effect = continuousEffects[i];
-        if (entry.data.i32[0] != 0 && !oppoAdvertisesInt32(characteristics,
-                QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_AVAILABLE_EFFECTS, effect)) return false;
-    }
+    // The continuous-effect controls (continuousEnabled, continuousToneStrength,
+    // continuousBeautyStrength, continuousFilterType, continuousSceneStrength and
+    // the continuousAvailableEffects/continuousMaxPixels advertisement) were
+    // deleted with the B6 batch; their tags no longer exist, so a request that
+    // still carries them is refused by the unknown-tag path in the backend.
     int32_t nativeMode = OPPO_NATIVE_OFF;
     if (find_camera_metadata_ro_entry(settings, QCAMERA3_NATIVE_ALGORITHM_MODE, &entry) == 0) {
         if (entry.count != 1 || !oppoAdvertisesInt32(characteristics,
                 QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_MODES, entry.data.i32[0])) return false;
         nativeMode = entry.data.i32[0];
     }
+    // Mode 9 scene tuning (restored 2026-10-17, batch B7). Zero means "off" and is
+    // always accepted; a non-zero strength needs the advertised mode and an
+    // ordinary still request (the consumer is the JPEG path, checked below in
+    // validateCaptureRequest, which has the buffer list this predicate lacks).
+    if (find_camera_metadata_ro_entry(settings,
+            QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH, &entry) == 0 &&
+            (entry.count != 1 || entry.data.i32[0] < 0 || entry.data.i32[0] > 100 ||
+             (entry.data.i32[0] > 0 && (reprocess ||
+              !oppoAdvertisesInt32(characteristics, QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_MODES,
+                  OPPO_NATIVE_SCENE))))) return false;
     if (find_camera_metadata_ro_entry(settings,
             QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH, &entry) == 0 &&
             (entry.count != 1 || entry.data.i32[0] < 0 || entry.data.i32[0] > 100)) return false;
@@ -1175,6 +1140,11 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
         }
         if (sensorCapability->position == CAM_POSITION_BACK && QCamera3StockBeauty::isAvailable())
             nativeModes.add(OPPO_NATIVE_REAR_BEAUTY);
+        // Mode 9 semantic scene: restored 2026-10-17 (batch B7). The CameraX
+        // provider writes sceneStrength=35 on every automatic still while this
+        // mode is advertised (OppoSessionProcessor), so the mode is part of the
+        // Aperture-reachable surface and the core is shipped on this unit.
+        if (QCamera3StockScene::isAvailable()) nativeModes.add(OPPO_NATIVE_SCENE);
     }
     if (sensorCapability != NULL && sensorCapability->aux_cam_cap != NULL) {
         // Mode 7 DUAL_BOKEH stays advertised on the auxiliary/paired device: the
@@ -1194,19 +1164,11 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
     // continuous effects 2/6 (continuous filter) were deleted with the
     // 2026-10-17 B2-b/B2-c batch, so a filter id has no producer at all and its
     // controls are refused by unsupportedTags.
-    Vector<int32_t> continuousEffects;
-    if (sensorCapability != NULL && sensorCapability->aux_cam_cap == NULL) {
-        // Effect 3 (SDR tone curve) is the only continuous effect Aperture's
-        // provider can reach. Effect 1 (rear beauty) keeps its legacy
-        // single-pass path but is not advertised; effects 2/4/5/6/7/8/9 and
-        // their stages were deleted with the 2026-10-17 B2-b/B2-c batch.
-        continuousEffects.add(3); // SDR compression; never sensor HDR/HLG/HDR10.
-    }
-    const int32_t continuousMaxPixels = continuousEffects.size() ?
-            int32_t(QCamera3VideoEffects::kMaxPixels) : 0;
-    info.update(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_AVAILABLE_EFFECTS,
-            continuousEffects.array(), continuousEffects.size());
-    info.update(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_MAX_PIXELS, &continuousMaxPixels, 1);
+    // The continuous-effect chain was deleted with the B6 batch (2026-10-17):
+    // effect 3 (SDR tone) was the last advertised one, its only possible writer
+    // was the in-tree CameraX provider, and that provider never wrote
+    // continuousEnabled/continuousToneStrength, so nothing could ever enable it.
+    // `continuousAvailableEffects` and `continuousMaxPixels` are gone with it.
     // Aperture-only advertisement (2026-10-16 WS1 trim, extended by the
     // 2026-10-17 B2-a batch): the static keys of the unadvertised modes 4..20
     // are not published, so `availableDocModes`, `maxLongExposureNs`,
@@ -1313,12 +1275,8 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
             // filter stage went away with the B2 batches), so they must not be
             // advertised here: an advertised key the validator rejects turns a
             // legal client request into a hard capture failure.
-            if (continuousEffects.size()) {
-                // Only effect 3 (SDR tone curve) is advertised, so only its
-                // enable switch and its strength stay on the request surface.
-                basicKeys.add(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_ENABLED);
-                basicKeys.add(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_TONE_STRENGTH);
-            }
+            // The continuous-effect keys are gone with the B6 batch; an
+            // unknown tag in a request now fails the same way.
             // Aperture-only advertisement (2026-10-16 WS1 trim; see
             // camera/aperture-hal-trim/WS1_TRIM_REPORT.md). A round-2 control is
             // listed only when it can still resolve to an advertised mode or
@@ -1406,10 +1364,7 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
             // arTrackingSupported (both sections) and hlgVideoSupported are no
             // longer published, because the modes/effects that consumed them are
             // no longer advertised. professionalVer keeps its existing
-            // publication, and continuousAvailableEffects / continuousMaxPixels
-            // keep effect 3.
-            basicKeys.add(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_AVAILABLE_EFFECTS);
-            basicKeys.add(QCAMERA3_NATIVE_ALGORITHMS_CONTINUOUS_MAX_PIXELS);
+            // publication.
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PROFESSIONAL_VER);
             basicKeys.add(QCAMERA3_DIAGNOSTICS_HARDWARE_LEVEL_ADVERTISED);
             if (logical) {
@@ -4113,8 +4068,6 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
 
     mCurrentSceneMode = 0;
     mMmsVideoConfigured = false;
-    mContinuousModeChosen = false;
-    mContinuousEnabled = false;
     mSensorVideoHdrChosen = false;
     mSensorVideoHdrMode = 0;
     mMmsRequestedMode = ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF;
@@ -5110,21 +5063,6 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                             mStreamConfigInfo[index].is_type[stream_index] = IS_TYPE_NONE;
                             newStream->usage &= ~GRALLOC_USAGE_PRIVATE_ALLOC_UBWC;
                             newStream->usage |= GRALLOC_USAGE_SW_WRITE_OFTEN;
-                        } else if (!isDualCamera() && !isSecureMode() &&
-                                streamList->operation_mode == CAMERA3_STREAM_CONFIGURATION_NORMAL_MODE &&
-                                newStream->rotation == CAMERA3_STREAM_ROTATION_0 &&
-                                (mStreamConfigInfo[index].type[stream_index] == CAM_STREAM_TYPE_PREVIEW ||
-                                 mStreamConfigInfo[index].type[stream_index] == CAM_STREAM_TYPE_VIDEO) &&
-                                QCamera3VideoEffects::supports(newStream->width, newStream->height)) {
-                            channel = new QCamera3VideoEffectsChannel(camHdl, channelHdl,
-                                    mCameraHandle->ops, captureResultCb, setBufferErrorStatus,
-                                    &l_padding, this, newStream,
-                                    (cam_stream_type_t)mStreamConfigInfo[index].type[stream_index],
-                                    mStreamConfigInfo[index].postprocess_mask[stream_index], mMetadataChannel);
-                            // Usage is negotiated before first request: reserve a
-                            // mappable linear output even when DMA bypass is chosen.
-                            newStream->usage &= ~GRALLOC_USAGE_PRIVATE_ALLOC_UBWC;
-                            newStream->usage |= GRALLOC_USAGE_SW_WRITE_OFTEN;
                         } else channel = new QCamera3RegularChannel(camHdl,
                                 channelHdl, mCameraHandle->ops, captureResultCb,
                                 setBufferErrorStatus, &l_padding,
@@ -5142,7 +5080,7 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                         }
                         /* disable UBWC for preview, though supported,
                          * to take advantage of CPP duplication */
-                        if (channel->usesVideoEffects() || m_bEisEnable || (m_bIsVideo && (!mCommon.isVideoUBWCEnabled()) &&
+                        if (m_bEisEnable || (m_bIsVideo && (!mCommon.isVideoUBWCEnabled()) &&
                                 (previewSize.width == (int32_t)videoWidth)&&
                                 (previewSize.height == (int32_t)videoHeight))||isDualCamera()){
                             channel->setUBWCEnabled(false);
@@ -5150,7 +5088,7 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                             channel->setUBWCEnabled(true);
                         }
                         newStream->max_buffers = channel->getNumBuffers();
-                        if (isTypeVideo == IS_TYPE_VENDOR_EIS && !channel->usesVideoEffects()) {
+                        if (isTypeVideo == IS_TYPE_VENDOR_EIS) {
                             newStream->max_buffers = MAX_VIDEO_VENDOR_EIS_BUFFERS;
                         }
                         newStream->priv = channel;
@@ -5755,16 +5693,47 @@ int QCamera3HardwareInterface::validateCaptureRequest(
         return BAD_VALUE;
     }
 
-    CameraMetadata continuousSettings;
-    if (request->settings != NULL) continuousSettings = request->settings;
-    else continuousSettings = mLastFrameworkSettings;
-    // The still semantic scene control (mode 9 / continuous effect 4) was
-    // deleted with the 2026-10-17 B2-b/B2-c batch; its tags are refused by
-    // oppoBasicRequestSettings, so no request can reach the scene stage.
-    const int32_t requestedHdr = oppoRequestedVideoHdr(continuousSettings);
-    const auto hdrFps = continuousSettings.find(ANDROID_CONTROL_AE_TARGET_FPS_RANGE);
-    const auto hdrAe = continuousSettings.find(ANDROID_CONTROL_AE_MODE);
-    const auto hdrControl = continuousSettings.find(ANDROID_CONTROL_MODE);
+    CameraMetadata frameworkSettings;
+    if (request->settings != NULL) frameworkSettings = request->settings;
+    else frameworkSettings = mLastFrameworkSettings;
+    // Mode 9 scene control (restored 2026-10-17, batch B7): the stage consumes the
+    // completed still NV21 before JPEG encoding, so a request that asks for it
+    // must carry a JPEG output of a supported size. Settings were validated
+    // against the advertised mode in oppoBasicRequestSettings; the buffer list
+    // only exists here.
+    const auto sceneControl = frameworkSettings.find(QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH);
+    const int32_t sceneMode = oppoNativeMode(frameworkSettings);
+    const int32_t sceneStrength = sceneControl.count == 1 ? sceneControl.data.i32[0] :
+            (sceneMode == OPPO_NATIVE_SCENE ? 35 : 0);
+    if (sceneStrength > 0 || sceneMode == OPPO_NATIVE_SCENE) {
+        if (reprocess || m_bIsVideo || isDualCamera() ||
+                (request->num_output_buffers && !request->output_buffers)) return BAD_VALUE;
+        bool jpeg = false;
+        for (uint32_t i = 0; i < request->num_output_buffers; ++i) {
+            const auto *stream = request->output_buffers[i].stream;
+            if (!stream) return BAD_VALUE;
+            if (stream->format == HAL_PIXEL_FORMAT_BLOB) {
+                if (!QCamera3StockScene::supports(stream->width, stream->height)) return BAD_VALUE;
+                jpeg = true;
+            }
+        }
+        // Controlled burst inputs carry the JPEG channel internally rather
+        // than returning a framework buffer for every exposure. Only the
+        // final fused image consumes the saved scene control at encodeData.
+        if (!jpeg && mSubmittingBurstFrameNumber != UINT32_MAX)
+            for (auto it = internallyRequestedStreams.begin(); it != internallyRequestedStreams.end(); ++it) {
+                const auto *stream = it->stream;
+                if (stream && stream->format == HAL_PIXEL_FORMAT_BLOB && stream->priv == mPictureChannel) {
+                    if (!QCamera3StockScene::supports(stream->width, stream->height)) return BAD_VALUE;
+                    jpeg = true;
+                }
+            }
+        if (!jpeg) return BAD_VALUE;
+    }
+    const int32_t requestedHdr = oppoRequestedVideoHdr(frameworkSettings);
+    const auto hdrFps = frameworkSettings.find(ANDROID_CONTROL_AE_TARGET_FPS_RANGE);
+    const auto hdrAe = frameworkSettings.find(ANDROID_CONTROL_AE_MODE);
+    const auto hdrControl = frameworkSettings.find(ANDROID_CONTROL_MODE);
     if (!QCamera3SensorHdrPolicy::stable(mSensorVideoHdrChosen, mSensorVideoHdrMode, requestedHdr) ||
             !QCamera3SensorHdrPolicy::request(requestedHdr,
                 oppoSensorVideoHdrSupported(gCamCapability[mCameraId]),
@@ -5781,29 +5750,14 @@ int QCamera3HardwareInterface::validateCaptureRequest(
                     !QCamera3SensorHdrPolicy::output(stream->width, stream->height)) return BAD_VALUE;
         }
     }
-    const bool continuousEnabled = oppoContinuousEnabled(continuousSettings,
-            mContinuousModeChosen && mContinuousEnabled);
-    uint32_t continuousWidth = 0;
+    // Widest IMPLEMENTATION_DEFINED (preview/encoder) output of this session.
+    // It is the geometry the gyro stabiliser calibration is computed against, and
+    // it used to feed the deleted continuous-effect options.
+    uint32_t calibrationWidth = 0;
     for (auto it = mStreamInfo.begin(); it != mStreamInfo.end(); ++it) {
-        const auto *continuousStream = (*it)->stream;
-        if (continuousStream && continuousStream->format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED &&
-                continuousStream->width > continuousWidth) continuousWidth = continuousStream->width;
-    }
-    const auto continuousOptions = oppoContinuousOptions(continuousSettings,
-            gCamCapability[mCameraId], continuousWidth);
-    if ((mContinuousModeChosen && continuousEnabled != mContinuousEnabled) ||
-            (continuousOptions.enabled() && !continuousEnabled)) return BAD_VALUE;
-    if (continuousEnabled) {
-        if (isDualCamera() || isSecureMode() || mStreamInfo.size() > 2 ||
-                mOpMode != CAMERA3_STREAM_CONFIGURATION_NORMAL_MODE) return BAD_VALUE;
-        // Validate all configured outputs before mutating any channel, so the
-        // first-request choice is atomic across preview and encoder outputs.
-        for (auto it = mStreamInfo.begin(); it != mStreamInfo.end(); ++it) {
-            auto *channel = static_cast<QCamera3ProcessingChannel *>((*it)->stream->priv);
-            if (!channel || !channel->usesVideoEffects()) return BAD_VALUE;
-        }
-        const auto fps = continuousSettings.find(ANDROID_CONTROL_AE_TARGET_FPS_RANGE);
-        if (fps.count == 2 && fps.data.i32[1] > 30) return BAD_VALUE;
+        const auto *outputStream = (*it)->stream;
+        if (outputStream && outputStream->format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED &&
+                outputStream->width > calibrationWidth) calibrationWidth = outputStream->width;
     }
     uint32_t frameNumber = request->frame_number;
     if ((request->num_output_buffers < 1 || request->output_buffers == NULL)
@@ -9032,24 +8986,9 @@ int QCamera3HardwareInterface::processCaptureRequest(
                         (videoOutput ? hdrFeature : 0));
             }
         }
-        if (!mContinuousModeChosen) {
-            mContinuousEnabled = oppoContinuousEnabled(meta, false);
-            // validateCaptureRequest already checked the complete configuration.
-            // No setter can fail and no stream has been initialized yet.
-            for (auto it = mStreamInfo.begin(); it != mStreamInfo.end(); ++it) {
-                auto *channel = static_cast<QCamera3ProcessingChannel *>((*it)->stream->priv);
-                if (channel && channel->usesVideoEffects())
-                    channel->setVideoEffectsEnabled(mContinuousEnabled);
-            }
-            if (mContinuousEnabled) {
-                for (size_t index = 0; index < CONFIG_INDEX_MAX; ++index)
-                    for (uint32_t i = 0; i < mStreamConfigInfo[index].num_streams; ++i)
-                        if (mStreamConfigInfo[index].type[i] == CAM_STREAM_TYPE_PREVIEW ||
-                                mStreamConfigInfo[index].type[i] == CAM_STREAM_TYPE_VIDEO)
-                            mStreamConfigInfo[index].format[i] = CAM_FORMAT_YUV_420_NV12;
-            }
-            mContinuousModeChosen = true;
-        }
+        // The first-request continuous-effect choice (and the NV12 forcing it
+        // needed) was deleted with the B6 batch; nothing here mutates the stream
+        // configuration any more.
         // send an unconfigure to the backend so that the isp
         // resources are deallocated
         if(isDualCamera()) {
@@ -10649,19 +10588,16 @@ no_error:
             LOGD("request with buffer %p, frame_number %d",
                   output.buffer, frameNumber);
 
-            if (channel->usesVideoEffects()) {
-                CameraMetadata effectSettings;
-                if (request->settings != NULL) effectSettings = request->settings;
-                else effectSettings = mLastFrameworkSettings;
-                channel->setVideoEffects(mContinuousEnabled ?
-                        oppoContinuousOptions(effectSettings, gCamCapability[mCameraId],
-                            output.stream ? output.stream->width : 0) :
-                        QCamera3VideoEffects::Options{});
-            }
             if (channel->usesMmsVstab()) {
-                static_cast<QCamera3MmsChannel *>(channel)->setStabilizationEnabled(
+                auto *mms = static_cast<QCamera3MmsChannel *>(channel);
+                mms->setStabilizationEnabled(
                         mMmsRequestedMode == ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_ON,
                         mMmsRequestZoom);
+                // The gyro stabiliser refuses to warp without a real calibration;
+                // this value used to travel in the deleted continuous-effect
+                // options. Same computation, same width as before.
+                mms->setStabilizationCalibration(oppoFocalLengthPx(
+                        gCamCapability[mCameraId], output.stream ? output.stream->width : 0));
             }
 
             rc = channel->request(output.buffer, frameNumber, indexUsed);
@@ -16271,6 +16207,12 @@ int QCamera3HardwareInterface::setFrameParameters(
         mNativeStillMode = oppoNativeMode(controls);
         const camera_metadata_entry_t strength = controls.find(QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH);
         mNativeBeautyStrength = strength.count == 1 ? strength.data.i32[0] : 0;
+        // Mode 9 (batch B7): an explicit strength wins, otherwise the mode itself
+        // means the documented default of 35. Copied under the request mutex and
+        // consumed by QCamera3PostProcessor::encodeData.
+        const auto scene = controls.find(QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH);
+        mNativeSceneStrength = scene.count == 1 ? scene.data.i32[0] :
+                (mNativeStillMode == OPPO_NATIVE_SCENE ? 35 : 0);
         // Round-2 stage controls (contract section 3.1). Values are copied
         // verbatim here, under the request mutex; validation has already
         // bounded them.

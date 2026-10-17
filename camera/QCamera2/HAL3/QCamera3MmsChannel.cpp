@@ -122,8 +122,8 @@ int32_t QCamera3MmsChannel::flush() {
 void QCamera3MmsChannel::setStabilizationEnabled(bool enabled, float zoom) {
     pthread_mutex_lock(&mLock); mEnabled = enabled; mZoom = zoom; pthread_mutex_unlock(&mLock);
 }
-void QCamera3MmsChannel::setVideoEffects(const QCamera3VideoEffects::Options &options) {
-    pthread_mutex_lock(&mLock);mEffects = options;pthread_mutex_unlock(&mLock);
+void QCamera3MmsChannel::setStabilizationCalibration(float focalLengthPx) {
+    pthread_mutex_lock(&mLock); mFocalLengthPx = focalLengthPx; pthread_mutex_unlock(&mLock);
 }
 int32_t QCamera3MmsChannel::request(buffer_handle_t *buffer, uint32_t number, int &indexUsed) {
     if (!buffer || !*buffer) return -EINVAL;
@@ -150,7 +150,7 @@ int32_t QCamera3MmsChannel::request(buffer_handle_t *buffer, uint32_t number, in
     pending.outputIndex = outputIndex;
     pending.queuedNs = bootTime(); pending.active = true; pending.enabled = mEnabled;
     pending.frame.zoom = mZoom;
-    pending.effects = mEffects;
+    pending.focalLengthPx = mFocalLengthPx;
     mInputBusy[index] = true;
     pthread_mutex_unlock(&mLock);
     mMemory.markFrameNumber(outputIndex, number);
@@ -313,7 +313,7 @@ int32_t QCamera3MmsChannel::runNativeVstab(Pending &pending,
     options.timestampNs = pending.frame.timestampNs > 0 ? pending.frame.timestampNs :
             pending.processedNs;
     options.frameNumber = pending.frameNumber;
-    options.focalLengthPx = pending.effects.focalLengthPx;
+    options.focalLengthPx = pending.focalLengthPx;
     options.path = QCamera3GyroVstab::PATH_NATIVE;
     options.passthrough = 1;
     QCamera3GyroVstab::Result result;
@@ -386,17 +386,9 @@ int32_t QCamera3MmsChannel::output(Pending &pending, int64_t nowNs) {
         const QCamera3MmsVstab::Vertex identity[] = {{-1, -1, 0}, {1, -1, 0}, {-1, 1, 0}, {1, 1, 0}};
         status = QCamera3MmsVstab::render(pending.image, destination, identity, 2, 2);
     }
-    int32_t effectStatus = 0;
-    if (!status && pending.effects.legacy()) {
-        QCamera3VideoEffects::Image pixels = {data, destination.length,
-            mProfile.outputWidth, mProfile.outputHeight, 0,
-            size_t(mProfile.outputWidth) * mProfile.outputHeight, mProfile.outputWidth,
-            mProfile.outputWidth, mProfile.outputHeight, mProfile.outputHeight / 2};
-        effectStatus = QCamera3VideoEffects::process(pixels, false, pixels, false,
-            pending.effects, &mEffectCancelled);
-        // The effect processor commits only on success: destination still
-        // contains the completed MMS/base frame after a core failure.
-    }
+    // The single-pass effect stage (effects 1/3) that used to run here was
+    // deleted with the B6 batch: the frame leaving this channel is now always the
+    // completed MMS/base or native-gyro render.
     if (!status && !mEffectCancelled.load()) {
         auto &mapper = android::GraphicBufferMapper::get();
         android_ycbcr layout = {};
@@ -423,7 +415,7 @@ int32_t QCamera3MmsChannel::output(Pending &pending, int64_t nowNs) {
         }
     }
     if (!status && mEffectCancelled.load()) status = -ECANCELED;
-    const int32_t completed = status ? status : effectStatus;
+    const int32_t completed = status;
     free(data);
     return completed;
 }

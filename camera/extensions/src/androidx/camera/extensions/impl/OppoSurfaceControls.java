@@ -52,10 +52,6 @@ public final class OppoSurfaceControls {
         NATIVE_FRONT_BEAUTY=10,NATIVE_SINGLE_BOKEH=11,NATIVE_PICBEST=12,NATIVE_IMAGE_ADJUST=13,
         NATIVE_SINGLE_RELIGHT=14,NATIVE_DOC=15,NATIVE_SCES=16,NATIVE_DOUBLE_EXPOSURE=17,
         NATIVE_LONG_EXPOSURE=18,NATIVE_AR_TRACK=19,NATIVE_REMOSAIC=20;
-    /** Continuous effect ids; contract section 2. */
-    public static final int EFFECT_REAR_BEAUTY=1,EFFECT_FILTER=2,EFFECT_TONE=3,EFFECT_SCENE=4,
-        EFFECT_FRONT_BEAUTY=5,EFFECT_VIDEO_FILTER=6,EFFECT_VIDEO_BEAUTY=7,EFFECT_PREVIEW_BOKEH=8,
-        EFFECT_AR_TRACK=9;
     /** {@code appMask} bits; contract section 3.1. */
     public static final int MASK_BEAUTY=1,MASK_FILTER=2,MASK_SCENE=4,MASK_WATERMARK=8,MASK_AR=16,ALL_MASKS=31;
 
@@ -129,17 +125,6 @@ public final class OppoSurfaceControls {
         "org.lineageos.camera.algorithms.filterType",Integer.class);
     public static final CaptureRequest.Key<Integer> FILTER_FLIP_MODE=new CaptureRequest.Key<>(
         "org.lineageos.camera.algorithms.filterFlipMode",Integer.class);
-    /** Existing continuous (preview/video) effect controls. */
-    public static final CaptureRequest.Key<Integer> CONTINUOUS_ENABLED=new CaptureRequest.Key<>(
-        "org.lineageos.camera.algorithms.continuousEnabled",Integer.class);
-    public static final CaptureRequest.Key<Integer> CONTINUOUS_BEAUTY_STRENGTH=new CaptureRequest.Key<>(
-        "org.lineageos.camera.algorithms.continuousBeautyStrength",Integer.class);
-    public static final CaptureRequest.Key<Integer> CONTINUOUS_FILTER_TYPE=new CaptureRequest.Key<>(
-        "org.lineageos.camera.algorithms.continuousFilterType",Integer.class);
-    public static final CaptureRequest.Key<Integer> CONTINUOUS_TONE_STRENGTH=new CaptureRequest.Key<>(
-        "org.lineageos.camera.algorithms.continuousToneStrength",Integer.class);
-    public static final CaptureRequest.Key<Integer> CONTINUOUS_SCENE_STRENGTH=new CaptureRequest.Key<>(
-        "org.lineageos.camera.algorithms.continuousSceneStrength",Integer.class);
     /** Existing balanced dual portrait lighting controls (native mode 8). */
     public static final CaptureRequest.Key<Integer> RELIGHT_STRENGTH=new CaptureRequest.Key<>(
         "org.lineageos.camera.algorithms.relightStrength",Integer.class);
@@ -235,8 +220,7 @@ public final class OppoSurfaceControls {
         DOUBLE_EXPOSURE_MODE,DOUBLE_EXPOSURE_STRENGTH,DOUBLE_EXPOSURE_TIME_NS,LONG_EXPOSURE_ENABLE,
         REMOSAIC_ENABLE,EXIF_COMMENT,WATERMARK_ASSET,STICKER_ASSET,STICKER_RECT,MIRROR_PREVIEW,
         APP_POLICY_MODE,APP_MASK,FACE_PREVIEW_PARAM,DEPTH_QUALITY,STILL_MODE,FILTER_TYPE,FILTER_FLIP_MODE,
-        CONTINUOUS_ENABLED,CONTINUOUS_BEAUTY_STRENGTH,CONTINUOUS_FILTER_TYPE,CONTINUOUS_TONE_STRENGTH,
-        CONTINUOUS_SCENE_STRENGTH,RELIGHT_STRENGTH,RELIGHT_AZIMUTH,RELIGHT_ELEVATION,SLOW_MOTION_RATIO,
+        RELIGHT_STRENGTH,RELIGHT_AZIMUTH,RELIGHT_ELEVATION,SLOW_MOTION_RATIO,
         VIDEO_HDR_PROFILE,LOGICAL_ZOOM_HINT,LOW_POWER_MODE,DEPTH_STREAM_ENABLED,IR_STREAM_MODE,
         AR_TRACKING_ENABLE,AR_TRACKING_MODE,WATERMARK_LAYOUT,MIRROR,EXIF_USER_COMMENT));
     /** Standard ANDROID_SHARPNESS request/result. The SDK hides the constant,
@@ -342,13 +326,9 @@ public final class OppoSurfaceControls {
         if(name.equals(FACE_PREVIEW_PARAM.getName()))return "int32[4] mode 0..2,minLevel 0..100,maxFaces 1..10,hint 0/1";
         if(name.equals(DEPTH_QUALITY.getName()))return "int32 0..3";
         if(name.equals(STILL_MODE.getName()))return "int32 advertised availableModes";
-        if(name.equals(FILTER_TYPE.getName())||name.equals(CONTINUOUS_FILTER_TYPE.getName()))
-            return "int32 0 or an advertised availableFilterTypes value";
+        if(name.equals(FILTER_TYPE.getName()))return "int32 0 or an advertised availableFilterTypes value";
         if(name.equals(FILTER_FLIP_MODE.getName()))return "int32 0 only";
-        if(name.equals(CONTINUOUS_ENABLED.getName())||name.equals(LOW_POWER_MODE.getName())||
-                name.equals(DEPTH_STREAM_ENABLED.getName()))return "int32 0/1";
-        if(name.equals(CONTINUOUS_BEAUTY_STRENGTH.getName())||name.equals(CONTINUOUS_TONE_STRENGTH.getName())||
-                name.equals(CONTINUOUS_SCENE_STRENGTH.getName()))return "int32 0..100";
+        if(name.equals(LOW_POWER_MODE.getName())||name.equals(DEPTH_STREAM_ENABLED.getName()))return "int32 0/1";
         if(name.equals(RELIGHT_STRENGTH.getName()))return "int32 0..100";
         if(name.equals(RELIGHT_AZIMUTH.getName()))return "int32 -180..180 degrees";
         if(name.equals(RELIGHT_ELEVATION.getName()))return "int32 0..90 degrees";
@@ -669,13 +649,11 @@ public final class OppoSurfaceControls {
             new KeyPair(APP_POLICY_MODE,Integer.class),new KeyPair(APP_MASK,Integer.class),
             new KeyPair(FACE_PREVIEW_PARAM,int[].class),new KeyPair(DEPTH_QUALITY,Integer.class),
             new KeyPair(STILL_MODE,Integer.class),new KeyPair(FILTER_TYPE,Integer.class),
-            new KeyPair(FILTER_FLIP_MODE,Integer.class),new KeyPair(CONTINUOUS_ENABLED,Integer.class),
-            new KeyPair(CONTINUOUS_BEAUTY_STRENGTH,Integer.class),new KeyPair(CONTINUOUS_FILTER_TYPE,Integer.class),
-            new KeyPair(CONTINUOUS_TONE_STRENGTH,Integer.class),new KeyPair(CONTINUOUS_SCENE_STRENGTH,Integer.class),
-            new KeyPair(RELIGHT_STRENGTH,Integer.class),new KeyPair(RELIGHT_AZIMUTH,Integer.class),
-            new KeyPair(RELIGHT_ELEVATION,Integer.class),new KeyPair(SLOW_MOTION_RATIO,Integer.class),
-            new KeyPair(VIDEO_HDR_PROFILE,Integer.class),new KeyPair(LOGICAL_ZOOM_HINT,Float.class),
-            new KeyPair(LOW_POWER_MODE,Integer.class),new KeyPair(DEPTH_STREAM_ENABLED,Integer.class),
+            new KeyPair(FILTER_FLIP_MODE,Integer.class),new KeyPair(RELIGHT_STRENGTH,Integer.class),
+            new KeyPair(RELIGHT_AZIMUTH,Integer.class),new KeyPair(RELIGHT_ELEVATION,Integer.class),
+            new KeyPair(SLOW_MOTION_RATIO,Integer.class),new KeyPair(VIDEO_HDR_PROFILE,Integer.class),
+            new KeyPair(LOGICAL_ZOOM_HINT,Float.class),new KeyPair(LOW_POWER_MODE,Integer.class),
+            new KeyPair(DEPTH_STREAM_ENABLED,Integer.class),
             new KeyPair(IR_STREAM_MODE,Integer.class),new KeyPair(AR_TRACKING_ENABLE,Integer.class),
             new KeyPair(AR_TRACKING_MODE,Integer.class),new KeyPair(WATERMARK_LAYOUT,int[].class),
             new KeyPair(MIRROR,Integer.class),new KeyPair(EXIF_USER_COMMENT,byte[].class)};
@@ -762,11 +740,6 @@ public final class OppoSurfaceControls {
             keys.add(APP_POLICY_MODE);keys.add(APP_MASK);
             keys.add(MIRROR_PREVIEW);keys.add(LOW_POWER_MODE);keys.add(LOGICAL_ZOOM_HINT);
             if(nativeMode(c,NATIVE_FILTER)){keys.add(FILTER_TYPE);keys.add(FILTER_FLIP_MODE);}
-            if(nonempty(get(c,OppoAdvancedExtender.CONTINUOUS_AVAILABLE_EFFECTS))) {
-                keys.add(CONTINUOUS_ENABLED);keys.add(CONTINUOUS_BEAUTY_STRENGTH);
-                keys.add(CONTINUOUS_FILTER_TYPE);keys.add(CONTINUOUS_TONE_STRENGTH);
-                keys.add(CONTINUOUS_SCENE_STRENGTH);
-            }
             keys.add(IR_STREAM_MODE);
             if(nativeModes(c).length>0)keys.add(STILL_MODE);
         }
@@ -996,7 +969,7 @@ public final class OppoSurfaceControls {
         }
         if(name.equals(DEPTH_QUALITY.getName())){range(integer(value,-1),0,3,name);return;}
         if(name.equals(STILL_MODE.getName())){validateStillMode(c,mode,advertised,integer(value,-1));return;}
-        if(name.equals(FILTER_TYPE.getName())||name.equals(CONTINUOUS_FILTER_TYPE.getName())) {
+        if(name.equals(FILTER_TYPE.getName())) {
             int type=integer(value,-1);
             if(type==0)return;
             if(!contains(get(c,OppoAdvancedExtender.AVAILABLE_FILTER_TYPES),type))
@@ -1005,16 +978,6 @@ public final class OppoSurfaceControls {
         }
         if(name.equals(FILTER_FLIP_MODE.getName())) {
             if(integer(value,-1)!=0)throw new IllegalArgumentException(name+" currently exposes only 0");
-            return;
-        }
-        if(name.equals(CONTINUOUS_ENABLED.getName())){range(integer(value,-1),0,1,name);return;}
-        if(name.equals(CONTINUOUS_BEAUTY_STRENGTH.getName())||name.equals(CONTINUOUS_TONE_STRENGTH.getName())||
-                name.equals(CONTINUOUS_SCENE_STRENGTH.getName())) {
-            int amount=integer(value,-1);range(amount,0,100,name);
-            int effect=name.equals(CONTINUOUS_BEAUTY_STRENGTH.getName())?EFFECT_REAR_BEAUTY:
-                name.equals(CONTINUOUS_TONE_STRENGTH.getName())?EFFECT_TONE:EFFECT_SCENE;
-            if(amount!=0&&!contains(get(c,OppoAdvancedExtender.CONTINUOUS_AVAILABLE_EFFECTS),effect))
-                throw new IllegalArgumentException(name+" requires continuous effect "+effect+" to be advertised");
             return;
         }
         if(name.equals(RELIGHT_STRENGTH.getName())){range(integer(value,-1),0,100,name);return;}

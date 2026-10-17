@@ -143,6 +143,11 @@ class QCamera3ProcessingChannel;
         bool raw_mfc_snapshot;
         int32_t native_still_mode;
         int32_t native_beauty_strength;
+        // Mode 9 (semantic scene) tuning strength, snapshotted at submission and
+        // consumed by the still post-processor. Restored 2026-10-17: the stage was
+        // deleted with the B2-b/B2-c batch and is brought back because Aperture's
+        // AUTO stills really do reach it.
+        int32_t native_scene_strength;
         uint32_t framework_frame_number;
         bool framework_frame_number_valid;
         // Round-2 controls that the still path rebuilds its stage Options from.

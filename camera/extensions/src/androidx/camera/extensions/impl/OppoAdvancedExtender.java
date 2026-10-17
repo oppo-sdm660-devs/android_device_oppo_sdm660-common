@@ -29,8 +29,6 @@ public class OppoAdvancedExtender extends OppoExtender implements AdvancedExtend
         "org.lineageos.camera.algorithms.sceneStrength",Integer.class);
     static final CameraCharacteristics.Key<int[]> AVAILABLE_FILTER_TYPES = new CameraCharacteristics.Key<>(
         "org.lineageos.camera.algorithms.availableFilterTypes",int[].class);
-    static final CameraCharacteristics.Key<int[]> CONTINUOUS_AVAILABLE_EFFECTS = new CameraCharacteristics.Key<>(
-        "org.lineageos.camera.algorithms.continuousAvailableEffects",int[].class);
     public OppoAdvancedExtender(int mode) { super(Mode.values()[mode]); }
     public void init(String id,Map<String,CameraCharacteristics> values) { init(id,values.get(id)); }
     @Override public boolean isExtensionAvailable(String id,CameraCharacteristics value) {
