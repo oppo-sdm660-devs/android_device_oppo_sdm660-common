@@ -1,0 +1,12 @@
+# Copyright (C) 2025 The LineageOS Project
+# SPDX-License-Identifier: Apache-2.0
+#
+
+type rfsa_daemon, domain;
+type rfsa_daemon_exec, exec_type, vendor_file_type, file_type;
+init_daemon_domain(rfsa_daemon)
+allow rfsa_daemon self:{ socket qipcrtr_socket } create_socket_perms_no_ioctl;
+allowxperm rfsa_daemon self:{ socket qipcrtr_socket } ioctl msm_sock_ipc_ioctls;
+allow rfsa_daemon uio_device:chr_file rw_file_perms;
+r_dir_file(rfsa_daemon, sysfs_uio)
+r_dir_file(rfsa_daemon, sysfs_uio_file)

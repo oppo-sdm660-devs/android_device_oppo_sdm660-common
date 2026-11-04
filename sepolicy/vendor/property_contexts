@@ -1,5 +1,33 @@
-# Camera property labels, matching the stock R11/R11s vendor_property_contexts.
+# Copyright (C) 2025 The LineageOS Project
+# SPDX-License-Identifier: Apache-2.0
+#
+
+# Camera properties.
 persist.camera.            u:object_r:exported_system_prop:s0
 persist.camera.aifb        u:object_r:exported_system_prop:s0 exact bool
 persist.camera.expose.aux  u:object_r:exported_system_prop:s0 exact bool
 ro.camera.dualcam.type     u:object_r:exported_system_prop:s0 exact int
+persist.vendor.camera.     u:object_r:camera_prop:s0
+vendor.camera.             u:object_r:camera_prop:s0
+oppo.camera.               u:object_r:camera_prop:s0
+oppo.cam.                  u:object_r:camera_prop:s0
+camera.cpp.                u:object_r:camera_prop:s0
+camera.llvd.               u:object_r:camera_prop:s0
+persist.sys.assert.panic     u:object_r:exported_system_prop:s0 exact bool
+persist.sys.oppo.region      u:object_r:exported_system_prop:s0
+
+# Fingerprint properties.
+persist.vendor.fingerprint.  u:object_r:oppo_fingerprint_prop:s0
+oppo.fpc.                    u:object_r:oppo_fingerprint_prop:s0
+oppo.goodix.                 u:object_r:oppo_fingerprint_prop:s0
+ro.oppo.regionmark           u:object_r:exported_system_prop:s0
+ro.separate.soft             u:object_r:exported_default_prop:s0
+
+# vendor.prop boot-config properties set by vendor_init.
+persist.radio.calls.on.ims       u:object_r:exported_default_prop:s0 exact int
+vendor.bluetooth.soc             u:object_r:exported_default_prop:s0 exact string
+audio.sys.noisy.broadcast.delay  u:object_r:exported_default_prop:s0 exact int
+ro.bluetooth.ftm_enabled         u:object_r:exported_default_prop:s0 exact bool
+vendor.mm.enable.qcom_parser     u:object_r:exported_default_prop:s0 exact int
+persist.vendor.dpm.feature       u:object_r:exported_default_prop:s0 exact int
+init.svc.wpa_supplicant          u:object_r:exported_default_prop:s0 exact string

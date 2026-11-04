@@ -1,0 +1,10 @@
+# Copyright (C) 2025 The LineageOS Project
+# SPDX-License-Identifier: Apache-2.0
+#
+
+# Transitional: /data/shared is still core-labelled on the current ROM.
+allow vendor_init system_data_file:dir { open read ioctl setattr };
+allow vendor_init system_data_file:dir { write add_name };
+typeattribute vendor_init data_between_core_and_vendor_violators;
+allow vendor_init camera_data_file:dir { getattr search };
+allow vendor_init tombstone_data_file:dir { getattr search };

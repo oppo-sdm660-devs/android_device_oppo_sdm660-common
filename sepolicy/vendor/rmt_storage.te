@@ -1,0 +1,6 @@
+# Copyright (C) 2025 The LineageOS Project
+# SPDX-License-Identifier: Apache-2.0
+#
+
+r_dir_file(rmt_storage, proc_oppo_version)
+allow rmt_storage oppo_block_device:blk_file rw_file_perms;

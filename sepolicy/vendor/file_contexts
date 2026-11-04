@@ -1,3 +1,20 @@
-# Partition Mountpoints
+# Copyright (C) 2025 The LineageOS Project
+# SPDX-License-Identifier: Apache-2.0
+#
+
 /bt_firmware(/.*)?                                      u:object_r:bt_firmware_file:s0
 /firmware(/.*)?                                         u:object_r:vendor_firmware_file:s0
+/dev/goodix_fp                                          u:object_r:fingerprint_device:s0
+/dev/block/mmcblk0p1                                    u:object_r:oppo_block_device:s0
+/dev/block/by-name/oppodycnvbk                          u:object_r:oppo_block_device:s0
+/dev/block/by-name/logdump                               u:object_r:metadata_block_device:s0
+/dev/block/platform/soc/c0c4000\.sdhci/by-name/logdump   u:object_r:metadata_block_device:s0
+/(vendor|system/vendor)/bin/rfsa_daemon                                     u:object_r:rfsa_daemon_exec:s0
+/(vendor|system/vendor)/bin/hw/vendor\.oppo\.hardware\.biometrics\.fingerprint@2\.1-service u:object_r:hal_fingerprint_oppo_exec:s0
+/(vendor|system/vendor)/bin/hw/android\.hardware\.biometrics\.fingerprint@2\.1-service\.oppo_sdm660 u:object_r:hal_fingerprint_default_exec:s0
+/mnt/vendor/persist/camera(/.*)?                        u:object_r:persist_camera_file:s0
+/mnt/vendor/persist/dual_camera_calibration(/.*)?       u:object_r:persist_camera_calibration_file:s0
+/data/shared(/.*)?                                      u:object_r:oppo_shared_data_file:s0
+/sys/devices(/platform)?/soc/0\.qcom,oembackup_sharedmem/uio(/.*)?            u:object_r:sysfs_uio:s0
+/sys/devices(/platform)?/soc/0\.qcom,oembackup_sharedmem/uio/uio[0-9]+(/.*)?  u:object_r:sysfs_uio_file:s0
+/(vendor|system/vendor)/lib(64)?/libhidlbase-v32\.so    u:object_r:same_process_hal_file:s0

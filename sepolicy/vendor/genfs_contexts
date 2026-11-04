@@ -1,0 +1,36 @@
+# Copyright (C) 2025 The LineageOS Project
+# SPDX-License-Identifier: Apache-2.0
+#
+
+# /proc nodes created by the OPPO/qcom kernel drivers.
+genfscon proc /touchpanel                       u:object_r:proc_touchpanel:s0
+genfscon proc /oppoVersion                      u:object_r:proc_oppo_version:s0
+genfscon proc /devinfo                          u:object_r:proc_oppo_devinfo:s0
+genfscon proc /fp_id                            u:object_r:proc_oppo_fp_id:s0
+genfscon proc /fuseid                           u:object_r:proc_camera_sensor:s0
+genfscon proc /rear_eeprom_info                 u:object_r:proc_camera_sensor:s0
+genfscon proc /front_eeprom_info                u:object_r:proc_camera_sensor:s0
+genfscon proc /rear2_eeprom_info                u:object_r:proc_camera_sensor:s0
+genfscon proc /rear_sensor_id                   u:object_r:proc_camera_sensor:s0
+genfscon proc /front_sensor_id                  u:object_r:proc_camera_sensor:s0
+genfscon proc /rear2_sensor_id                  u:object_r:proc_camera_sensor:s0
+genfscon proc /rear_vcm_info                    u:object_r:proc_camera_sensor:s0
+genfscon proc /front_vcm_info                   u:object_r:proc_camera_sensor:s0
+genfscon proc /rear2_vcm_info                   u:object_r:proc_camera_sensor:s0
+genfscon proc /rear_lens_id                     u:object_r:proc_camera_sensor:s0
+genfscon proc /front_lens_id                    u:object_r:proc_camera_sensor:s0
+genfscon proc /rear2_lens_id                    u:object_r:proc_camera_sensor:s0
+genfscon proc /rear_date_info                   u:object_r:proc_camera_sensor:s0
+genfscon proc /rear_vcm_id                      u:object_r:proc_camera_sensor:s0
+genfscon proc /qcom_flash                       u:object_r:proc_camera_flash:s0
+
+# /sys nodes the base policy does not label.
+genfscon sysfs /systeminfo                       u:object_r:sysfs_systeminfo:s0
+genfscon sysfs /devices/platform/soc/soc:goodix_fp     u:object_r:sysfs_fingerprint:s0
+genfscon sysfs /devices/soc/soc:goodix_fp              u:object_r:sysfs_fingerprint:s0
+genfscon sysfs /devices/platform/soc/soc:fpc_fpc1020    u:object_r:sysfs_fingerprint:s0
+genfscon sysfs /devices/soc/soc:fpc_fpc1020             u:object_r:sysfs_fingerprint:s0
+genfscon sysfs /devices/platform/soc/800f000.qcom,spmi/spmi-0/spmi0-03/800f000.qcom,spmi:qcom,pm660l@3:qcom,leds@d000/leds/button-backlight  u:object_r:sysfs_leds:s0
+genfscon sysfs /devices/platform/soc/800f000.qcom,spmi/spmi-0/spmi0-03/800f000.qcom,spmi:qcom,pm660l@3:qcom,leds@d000/leds/white             u:object_r:sysfs_leds:s0
+genfscon sysfs /devices/platform/soc/soc:qcom,msm-ext-disp/extcon/extcon1/cable.1/  u:object_r:sysfs_extcon:s0
+genfscon sysfs /devices/platform/c1af000.uart/power/autosuspend_delay_ms  u:object_r:sysfs_power:s0
