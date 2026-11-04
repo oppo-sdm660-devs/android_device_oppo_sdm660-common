@@ -1,0 +1,6 @@
+# Copyright (C) 2025 The LineageOS Project
+# SPDX-License-Identifier: Apache-2.0
+#
+
+typeattribute tee data_between_core_and_vendor_violators;
+allow tee fingerprintd_data_file:dir { open read search };

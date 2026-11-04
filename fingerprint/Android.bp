@@ -1,6 +1,7 @@
 cc_binary {
     name: "android.hardware.biometrics.fingerprint@2.1-service.oppo_sdm660",
     defaults: ["hidl_defaults"],
+    vendor: true,
     init_rc: ["android.hardware.biometrics.fingerprint@2.1-service.oppo_sdm660.rc"],
     relative_install_path: "hw",
     srcs: [

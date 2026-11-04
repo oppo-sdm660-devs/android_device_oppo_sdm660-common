@@ -81,8 +81,6 @@ BOARD_KERNEL_CMDLINE := \
     sched_enable_power_aware=1 \
     service_locator.enable=1 \
     loop.max_part=7
-# TODO: Set SELinux to Permissive mode
-BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive
 BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOTIMG_HEADER_VERSION)
 BOARD_KERNEL_IMAGE_NAME := Image.gz-dtb
 TARGET_KERNEL_SOURCE := kernel/oppo/sdm660

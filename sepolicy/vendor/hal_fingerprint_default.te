@@ -1,0 +1,6 @@
+# Copyright (C) 2025 The LineageOS Project
+# SPDX-License-Identifier: Apache-2.0
+#
+
+binder_call(hal_fingerprint_default, hal_fingerprint_oppo)
+get_prop(hal_fingerprint_default, oppo_fingerprint_prop)

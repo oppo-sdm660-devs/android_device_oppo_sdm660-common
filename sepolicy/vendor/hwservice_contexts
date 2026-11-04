@@ -1,0 +1,6 @@
+# Copyright (C) 2025 The LineageOS Project
+# SPDX-License-Identifier: Apache-2.0
+#
+
+vendor.oppo.hardware.biometrics.fingerprint::IBiometricsFingerprint  u:object_r:hal_fingerprint_hwservice:s0
+android.frameworks.fingerprintservice::IFingerprintHalService  u:object_r:hal_fingerprint_hwservice:s0
