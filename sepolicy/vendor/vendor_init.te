@@ -2,9 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
-# Transitional: /data/shared is still core-labelled on the current ROM.
+# /data/shared (mkdir/chown in init.qcom.rc) stays core-labelled as the default
+# system_data_file: vendor policy must not label /data paths (AOSP sepolicy_test
+# TestCoreDataTypeViolations). These perms cover init's mkdir/chown/open/ioctl.
 allow vendor_init system_data_file:dir { open read ioctl setattr };
 allow vendor_init system_data_file:dir { write add_name };
+# Transitional core-data dirs below are not in the vendor_init neverallow
+# exemptions, hence the standard device-tree violator escape hatch.
 typeattribute vendor_init data_between_core_and_vendor_violators;
 allow vendor_init camera_data_file:dir { getattr search };
 allow vendor_init tombstone_data_file:dir { getattr search };
