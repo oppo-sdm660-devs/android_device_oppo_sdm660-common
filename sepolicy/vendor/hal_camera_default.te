@@ -11,8 +11,8 @@ get_prop(hal_camera_default, bootanim_system_prop)
 r_dir_file(hal_camera_default, proc_oppo_devinfo)
 r_dir_file(hal_camera_default, proc_camera_sensor)
 allow hal_camera_default proc_camera_flash:file rw_file_perms;
-allow hal_camera_default persist_camera_file:dir r_dir_perms;
-allow hal_camera_default persist_camera_file:file { getattr open read setattr };
+allow hal_camera_default persist_camera_file:dir { getattr search open read write add_name remove_name };
+allow hal_camera_default persist_camera_file:file { getattr open read write create setattr unlink };
 allow hal_camera_default persist_camera_calibration_file:dir rw_dir_perms;
 allow hal_camera_default persist_camera_calibration_file:file create_file_perms;
 # OPPO camera wire-format memfd buffers.

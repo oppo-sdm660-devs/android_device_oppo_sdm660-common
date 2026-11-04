@@ -13,6 +13,21 @@ oppo.camera.               u:object_r:camera_prop:s0
 oppo.cam.                  u:object_r:camera_prop:s0
 camera.cpp.                u:object_r:camera_prop:s0
 camera.llvd.               u:object_r:camera_prop:s0
+
+# Camera tuning props read by the shipped camera blobs. Without an explicit
+# label they fall through to the platform "default_prop" catch-all, whose
+# property-area file vendor domains may not read (private/domain.te neverallow).
+persist.dual.                 u:object_r:exported_system_prop:s0
+persist.imglib.               u:object_r:exported_system_prop:s0
+persist.cam.                  u:object_r:exported_system_prop:s0
+persist.mtk.camera.           u:object_r:exported_system_prop:s0
+persist.partial.              u:object_r:exported_system_prop:s0
+persist.enable.max.pending.buf u:object_r:exported_system_prop:s0 exact int
+oppo.open.camera.             u:object_r:exported_system_prop:s0
+ro.camera.platform.660lite    u:object_r:exported_system_prop:s0 exact bool
+ro.camera.sensor.aux2m        u:object_r:exported_system_prop:s0 exact int
+ro.oppo.version               u:object_r:exported_default_prop:s0 exact string
+ro.build.release_type         u:object_r:exported_default_prop:s0 exact string
 persist.sys.assert.panic     u:object_r:exported_system_prop:s0 exact bool
 persist.sys.oppo.region      u:object_r:exported_system_prop:s0
 
@@ -31,3 +46,14 @@ ro.bluetooth.ftm_enabled         u:object_r:exported_default_prop:s0 exact bool
 vendor.mm.enable.qcom_parser     u:object_r:exported_default_prop:s0 exact int
 persist.vendor.dpm.feature       u:object_r:exported_default_prop:s0 exact int
 init.svc.wpa_supplicant          u:object_r:exported_default_prop:s0 exact string
+
+# More /vendor/build.prop props: init (vendor_init) must be allowed to set
+# them, and every domain must be able to read them (exported_default_prop).
+persist.vendor.camera.HAL3.enabled        u:object_r:exported_default_prop:s0 exact int
+persist.vendor.camera.dual.camera         u:object_r:exported_default_prop:s0 exact int
+persist.vendor.camera.expose.aux          u:object_r:exported_default_prop:s0 exact bool
+persist.vendor.camera.preview.ubwc        u:object_r:exported_default_prop:s0 exact int
+persist.vendor.qti.telephony.vt_cam_interface u:object_r:exported_default_prop:s0 exact int
+audio.sys.offload.pstimeout.secs          u:object_r:exported_default_prop:s0 exact int
+vidc.enc.dcvs.extra-buff-count            u:object_r:exported_default_prop:s0 exact int
+persist.data.df.dev_name                  u:object_r:exported_default_prop:s0 exact string

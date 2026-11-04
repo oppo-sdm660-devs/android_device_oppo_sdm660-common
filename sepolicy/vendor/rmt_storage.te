@@ -4,3 +4,4 @@
 
 r_dir_file(rmt_storage, proc_oppo_version)
 allow rmt_storage oppo_block_device:blk_file rw_file_perms;
+allow rmt_storage sysfs_mmc_host:file r_file_perms;

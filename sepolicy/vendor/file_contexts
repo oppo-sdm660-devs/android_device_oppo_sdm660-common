@@ -5,8 +5,12 @@
 /bt_firmware(/.*)?                                      u:object_r:bt_firmware_file:s0
 /firmware(/.*)?                                         u:object_r:vendor_firmware_file:s0
 /dev/goodix_fp                                          u:object_r:fingerprint_device:s0
-/dev/block/mmcblk0p1                                    u:object_r:oppo_block_device:s0
-/dev/block/by-name/oppodycnvbk                          u:object_r:oppo_block_device:s0
+# Modem EFS partitions (stock ColorOS labels; rmt_storage needs rw on them).
+/dev/block/(platform/soc/c0c4000\.sdhci/)?by-name/oppodycnvbk    u:object_r:modem_efs_partition_device:s0
+/dev/block/(platform/soc/c0c4000\.sdhci/)?by-name/oppostanvbk    u:object_r:modem_efs_partition_device:s0
+# OPPO reserve partitions (rmt_storage accesses reserve4; stock ColorOS label).
+/dev/block/(platform/soc/c0c4000\.sdhci/)?by-name/reserve.*     u:object_r:oppo_block_device:s0
+/dev/block/(platform/soc/c0c4000\.sdhci/)?by-name/opporeserve.* u:object_r:oppo_block_device:s0
 /dev/block/by-name/logdump                               u:object_r:metadata_block_device:s0
 /dev/block/platform/soc/c0c4000\.sdhci/by-name/logdump   u:object_r:metadata_block_device:s0
 /(vendor|system/vendor)/bin/rfsa_daemon                                     u:object_r:rfsa_daemon_exec:s0

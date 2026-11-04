@@ -3,3 +3,5 @@
 #
 
 allow qti_init_shell proc_page_cluster:file { open write };
+r_dir_file(qti_init_shell, proc_oppo_version)
+allow qti_init_shell sysfs_power:file w_file_perms;

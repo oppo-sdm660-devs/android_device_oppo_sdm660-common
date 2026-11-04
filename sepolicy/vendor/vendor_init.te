@@ -12,3 +12,6 @@ allow vendor_init system_data_file:dir { write add_name };
 typeattribute vendor_init data_between_core_and_vendor_violators;
 allow vendor_init camera_data_file:dir { getattr search };
 allow vendor_init tombstone_data_file:dir { getattr search };
+# /data/misc/seemp: vendor_seemp_data_file is a system_ext-private qcom type
+# (not visible to vendor policy), so the init stat() EEXIST probe stays denied
+# (benign; the directory is created by the qcom generic policy rule).

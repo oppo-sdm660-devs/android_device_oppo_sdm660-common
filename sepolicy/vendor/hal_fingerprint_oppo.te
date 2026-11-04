@@ -17,5 +17,10 @@ allow hal_fingerprint_oppo proc_touchpanel:dir r_dir_perms;
 allow hal_fingerprint_oppo proc_touchpanel:file rw_file_perms;
 allow hal_fingerprint_oppo sysfs_fingerprint:dir r_dir_perms;
 allow hal_fingerprint_oppo sysfs_fingerprint:file r_file_perms;
+# The ColorOS framework fingerprint-service FQN is mapped to
+# hal_fingerprint_hwservice in hwservice_contexts; the
+# hal_server_domain(hal_fingerprint) macro already grants add/find on it.
+# Stock ColorOS did not grant this either: the HAL tolerates the EEXIST.
+dontaudit hal_fingerprint_oppo fingerprintd_data_file:dir write;
 get_prop(hal_fingerprint_oppo, oppo_fingerprint_prop)
 set_prop(hal_fingerprint_oppo, oppo_fingerprint_prop)
