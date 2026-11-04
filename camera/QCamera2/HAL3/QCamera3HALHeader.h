@@ -131,6 +131,7 @@ class QCamera3ProcessingChannel;
         bool raw_mfc_snapshot;
         int32_t native_still_mode;
         int32_t native_beauty_strength;
+        int32_t native_front_beauty_strength;
         int32_t native_scene_strength;
         uint32_t framework_frame_number;
         bool framework_frame_number_valid;

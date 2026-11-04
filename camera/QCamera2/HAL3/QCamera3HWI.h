@@ -435,6 +435,7 @@ public:
     int32_t getNativeStillMode() { return mNativeStillMode; }
     int32_t getNativeDualBindStatus() { return mNativeDualBindStatus; }
     int32_t getNativeBeautyStrength() { return mNativeBeautyStrength; }
+    int32_t getNativeFrontBeautyStrength() { return mNativeFrontBeautyStrength; }
     int32_t getNativeSceneStrength() { return mNativeSceneStrength; }
     // Request snapshot for the still processor; taken under the request mutex.
     const native_stage_request_t &getNativeStageRequest() { return mNativeStages; }
@@ -953,6 +954,7 @@ private:
     QCamera3DualGeometry::Profile mPairedProfile;
     bool mPairedProfileValid = false;
     int32_t mNativeBeautyStrength = 0;
+    int32_t mNativeFrontBeautyStrength = 0;
     int32_t mNativeSceneStrength = 0;
     native_stage_request_t mNativeStages = {};
     bool mRestoreFrameworkSettings = false;

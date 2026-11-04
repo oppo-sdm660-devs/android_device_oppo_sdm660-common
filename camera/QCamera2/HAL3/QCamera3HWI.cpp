@@ -66,6 +66,7 @@
 #include "QCamera3SensorHdrPolicy.h"
 #include "QCamera3NativeAlgorithms.h"
 #include "QCamera3StockBeauty.h"
+#include "QCamera3FrontBeauty.h"
 #include "QCamera3StockSuperPhoto.h"
 #include "QCamera3StockScene.h"
 #include "QCamera3ExifExtras.h"
@@ -225,18 +226,29 @@ static bool oppoEisSupported(const cam_capability_t *capability)
     return false;
 }
 
-static bool oppoMmsVstabSupported(const cam_capability_t *capability)
-{
-    return capability != NULL &&
-            QCamera3MmsProfile::knownSensor(capability->oppo_sensor_name) &&
-            QCamera3MmsVstab::isAvailable();
-}
-
-static bool oppoVstabPublishEnabled()
+// Stock MMS VStab rewrites the 720p/1080p video geometry and needs per-device
+// calibration. It is opt-in for device A/B runs; the standard session must not be
+// silently replaced by the vendor pipeline (see docs/stabilization-eval.md).
+static bool oppoMmsVstabEnabled()
 {
     char prop[PROPERTY_VALUE_MAX];
-    property_get("persist.vendor.camera.oppo.vstab.publish", prop, "1");
+    property_get("persist.vendor.camera.oppo.vstab.mms", prop, "0");
     return atoi(prop) == 1;
+}
+
+// Standard Camera2 video stabilization is removed from this port (user decision):
+// EIS2 and MMS are kept only as explicit candidates for device A/B or a future
+// OCam extension protocol. Standard sessions leave both disabled.
+static bool oppoEisExtensionEnabled()
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get("persist.vendor.camera.oppo.eis.extension", prop, "0");
+    return atoi(prop) == 1;
+}
+
+static bool oppoVideoStabExtensionEnabled()
+{
+    return oppoEisExtensionEnabled() || oppoMmsVstabEnabled();
 }
 
 static bool oppoAllow4kPublished()
@@ -251,6 +263,21 @@ static bool oppoIs4kVideoSize(const cam_dimension_t &dim)
     const int32_t shortSide = MIN(dim.width, dim.height);
     const int32_t longSide = MAX(dim.width, dim.height);
     return (shortSide == 2160 && (longSide == 3840 || longSide == 4096));
+}
+
+// Front beauty uses the ARC_BS_IMAGE_* core whose face-hint record is not
+// decoded yet, so it stays opt-in until the device run validates the ABI.
+static bool oppoFrontBeautyEnabled()
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get("persist.vendor.camera.oppo.front_beauty.enable", prop, "0");
+    return atoi(prop) == 1;
+}
+
+static bool oppoFrontBeautySupported(const cam_capability_t *capability)
+{
+    return capability != NULL && capability->position == CAM_POSITION_FRONT &&
+            oppoFrontBeautyEnabled() && QCamera3FrontBeauty::isAvailable();
 }
 
 // A/B switch for the automatic request-template AE keys; 0 = fixed behaviour.
@@ -615,14 +642,14 @@ static bool oppoBasicRequestSettings(const camera_metadata_t *settings,
             return false;
         }
     }
+    // Standard video stabilization is removed from this build: accept the
+    // documented values without enabling anything so that a recording request can
+    // never fail because of this optional control. The result reports OFF.
     if (find_camera_metadata_ro_entry(settings,
             ANDROID_CONTROL_VIDEO_STABILIZATION_MODE, &entry) == 0 &&
-            (entry.count != 1 || entry.data.u8[0] > ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_ON ||
-             (entry.data.u8[0] == ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_ON &&
-              !oppoEisSupported(capability) &&
-              !oppoAdvertisesMode(characteristics,
-                      ANDROID_CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES,
-                      ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_ON)))) {
+            (entry.count != 1 ||
+             entry.data.u8[0] >
+                 ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION)) {
         return false;
     }
     if (find_camera_metadata_ro_entry(settings, ANDROID_NOISE_REDUCTION_MODE,
@@ -667,7 +694,6 @@ static bool oppoBasicRequestSettings(const camera_metadata_t *settings,
         QCAMERA3_NATIVE_ALGORITHM_REMOSAIC_ENABLE,
         QCAMERA3_NATIVE_ALGORITHM_DEPTH_QUALITY,
         QCAMERA3_STREAM_DEPTH_STREAM_ENABLED,
-        QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH,
         QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_FEATURES,
         QCAMERA3_NATIVE_ALGORITHM_SINGLE_BOKEH_STRENGTH,
         QCAMERA3_NATIVE_ALGORITHM_SINGLE_BOKEH_SPOT_MODE,
@@ -742,6 +768,12 @@ static bool oppoBasicRequestSettings(const camera_metadata_t *settings,
     if (find_camera_metadata_ro_entry(settings,
             QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH, &entry) == 0 &&
             (entry.count != 1 || entry.data.i32[0] < 0 || entry.data.i32[0] > 100)) return false;
+    // Front beauty strength is only valid where stillMode=FRONT_BEAUTY is announced.
+    if (find_camera_metadata_ro_entry(settings,
+            QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH, &entry) == 0 &&
+            (entry.count != 1 || entry.data.i32[0] < 0 || entry.data.i32[0] > 100 ||
+             !oppoAdvertisesInt32(characteristics, QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_MODES,
+                 OPPO_NATIVE_FRONT_BEAUTY))) return false;
     // Only a native still mode may turn the standard AE off.
     if (nativeMode != OPPO_NATIVE_OFF) {
         if (controlMode == ANDROID_CONTROL_MODE_OFF ||
@@ -1018,6 +1050,8 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
         }
         if (sensorCapability->position == CAM_POSITION_BACK && QCamera3StockBeauty::isAvailable())
             nativeModes.add(OPPO_NATIVE_REAR_BEAUTY);
+        if (oppoFrontBeautySupported(sensorCapability))
+            nativeModes.add(OPPO_NATIVE_FRONT_BEAUTY);
         if (QCamera3StockScene::isAvailable()) nativeModes.add(OPPO_NATIVE_SCENE);
     }
     if (sensorCapability != NULL && sensorCapability->aux_cam_cap != NULL) {
@@ -1122,6 +1156,8 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
                     if (nativeModes[i] == mode) return true;
                 return false;
             };
+            if (modeAdvertised(OPPO_NATIVE_FRONT_BEAUTY))
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH);
             if (singleCamera && (modeAdvertised(OPPO_NATIVE_HDR) ||
                     modeAdvertised(OPPO_NATIVE_LLHDR))) {
                 basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_AUTO_HDR_ENABLE);
@@ -4060,7 +4096,9 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
     }
 
     m_bEisSupported = oppoEisSupported(gCamCapability[mCameraId]);
-    m_bEisEnable = m_bEisSupported;
+    // Standard sessions never enable EIS2; the capability bit is kept for the
+    // extension/A-B gate only (CAM_INTF_PARM_DIS_ENABLE stays DIS_DISABLE).
+    m_bEisEnable = m_bEisSupported && oppoEisExtensionEnabled();
 
     /* stream configurations */
     for (size_t i = 0; i < streamList->num_streams; i++) {
@@ -4433,8 +4471,16 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                 (stream->usage & GRALLOC_USAGE_HW_VIDEO_ENCODER)) ++mmsVideoCount;
     }
     QCamera3MmsGyroSource::Identity mmsGyro = {};
-    const bool mmsCandidate = !isDualCamera() && !isSecureMode() && mmsVideoCount == 1 &&
-            QCamera3MmsVstab::isAvailable() && QCamera3MmsGyroSource::probe(mmsGyro) == 0;
+    // Fixed-lens video: MMS may only bind the rear main sensor of a plain session.
+    // It never serves the aux/paired lens or a logical multi-camera session.
+    QCamera3LogicalMultiCam::Plan videoLogicalPlan;
+    const bool mmsCandidate = oppoMmsVstabEnabled() && !isDualCamera() &&
+            !isSecureMode() && !logicalSessionPlan(videoLogicalPlan) &&
+            gCamCapability[mCameraId] != NULL &&
+            gCamCapability[mCameraId]->position == CAM_POSITION_BACK &&
+            gCamCapability[mCameraId]->aux_cam_cap == NULL &&
+            mmsVideoCount == 1 && QCamera3MmsVstab::isAvailable() &&
+            QCamera3MmsGyroSource::probe(mmsGyro) == 0;
     for (size_t i = 0; i < streamList->num_streams; i++) {
         camera3_stream_t *newStream = streamList->streams[i];
         uint32_t stream_usage = newStream->usage;
@@ -7173,14 +7219,9 @@ bool QCamera3HardwareInterface::isHdrSnapshotRequest(camera3_capture_request *re
     CameraMetadata settings;
     if (request->settings != NULL) settings = request->settings;
     else settings = mLastFrameworkSettings;
-    const int32_t nativeMode = oppoNativeMode(settings);
-    if (nativeMode != OPPO_NATIVE_OFF && nativeMode != OPPO_NATIVE_HDR) return false;
-    if (nativeMode != OPPO_NATIVE_HDR && (!settings.exists(ANDROID_CONTROL_MODE) ||
-            settings.find(ANDROID_CONTROL_MODE).data.u8[0] !=
-                    ANDROID_CONTROL_MODE_USE_SCENE_MODE ||
-            !settings.exists(ANDROID_CONTROL_SCENE_MODE) ||
-            settings.find(ANDROID_CONTROL_SCENE_MODE).data.u8[0] !=
-                    ANDROID_CONTROL_SCENE_MODE_HDR)) return false;
+    // Explicit org.lineageos stillMode only. Standard SCENE_MODE=HDR stays on the
+    // standard flash/3A path; the ArcSoft bracket is not a standard implementation.
+    if (oppoNativeMode(settings) != OPPO_NATIVE_HDR) return false;
     for (uint32_t i = 0; i < request->num_output_buffers; ++i) {
         if (request->output_buffers[i].stream->format == HAL_PIXEL_FORMAT_BLOB)
             return true;
@@ -7195,13 +7236,8 @@ bool QCamera3HardwareInterface::isLowLightSnapshotRequest(camera3_capture_reques
     CameraMetadata settings;
     if (request->settings) settings = request->settings;
     else settings = mLastFrameworkSettings;
-    const int32_t nativeMode = oppoNativeMode(settings);
-    if (nativeMode != OPPO_NATIVE_OFF && nativeMode != OPPO_NATIVE_LLHDR) return false;
-    if (nativeMode != OPPO_NATIVE_LLHDR && (!settings.exists(ANDROID_CONTROL_MODE) ||
-            settings.find(ANDROID_CONTROL_MODE).data.u8[0] != ANDROID_CONTROL_MODE_USE_SCENE_MODE ||
-            !settings.exists(ANDROID_CONTROL_SCENE_MODE) ||
-            settings.find(ANDROID_CONTROL_SCENE_MODE).data.u8[0] != ANDROID_CONTROL_SCENE_MODE_NIGHT))
-        return false;
+    // Explicit org.lineageos stillMode only; standard SCENE_MODE=NIGHT is not mapped.
+    if (oppoNativeMode(settings) != OPPO_NATIVE_LLHDR) return false;
     for (uint32_t i = 0; i < request->num_output_buffers; ++i)
         if (request->output_buffers[i].stream->format == HAL_PIXEL_FORMAT_BLOB) return true;
     return false;
@@ -7214,12 +7250,11 @@ bool QCamera3HardwareInterface::isStillSnapshotRequest(camera3_capture_request *
     CameraMetadata settings;
     if (request->settings) settings = request->settings;
     else settings = mLastFrameworkSettings;
+    // Explicit MFNR/SUPERPHOTO only. Standard NOISE_REDUCTION_MODE=HIGH_QUALITY
+    // must stay a real single-frame ISP mode instead of silently becoming a burst.
     const int32_t nativeMode = oppoNativeMode(settings);
-    if (nativeMode != OPPO_NATIVE_OFF && nativeMode != OPPO_NATIVE_MFNR &&
-            nativeMode != OPPO_NATIVE_SUPERPHOTO) return false;
-    if (nativeMode == OPPO_NATIVE_OFF && (!settings.exists(ANDROID_NOISE_REDUCTION_MODE) ||
-            settings.find(ANDROID_NOISE_REDUCTION_MODE).data.u8[0] !=
-                    ANDROID_NOISE_REDUCTION_MODE_HIGH_QUALITY)) return false;
+    if (nativeMode != OPPO_NATIVE_MFNR && nativeMode != OPPO_NATIVE_SUPERPHOTO)
+        return false;
     if (settings.exists(ANDROID_CONTROL_MODE) &&
             settings.find(ANDROID_CONTROL_MODE).data.u8[0] == ANDROID_CONTROL_MODE_OFF)
         return false;
@@ -7321,6 +7356,12 @@ bool QCamera3HardwareInterface::isDualSnapshotRequest(camera3_capture_request_t 
 {
     if (!request || request->input_buffer || !isDualCamera() || !mPictureChannel || m_bIsVideo)
         return false;
+    CameraMetadata settings;
+    if (request->settings != NULL) settings = request->settings;
+    else settings = mLastFrameworkSettings;
+    // Explicit DUAL_BOKEH only: a plain STILL_CAPTURE/JPEG request stays on the
+    // main sensor instead of being silently turned into a paired bokeh capture.
+    if (oppoNativeMode(settings) != OPPO_NATIVE_DUAL_BOKEH) return false;
     for (uint32_t i = 0; i < request->num_output_buffers; ++i)
         if (request->output_buffers[i].stream->format == HAL_PIXEL_FORMAT_BLOB) return true;
     return false;
@@ -8867,8 +8908,8 @@ int QCamera3HardwareInterface::processCaptureRequest(
                 fwkVideoStabMode = l_meta.find(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE).data.u8[0];
             }
  
-            setEis = m_bEisEnable && fwkVideoStabMode && m_bEisSupportedSize &&
-                    (isTypeVideo >= IS_TYPE_EIS_2_0);
+            setEis = oppoEisExtensionEnabled() && m_bEisEnable && fwkVideoStabMode &&
+                    m_bEisSupportedSize && (isTypeVideo >= IS_TYPE_EIS_2_0);
             int32_t vsMode;
             vsMode = (setEis)? DIS_ENABLE: DIS_DISABLE;
             if (ADD_SET_PARAM_ENTRY_TO_BATCH(params, CAM_INTF_PARM_DIS_ENABLE, vsMode)) {
@@ -9598,7 +9639,10 @@ no_error:
         m_bStopPicChannel = false;
     }
     mNativeDualBindStatus = NO_ERROR;
-    if (isVerifiedPairedSession() && !m_bIsVideo) {
+    // Paired capture is an explicit extension: only stillMode=DUAL_BOKEH binds the
+    // auxiliary sensor. A plain JPEG request keeps the main-sensor single capture.
+    if (isVerifiedPairedSession() && !m_bIsVideo &&
+            oppoNativeMode(meta) == OPPO_NATIVE_DUAL_BOKEH) {
         for (uint32_t i = 0; i < request->num_output_buffers; ++i)
             if (request->output_buffers[i].stream->format == HAL_PIXEL_FORMAT_BLOB) {
                 const auto strength = meta.find(QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH);
@@ -11705,17 +11749,16 @@ QCamera3HardwareInterface::translateFromHalMetadata(
         camMetadata.update(ANDROID_LENS_OPTICAL_STABILIZATION_MODE, &fwk_opticalStab, 1);
     }
 
-    IF_META_AVAILABLE(uint32_t, videoStab, CAM_INTF_META_VIDEO_STAB_MODE, metadata) {
-        uint8_t fwk_videoStab = (uint8_t) *videoStab;
-        LOGD("fwk_videoStab = %d", fwk_videoStab);
-        camMetadata.update(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE, &fwk_videoStab, 1);
-    } else {
-        // Regardless of Video stab supports or not, CTS is expecting the EIS result to be non NULL
-        // and so hardcoding the Video Stab result to OFF mode.
-        uint8_t fwkVideoStabMode = ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF;
-        camMetadata.update(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE, &fwkVideoStabMode, 1);
-        LOGD("EIS result default to OFF mode");
+    // Standard clients always observe OFF; only the explicit extension gates may
+    // surface what the daemon actually ran (device A/B / future OCam protocol).
+    uint8_t fwk_videoStab = ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF;
+    if (oppoVideoStabExtensionEnabled()) {
+        IF_META_AVAILABLE(uint32_t, videoStab, CAM_INTF_META_VIDEO_STAB_MODE, metadata) {
+            fwk_videoStab = (uint8_t) *videoStab;
+            LOGD("fwk_videoStab = %d", fwk_videoStab);
+        }
     }
+    camMetadata.update(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE, &fwk_videoStab, 1);
 
     IF_META_AVAILABLE(uint32_t, noiseRedMode, CAM_INTF_META_NOISE_REDUCTION_MODE, metadata) {
         uint8_t fwk_noiseRedMode = (uint8_t) *noiseRedMode;
@@ -13958,13 +14001,11 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
     staticInfo.update(ANDROID_CONTROL_AE_COMPENSATION_STEP,
                       &exposureCompensationStep, 1);
 
+    // Standard Camera2 video stabilization is not supported by this port: only
+    // OFF is advertised. Values sent by clients are accepted (see request
+    // validation) and executed as OFF; EIS2/MMS remain explicit A/B candidates.
     Vector<uint8_t> availableVstabModes;
     availableVstabModes.add(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF);
-    if (oppoVstabPublishEnabled() &&
-            (oppoEisSupported(gCamCapability[cameraId]) ||
-             oppoMmsVstabSupported(gCamCapability[cameraId]))) {
-        availableVstabModes.add(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_ON);
-    }
     staticInfo.update(ANDROID_CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES,
                       availableVstabModes.array(), availableVstabModes.size());
 
@@ -14239,29 +14280,9 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
                       supported_indexes,
                       cameraId);
 
-    if (supported_scene_modes_cnt < CAM_SCENE_MODE_MAX &&
-            oppoHdrSupported(gCamCapability[cameraId])) {
-        const size_t index = supported_scene_modes_cnt++;
-        avail_scene_modes[index] = ANDROID_CONTROL_SCENE_MODE_HDR;
-        scene_mode_overrides[index * 3] = ANDROID_CONTROL_AE_MODE_ON;
-        scene_mode_overrides[index * 3 + 1] = ANDROID_CONTROL_AWB_MODE_AUTO;
-        scene_mode_overrides[index * 3 + 2] = oppoHdrFocusMode(gCamCapability[cameraId]);
-    }
-
-    if (oppoLowLightSupported(gCamCapability[cameraId])) {
-        size_t index = 0;
-        while (index < supported_scene_modes_cnt &&
-                avail_scene_modes[index] != ANDROID_CONTROL_SCENE_MODE_NIGHT) ++index;
-        if (index == supported_scene_modes_cnt && index < CAM_SCENE_MODE_MAX) {
-            avail_scene_modes[index] = ANDROID_CONTROL_SCENE_MODE_NIGHT;
-            ++supported_scene_modes_cnt;
-        }
-        if (index < supported_scene_modes_cnt) {
-            scene_mode_overrides[index * 3] = ANDROID_CONTROL_AE_MODE_ON;
-            scene_mode_overrides[index * 3 + 1] = ANDROID_CONTROL_AWB_MODE_AUTO;
-            scene_mode_overrides[index * 3 + 2] = oppoHdrFocusMode(gCamCapability[cameraId]);
-        }
-    }
+    // The vendor HDR/NIGHT flows are explicit stillMode extensions now. There is
+    // no standard scene implementation behind them, so they are not announced as
+    // standard scene modes; only the stock capability table is published below.
 
     if (supported_scene_modes_cnt == 0) {
         supported_scene_modes_cnt = 1;
@@ -15486,10 +15507,8 @@ camera_metadata_t* QCamera3HardwareInterface::translateCapabilityToMetadata(int 
     settings.update(ANDROID_REQUEST_TYPE, &requestType, 1);
     int32_t defaultRequestID = 0;
     settings.update(ANDROID_REQUEST_ID, &defaultRequestID, 1);
-    const int32_t nativeOff = OPPO_NATIVE_OFF;
-    const int32_t defaultStrength = isVerifiedPairedSession() ? 50 : 0;
-    settings.update(QCAMERA3_NATIVE_ALGORITHM_MODE, &nativeOff, 1);
-    settings.update(QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH, &defaultStrength, 1);
+    // Standard templates carry no OPPO keys: absent stillMode means OFF and absent
+    // beautyStrength means "not requested" (in particular no default 50 bokeh).
 
     /* OIS disable */
     char ois_prop[PROPERTY_VALUE_MAX];
@@ -15931,6 +15950,9 @@ int QCamera3HardwareInterface::setFrameParameters(
         mNativeStillMode = oppoNativeMode(controls);
         const camera_metadata_entry_t strength = controls.find(QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH);
         mNativeBeautyStrength = strength.count == 1 ? strength.data.i32[0] : 0;
+        const camera_metadata_entry_t frontStrength =
+                controls.find(QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH);
+        mNativeFrontBeautyStrength = frontStrength.count == 1 ? frontStrength.data.i32[0] : 0;
         const auto scene = controls.find(QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH);
         mNativeSceneStrength = scene.count == 1 ? scene.data.i32[0] :
                 (mNativeStillMode == OPPO_NATIVE_SCENE ? 35 : 0);
@@ -16918,7 +16940,9 @@ int QCamera3HardwareInterface::translateToHalMetadata
         const uint8_t requested =
                 frame_settings.find(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE).data.u8[0];
         mMmsRequestedMode = requested;
-        const int32_t videoStabMode = m_bEisEnable &&
+        // Standard path always programs DIS_DISABLE; only the extension gate may
+        // forward a client ON request to the daemon for device A/B.
+        const int32_t videoStabMode = oppoEisExtensionEnabled() && m_bEisEnable &&
                 requested == ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_ON ?
                 DIS_ENABLE : DIS_DISABLE;
         // MCT IS/C2D consume DIS_ENABLE; VIDEO_STAB_MODE alone does not switch it.

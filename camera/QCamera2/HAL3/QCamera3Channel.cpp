@@ -6700,6 +6700,7 @@ int32_t QCamera3PicChannel::queueJpegSetting(uint32_t index, uint32_t frame_numb
     // Captured under HWI's request mutex; these controls never enter the stock ABI.
     settings->native_still_mode = hal_obj->getNativeStillMode();
     settings->native_beauty_strength = hal_obj->getNativeBeautyStrength();
+    settings->native_front_beauty_strength = hal_obj->getNativeFrontBeautyStrength();
     settings->native_scene_strength = hal_obj->getNativeSceneStrength();
     // Captured under the same request mutex; the still path rebuilds its Options.
     settings->native_stages = hal_obj->getNativeStageRequest();

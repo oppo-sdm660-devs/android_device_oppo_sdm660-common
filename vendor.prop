@@ -109,6 +109,23 @@ persist.vendor.camera.expose.aux=1
 persist.vendor.camera.preview.ubwc=0
 persist.vendor.qti.telephony.vt_cam_interface=1
 vidc.enc.dcvs.extra-buff-count=2
+# R11/R11s both list 4K (2160x3840) as a stock rear video candidate; the HAL
+# keeps a single gate for announcing and accepting 4K processed video sizes.
+# Set allow_4k=0 to restore the disabled build behavior (4K hidden and refused).
+persist.vendor.camera.oppo.video.allow_4k=1
+# 4K lives in the daemon video size table; publish video-only sizes so Camera2
+# clients can discover it. Disable this if additional video-only sizes are
+# unwanted on a target (4K then only shows up when it is also a picture size).
+persist.vendor.camera.oppo.video.picture_overlap=1
+# Standard Camera2 video stabilization is removed from this port (ON is accepted
+# but executed and reported as OFF); only an explicit extension gate may re-enable
+# it. These two properties are device A/B / future-extension switches, not user
+# controls; both default to 0 and the code keeps the disabled path.
+# EIS2: only for A/B or a future explicit OCam protocol (CAM_INTF_PARM_DIS_ENABLE).
+persist.vendor.camera.oppo.eis.extension=0
+# MMS (stock OPPO VStab, rear main sensor only): rewrites 720p/1080p geometry and
+# needs /vendor/etc/vstab_configs + BMI160. Never part of a standard session.
+persist.vendor.camera.oppo.vstab.mms=0
 
 # Crypto
 ro.crypto.volume.filenames_mode=aes-256-cts

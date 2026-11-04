@@ -99,6 +99,7 @@ cc_library_shared {
         "QCamera2/HAL3/QCamera3StockScene.cpp",
         "QCamera2/HAL3/QCamera3StillAlgo.cpp",
         "QCamera2/HAL3/QCamera3StockBeauty.cpp",
+        "QCamera2/HAL3/QCamera3FrontBeauty.cpp",
         "QCamera2/HAL3/QCamera3StockSuperPhoto.cpp",
         "QCamera2/HAL3/QCamera3Mem.cpp",
         "QCamera2/HAL3/QCamera3PostProc.cpp",

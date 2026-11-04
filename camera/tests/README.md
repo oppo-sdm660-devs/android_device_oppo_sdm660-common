@@ -1,0 +1,40 @@
+# camera/tests：HAL 移植轮次的宿主行为测试
+
+这些测试**不是** Soong 模块：`camera/Android.bp` 不引用本目录，构建 ROM 时不会编译它们。
+它们用于在无 Android 源码树的开发机上验证 T06 改动中可独立测试的部分。
+
+## 1. 前摄美颜适配器（fake DSO）
+
+```sh
+python3 run_front_beauty_tests.py        # 需要 g++ 支持 -m32
+HOST_SANITIZE=0 python3 run_front_beauty_tests.py   # 无 libasan 32 位时
+```
+
+- `fake_arcsoft_beautyshot.cpp` 编译成 **`libarcsoft_beautyshot.so`**（伪造同名 DSO），
+  被 `QCamera3FrontBeauty.cpp` 以 `dlopen` 加载；脚本用 `LD_LIBRARY_PATH` 指向构建目录。
+- `front_beauty_host_test.cpp` 覆盖：`isAvailable`、`Init/UnInit/SetFeatureLevel/Process`
+  调用序列与次数、7 个有证据 feature id（0xc9/0xec/0xca/0xcb/0xcd/0xcc/0xf0）、
+  强度 0–100 映射、`format=0x605` 与 YV12 三平面布局、NV21↔YV12 转换往返、
+  失败路径（Init/Process/UnInit 错误、descriptor 被篡改、参数非法、取消）不修改原图。
+- 全部用 `-m32` 编译，使 ARM32 指针宽度与 44 字节 ASVLOFFSCREEN 布局与设备一致；
+  默认启用 ASan/UBSan。
+
+**边界**：fake DSO 只证明“适配器按有证据的序列调用、参数与图像布局正确、错误可降级”，
+**不**证明真实 `libarcsoft_beautyshot.so` 的算法行为、face-info 结构或成像效果。
+face-info 结构未定，适配器传 NULL，真机验证前必须保持
+`persist.vendor.camera.oppo.front_beauty.enable=0`（默认）。
+
+## 2. 静态一致性检查
+
+```sh
+python3 hal_static_checks.py
+```
+
+检查本轮成组改动的耦合关系（4K/vstab 属性、C1–C6 标准入口拆分、模板默认值、
+前摄美颜协议/消费者/Android.bp、fake 测试文件可加载），防止只改一侧。grep 级别，
+不是编译替代。
+
+## 3. 真机验证入口
+
+见 `OCam/docs/hal-changes.md` §10 的远程构建/部署/真机命令；本目录不包含任何
+依赖真机或 Android 源码树的测试。

@@ -47,6 +47,7 @@
 #include "QCamera3HdrDenoise.h"
 #include "QCamera3StillAlgo.h"
 #include "QCamera3StockBeauty.h"
+#include "QCamera3FrontBeauty.h"
 #include "QCamera3StockSuperPhoto.h"
 #include "QCamera3StockScene.h"
 #include "QCamera3EisSnapshot.h"
@@ -3319,6 +3320,25 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
             } else beautyStatus = -EINVAL;
         }
         nativeAlgorithmTrace(jpeg_settings, "ARCRLP", beautyStatus,
+                jpeg_settings->frame_number, 1,
+                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
+    }
+    // Front beauty (explicit org.lineageos stillMode=FRONT_BEAUTY only).
+    if (jpeg_settings && jpeg_settings->native_still_mode == OPPO_NATIVE_FRONT_BEAUTY) {
+        QCamera3HdrAlgo::Image image;
+        QCamera3StreamMem *memory = nullptr;
+        int32_t beautyStatus = -ENOTSUP;
+        if (getHdrImage(recvd_frame, image, memory)) {
+            const int32_t strength = jpeg_settings->native_front_beauty_strength;
+            if (strength >= 0 && strength <= 100) {
+                beautyStatus = QCamera3FrontBeauty::process(image, strength);
+                if (beautyStatus == NO_ERROR) {
+                    beautyStatus = memory->cleanCache(main_frame->buf_idx);
+                    if (beautyStatus != NO_ERROR) return beautyStatus;
+                }
+            } else beautyStatus = -EINVAL;
+        }
+        nativeAlgorithmTrace(jpeg_settings, "FrontBeauty", beautyStatus,
                 jpeg_settings->frame_number, 1,
                 static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
     }
