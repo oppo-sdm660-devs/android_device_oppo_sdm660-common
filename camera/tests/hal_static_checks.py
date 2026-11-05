@@ -243,8 +243,14 @@ need(tests / "platform_hwi_host_test.cpp", "FrameCtxOffsets::kImagePtr",
      "platform host test image ptr")
 need(tests / "platform_hwi_host_test.cpp", "readU8(ctx, FrameCtxOffsets::kImageValid)",
      "platform host test valid flag")
-# HDR/LLHDR platform bits are not wired in this ROM: PostProc must only call the
-# original block for SCENE and FRONT_BEAUTY.
+# task-63: only SCES(9)/front beauty(10)/rear beauty(5) are wired to platform.
+# HDR/LLHDR/MFNR/SUPER/bokeh must never enter it.
+params_h_text = read(params_h)
+need(params_h, "kSupportedPlatformMask", "wired platform mask")
+need(params_h, "isPlatformStillMode", "platform mode whitelist")
+need(params_cpp, "isPlatformStillMode(int32_t stillMode)", "platform mode whitelist impl")
+need(platform_hwi, "oppo_platform::isPlatformStillMode(stillMode)", "whitelist enforced")
+need(platform_hwi, "return kSupportedPlatformMask;", "session registers wired bits only")
 post_text = read(post)
 for mode in ("OPPO_NATIVE_HDR", "OPPO_NATIVE_LLHDR", "OPPO_NATIVE_MFNR",
              "OPPO_NATIVE_SUPERPHOTO", "OPPO_NATIVE_DUAL_BOKEH"):
@@ -252,9 +258,23 @@ for mode in ("OPPO_NATIVE_HDR", "OPPO_NATIVE_LLHDR", "OPPO_NATIVE_MFNR",
     if f"processStillFrame(\n                    {mode}" in post_text or \
             f"processStillFrame({mode}" in post_text:
         failures.append(f"QCamera3PostProc.cpp: {mode} must not enter the platform block")
+checks += 3
+if post_text.count("processStillFrame(") != 3:
+    failures.append("QCamera3PostProc.cpp: platform block must be SCENE+FRONT_BEAUTY+REAR_BEAUTY")
+if "OPPO_NATIVE_REAR_BEAUTY, platformFrame" not in post_text:
+    failures.append("QCamera3PostProc.cpp: rear beauty is not wired to platform")
+if '"FaceBeauty"' not in post_text:
+    failures.append("QCamera3PostProc.cpp: original rear-beauty trace name missing")
+# Rear beauty platform-first, StockBeauty only as fallback (no double processing).
+checks += 2
+if "rearHandledByPlatform" not in post_text or "if (!rearHandledByPlatform)" not in post_text:
+    failures.append("QCamera3PostProc.cpp: rear beauty fallback is not exclusive")
+if post_text.count("QCamera3StockBeauty::process") != 1:
+    failures.append("QCamera3PostProc.cpp: stock beauty must run only in the fallback")
+# ZSL past frames must not enter any platform algorithm.
 checks += 1
-if post_text.count("processStillFrame(") != 2:
-    failures.append("QCamera3PostProc.cpp: platform block must stay SCENE+FRONT_BEAUTY only")
+if post_text.count("!jpeg_settings->zsl_snapshot") != 3:
+    failures.append("QCamera3PostProc.cpp: missing ZSL/platform mutual exclusion")
 
 # task-65 build risks: explicit errno include and no memset on ZslFrameState.
 need(hwi, "#include <errno.h>", "errno include for strtoll")

@@ -3302,35 +3302,68 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
     }
 
     if (jpeg_settings && jpeg_settings->native_still_mode == OPPO_NATIVE_REAR_BEAUTY) {
-        QCamera3HdrAlgo::Image image;
-        QCamera3StreamMem *memory = nullptr;
-        int32_t beautyStatus = -ENOTSUP;
-        if (getHdrImage(recvd_frame, image, memory)) {
-            QCamera3StockBeauty::Options options;
-            const int32_t strength = jpeg_settings->native_beauty_strength;
-            if (strength >= 0 && strength <= 100) {
-                options.soften = strength;
-                options.softenSharp = strength;
-                options.skinBright = strength;
-                // Style is an independent stock feature; do not derive it from strength.
-                options.skinStyle = 0;
-                beautyStatus = QCamera3StockBeauty::process(image, options);
-                if (beautyStatus == NO_ERROR) {
-                    beautyStatus = memory->cleanCache(main_frame->buf_idx);
-                    if (beautyStatus != NO_ERROR) return beautyStatus;
+        bool rearHandledByPlatform = false;
+        // Original HAL1 face-beauty block first (same algorithm as HAL1 rear beauty).
+        // ZSL past frames must not enter the platform algorithms.
+        if (!jpeg_settings->zsl_snapshot && QCamera3OppoPlatformHwi::configured() &&
+                QCamera3OppoPlatformHwi::runEnabled()) {
+            QCamera3HdrAlgo::Image platformImage;
+            QCamera3StreamMem *platformMemory = nullptr;
+            int32_t platformStatus = -EOPNOTSUPP;
+            if (getHdrImage(recvd_frame, platformImage, platformMemory)) {
+                QCamera3OppoPlatformFrame platformFrame = {};
+                platformFrame.data = platformImage.data;
+                platformFrame.length = platformImage.length;
+                platformFrame.width = platformImage.width;
+                platformFrame.height = platformImage.height;
+                platformFrame.stride = platformImage.yStride;
+                platformFrame.slice = platformImage.yScanline;
+                platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
+                        OPPO_NATIVE_REAR_BEAUTY, platformFrame);
+                if (platformStatus == NO_ERROR) {
+                    platformStatus = platformMemory->cleanCache(main_frame->buf_idx);
+                    if (platformStatus != NO_ERROR) return platformStatus;
+                    rearHandledByPlatform = true;
                 }
-            } else beautyStatus = -EINVAL;
+            }
+            nativeAlgorithmTrace(jpeg_settings, "FaceBeauty", platformStatus,
+                    jpeg_settings->frame_number, 1,
+                    static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
+                    rearHandledByPlatform ? 1 : 0);
         }
-        nativeAlgorithmTrace(jpeg_settings, "ARCRLP", beautyStatus,
-                jpeg_settings->frame_number, 1,
-                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
-                beautyStatus == NO_ERROR ? 1 : 0);
+        if (!rearHandledByPlatform) {
+            // Self-developed stock beauty fallback; the frame is still delivered.
+            QCamera3HdrAlgo::Image image;
+            QCamera3StreamMem *memory = nullptr;
+            int32_t beautyStatus = -ENOTSUP;
+            if (getHdrImage(recvd_frame, image, memory)) {
+                QCamera3StockBeauty::Options options;
+                const int32_t strength = jpeg_settings->native_beauty_strength;
+                if (strength >= 0 && strength <= 100) {
+                    options.soften = strength;
+                    options.softenSharp = strength;
+                    options.skinBright = strength;
+                    // Style is an independent stock feature; do not derive it from strength.
+                    options.skinStyle = 0;
+                    beautyStatus = QCamera3StockBeauty::process(image, options);
+                    if (beautyStatus == NO_ERROR) {
+                        beautyStatus = memory->cleanCache(main_frame->buf_idx);
+                        if (beautyStatus != NO_ERROR) return beautyStatus;
+                    }
+                } else beautyStatus = -EINVAL;
+            }
+            nativeAlgorithmTrace(jpeg_settings, "ARCRLP", beautyStatus,
+                    jpeg_settings->frame_number, 1,
+                    static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
+                    beautyStatus == NO_ERROR ? 1 : 0);
+        }
     }
     // Front beauty (explicit org.lineageos stillMode=FRONT_BEAUTY only).
     if (jpeg_settings && jpeg_settings->native_still_mode == OPPO_NATIVE_FRONT_BEAUTY) {
         bool frontHandled = false;
         // Original HAL1 path first: the same face-beauty block the stock HAL1 uses.
-        if (QCamera3OppoPlatformHwi::configured() && QCamera3OppoPlatformHwi::runEnabled()) {
+        if (!jpeg_settings->zsl_snapshot && QCamera3OppoPlatformHwi::configured() &&
+                QCamera3OppoPlatformHwi::runEnabled()) {
             QCamera3HdrAlgo::Image platformImage;
             QCamera3StreamMem *platformMemory = nullptr;
             int32_t platformStatus = -EOPNOTSUPP;
@@ -3380,6 +3413,7 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
     // Mode 9: original HAL1 SCES block first, self-developed tuning as fallback.
     bool sceneHandledByPlatform = false;
     if (jpeg_settings && jpeg_settings->native_still_mode == OPPO_NATIVE_SCENE &&
+            !jpeg_settings->zsl_snapshot &&
             QCamera3OppoPlatformHwi::configured() && QCamera3OppoPlatformHwi::runEnabled()) {
         QCamera3HdrAlgo::Image platformImage;
         QCamera3StreamMem *platformMemory = nullptr;

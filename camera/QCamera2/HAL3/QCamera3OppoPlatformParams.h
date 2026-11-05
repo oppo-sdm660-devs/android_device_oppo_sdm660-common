@@ -119,6 +119,13 @@ uint64_t maskForStillMode(int32_t stillMode);
 /* True when every requested bit is one of the reversed single-frame algorithms. */
 bool supportedMask(uint64_t mask);
 
+/* Modes the HAL3 platform path is wired for (RE evidence):
+ * SCES/AI scene (bit9), front beauty (bit8), rear beauty (bit5).
+ * HDR/LLHDR/MFNR/SUPER/bokeh are intentionally excluded. */
+constexpr uint64_t kSupportedPlatformMask =
+        kAlgoVdSces | kAlgoArcFaceBeauty | kAlgoFaceBeauty;
+bool isPlatformStillMode(int32_t stillMode);
+
 /* Stable name for a single algorithm bit, for diagnostics. */
 const char *algorithmName(uint64_t bit);
 

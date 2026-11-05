@@ -13,6 +13,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <initializer_list>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -62,6 +63,17 @@ void testParamsUnit() {
     CHECK(maskForStillMode(0) == 0);
     CHECK(maskForStillMode(6) == 0);
     CHECK(maskForStillMode(11) == 0);
+    // Only SCES(9)/front beauty(10)/rear beauty(5) are wired to platform.
+    CHECK(kSupportedPlatformMask == (kAlgoVdSces | kAlgoArcFaceBeauty | kAlgoFaceBeauty));
+    CHECK(isPlatformStillMode(5));
+    CHECK(isPlatformStillMode(9));
+    CHECK(isPlatformStillMode(10));
+    CHECK(!isPlatformStillMode(1));
+    CHECK(!isPlatformStillMode(2));
+    CHECK(!isPlatformStillMode(3));
+    CHECK(!isPlatformStillMode(4));
+    CHECK(!isPlatformStillMode(7));
+    CHECK(!isPlatformStillMode(0));
     CHECK(supportedMask(kAlgoVdSces));
     CHECK(supportedMask(kAlgoHdr | kAlgoLlhdr));
     CHECK(!supportedMask(0));
@@ -204,15 +216,20 @@ int main(int argc, char **argv) {
     CHECK((stats->processMask & ~kInProcessBackend) == kAlgoArcFaceBeauty);
     CHECK(stats->processParam[ParamOffsets::kIsFront] == 1);
 
-    // 4. updateparameters only for the entries that implement it (superphoto/bokeh)
-    //    and only behind its own gate.
+    // 3b. Rear beauty uses the face-beauty bit; front flag cleared again.
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, frame) == 0);
+    CHECK((stats->processMask & ~kInProcessBackend) == kAlgoFaceBeauty);
+    CHECK(stats->processParam[ParamOffsets::kIsFront] == 1);
+
+    // 4. HDR/LLHDR/MFNR/SUPER/bokeh are not wired: fail closed before the library.
+    const int processBeforeUnwired = stats->processCount;
     CHECK(stats->updateCount == 0);
     host_prop_set("persist.vendor.camera.oppo.platform_hwi.update", "1");
-    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(9, frame) == 0);
+    for (int mode : {1, 2, 3, 4, 7}) {
+        CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(mode, frame) == -EOPNOTSUPP);
+    }
+    CHECK(stats->processCount == processBeforeUnwired);
     CHECK(stats->updateCount == 0);
-    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(4, frame) == 0);
-    CHECK(stats->updateCount == 1);
-    CHECK(stats->updateMask == stats->processMask);
 
     // 5. Algorithm failure is reported, not hidden as success.
     harness.setProcessRc(-EIO);
@@ -220,11 +237,11 @@ int main(int argc, char **argv) {
     CHECK(QCamera3OppoPlatformHwi::get().lastStatus() == -EIO);
     harness.setProcessRc(0);
 
-    // 6. Modes without a reversed single-frame block fail closed (fallback path).
+    // 6. Modes outside the wired set fail closed (fallback path).
     const int processBefore = stats->processCount;
-    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(0, frame) == -EINVAL);
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(0, frame) == -EOPNOTSUPP);
     CHECK(stats->processCount == processBefore);
-    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(6, frame) == -EINVAL);
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(6, frame) == -EOPNOTSUPP);
     CHECK(stats->processCount == processBefore);
 
     // 7. Invalid frame geometry fails before touching the library.

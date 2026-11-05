@@ -142,11 +142,10 @@ bool QCamera3OppoPlatformHwi::runEnabled()
 
 uint64_t QCamera3OppoPlatformHwi::sessionAlgorithmMask()
 {
-    /* The modes the HAL3 integration can request; see QCamera3OppoPlatformParams. */
+    /* Only the modes wired for HAL3; HDR/LLHDR/MFNR/SUPER/bokeh stay out
+     * (RE negative evidence: HDR/LLHDR bits never reach platform on this ROM). */
     using namespace qcamera::oppo_platform;
-    return maskForStillMode(1) | maskForStillMode(2) | maskForStillMode(3) |
-            maskForStillMode(4) | maskForStillMode(5) | maskForStillMode(7) |
-            maskForStillMode(9) | maskForStillMode(10);
+    return kSupportedPlatformMask;
 }
 
 int32_t QCamera3OppoPlatformHwi::lastStatus() const
@@ -423,9 +422,11 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
         return mLastStatus;
     }
     const uint64_t modeMask = oppo_platform::maskForStillMode(stillMode);
-    if (!oppo_platform::supportedMask(modeMask)) {
-        LOGE("oppo hwi: stillMode %d has no reversed single-frame algorithm", stillMode);
-        mLastStatus = -EINVAL;
+    if (!oppo_platform::isPlatformStillMode(stillMode) ||
+            !oppo_platform::supportedMask(modeMask)) {
+        /* Only SCES(9)/front beauty(10)/rear beauty(5) are wired. */
+        LOGE("oppo hwi: stillMode %d is not wired to the platform block", stillMode);
+        mLastStatus = -EOPNOTSUPP;
         return mLastStatus;
     }
     if (frame.data == nullptr || frame.length == 0 ||

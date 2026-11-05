@@ -32,6 +32,12 @@ bool supportedMask(uint64_t mask)
     return algorithms != 0 && (algorithms & ~known) == 0;
 }
 
+bool isPlatformStillMode(int32_t stillMode)
+{
+    const uint64_t mask = maskForStillMode(stillMode);
+    return mask != 0 && (mask & ~kSupportedPlatformMask) == 0;
+}
+
 const char *algorithmName(uint64_t bit)
 {
     switch (bit) {
