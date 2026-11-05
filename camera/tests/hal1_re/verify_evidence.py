@@ -275,6 +275,8 @@ def main(argv):
         batch += mode_mask._checks(stock)
         import snapshot as snapshot_mod
         import face_builder
+        import beauty_params
+        batch += beauty_params._checks(stock, args.vendor_lib_dir)
         batch += face_builder._checks(stock, args.vendor_lib_dir)
         batch += snapshot_mod._checks(stock,
                                       args.vendor_lib_dir if

@@ -45,6 +45,7 @@ llvm-objdump --version                   # 可选，人工核对用
 | `mode_mask.py` | 第二批：OPPO cap mode 枚举与 preview/snapshot 的 mode→mask 选择点 |
 | `snapshot.py` | 第三批：frame ctx==p_buffer_construct_t 布局、scratch buffer 描述符、snapshot mask/调用顺序、标定路径、face 数组命名 |
 | `face_builder.py` | 第四批：param+0x214 face block builder 全解、count=0 行为、美颜/faceInfo 参数推送 |
+| `beauty_params.py` | 第五批：美颜 param 模型路径 seed、强度/模式字段、前摄 arc 映射、SCES 参数、bokeh 默认曲线 |
 | `run_all.sh` | 一次性跑完并收集输出到临时目录 |
 
 第二批证据源（stock dump，只读）：
@@ -78,9 +79,9 @@ cd camera/tests/hal1_re
 ./callgraph.py <vendor>/lib/libcamera_core_hwi.so --callers _Z13llhdr_processPvS_
 
 # 6) 一键验证（CI 友好，退出码 0 = 全部通过）
-./verify_evidence.py && echo "evidence OK"      # 289 断言（含第二批）
+./verify_evidence.py && echo "evidence OK"      # 331 断言（含第二批）
 ./frame_ctx.py --verify && ./face_info.py --verify && ./mode_mask.py --verify \
-  && ./snapshot.py --verify && ./face_builder.py --verify   # 共 122 条分项断言
+  && ./snapshot.py --verify && ./face_builder.py --verify && ./beauty_params.py --verify   # 共 164 条分项断言
 
 # 第二批证据（stock HAL1 builder / face-info / mode→mask；可用 STOCK_HAL1 覆盖路径）
 ./frame_ctx.py ; ./face_info.py ; ./mode_mask.py
