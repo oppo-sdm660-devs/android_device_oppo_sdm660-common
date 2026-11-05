@@ -11,6 +11,8 @@ extern "C" {
 
 #include <cutils/properties.h>
 #include <dlfcn.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
@@ -58,11 +60,30 @@ const size_t kParamPortraitLightMode = 0x10c0;
 const size_t kParamJpegRotation = 0x10c4;
 const size_t kParamOarNeedStop = 0x10e0;
 
-/* Frame ctx offsets. */
-const size_t kFrameCtxWidth = 0x10;
-const size_t kFrameCtxHeight = 0x14;
-const size_t kFrameCtxStride = 0x18;
-const size_t kFrameCtxSlice = 0x1c;
+/* Scratch descriptor required by core facebeauty/imageadjust/superphoto/blurless. */
+const size_t kOppoHwiScratchSize = 0x1000;
+const size_t kOppoHwiScratchAlign = 0x1000;
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
+/* memfd so the algorithm can see the scratch through fd+ptr; -1 when the platform
+ * (or host tests) cannot provide one. The core dereferences the pointer only. */
+int oppoHwiCreateScratchFd(size_t size)
+{
+#if defined(__ANDROID__) && defined(__ANDROID_API__) && (__ANDROID_API__ >= 30)
+    const int fd = memfd_create("oppo_hwi_scratch", MFD_CLOEXEC);
+    if (fd < 0) return -1;
+    if (ftruncate(fd, off_t(size)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+#else
+    (void)size;
+    return -1;
+#endif
+}
 
 bool sOppoHwiCreated = false;
 
@@ -169,10 +190,38 @@ QCamera3OppoPlatformHwi::QCamera3OppoPlatformHwi() :
 QCamera3OppoPlatformHwi::~QCamera3OppoPlatformHwi()
 {
     onCloseCamera();
+    freeScratchLocked();
     if (mParam != nullptr) free(mParam);
     if (mFrameCtx != nullptr) free(mFrameCtx);
     if (mLib != nullptr) dlclose(mLib);
     pthread_mutex_destroy(&mLock);
+}
+
+bool QCamera3OppoPlatformHwi::ensureScratchLocked()
+{
+    if (mScratch != nullptr) return true;
+    void *scratch = nullptr;
+    if (posix_memalign(&scratch, kOppoHwiScratchAlign, kOppoHwiScratchSize) != 0 ||
+            scratch == nullptr) {
+        LOGE("oppo hwi scratch allocation failed");
+        return false;
+    }
+    memset(scratch, 0, kOppoHwiScratchSize);
+    mScratch = scratch;
+    mScratchSize = kOppoHwiScratchSize;
+    mScratchFd = oppoHwiCreateScratchFd(mScratchSize);
+    LOGI("oppo hwi scratch ptr=%p fd=%d size=%zu", mScratch, mScratchFd, mScratchSize);
+    return true;
+}
+
+void QCamera3OppoPlatformHwi::freeScratchLocked()
+{
+    if (mScratchFd >= 0) {
+        close(mScratchFd);
+        mScratchFd = -1;
+    }
+    free(mScratch);
+    mScratch = nullptr;
 }
 
 void QCamera3OppoPlatformHwi::onOpenCamera(int32_t cameraId, bool isFront)
@@ -243,6 +292,10 @@ bool QCamera3OppoPlatformHwi::initializeLocked(
             mUnavailable = true;
             return false;
         }
+    }
+    if (!ensureScratchLocked()) {
+        mUnavailable = true;
+        return false;
     }
 
     /* Stage 1 passes NULL, stage 2 the first frame with real geometry. */
@@ -319,16 +372,23 @@ void QCamera3OppoPlatformHwi::buildPlatformParamLocked(
     oppoHwiPutU32(mParam, kParamOarNeedStop, 0);
 }
 
-/* Only width/height/stride/slice are filled; the rest stays 0 like the stock memset. */
+/* Full minimum safe set: image slot 0 (ptr/geometry/format/valid), image count
+ * and the session scratch descriptor; the unknown tail stays zero. */
 void QCamera3OppoPlatformHwi::buildFrameCtxLocked(
         const QCamera3OppoPlatformFrame &frame)
 {
     if (mFrameCtx == nullptr) return;
-    memset(mFrameCtx, 0, mFrameCtxSize);
-    oppoHwiPutU32(mFrameCtx, kFrameCtxWidth, uint32_t(frame.width));
-    oppoHwiPutU32(mFrameCtx, kFrameCtxHeight, uint32_t(frame.height));
-    oppoHwiPutU32(mFrameCtx, kFrameCtxStride, uint32_t(frame.stride));
-    oppoHwiPutU32(mFrameCtx, kFrameCtxSlice, uint32_t(frame.slice));
+    oppo_platform::Frame params;
+    params.data = frame.data;
+    params.length = frame.length;
+    params.width = frame.width;
+    params.height = frame.height;
+    params.stride = frame.stride;
+    params.slice = frame.slice;
+    params.scratchFd = mScratchFd;
+    params.scratchPtr = mScratch;
+    params.scratchSize = mScratchSize;
+    oppo_platform::buildFrameCtx(mFrameCtx, mFrameCtxSize, params);
 }
 
 void QCamera3OppoPlatformHwi::dumpFrameLocked(
@@ -380,6 +440,13 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
         pthread_mutex_unlock(&mLock);
         return mLastStatus;
     }
+    if (mScratch == nullptr || mScratchSize < oppo_platform::kScratchBytes) {
+        /* Algorithms read ctx+0x2cc without a null check; never run them blind. */
+        LOGE("oppo hwi scratch unavailable; refusing platform path");
+        mLastStatus = -ENOMEM;
+        pthread_mutex_unlock(&mLock);
+        return mLastStatus;
+    }
     oppo_platform::Frame params;
     params.data = frame.data;
     params.length = frame.length;
@@ -389,6 +456,9 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
     params.slice = frame.slice > 0 ? frame.slice : frame.height;
     params.isFront = mIsFront ? 1 : 0;
     params.jpegRotation = 0;
+    params.scratchFd = mScratchFd;
+    params.scratchPtr = mScratch;
+    params.scratchSize = mScratchSize;
     if (!oppo_platform::buildParam(mParam, mParamSize, params) ||
             !oppo_platform::buildFrameCtx(mFrameCtx, mFrameCtxSize, params)) {
         mLastStatus = -EINVAL;

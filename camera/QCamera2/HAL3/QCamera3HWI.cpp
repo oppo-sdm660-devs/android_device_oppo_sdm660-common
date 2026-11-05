@@ -37,6 +37,7 @@
 
 // System dependencies
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11401,7 +11402,7 @@ bool QCamera3HardwareInterface::getNativeTrace(uint32_t internalFrame,
 void QCamera3HardwareInterface::resetOppoZslState()
 {
     Mutex::Autolock lock(mZslStateLock);
-    memset(mZslStates, 0, sizeof(mZslStates));
+    for (size_t i = 0; i < kZslStateSlots; ++i) mZslStates[i] = ZslFrameState();
     mZslStateNext = 0;
     mOppoZslFailFrame = UINT32_MAX;
 }
@@ -11449,7 +11450,7 @@ void QCamera3HardwareInterface::noteZslRequest(uint32_t internalFrame,
     if (slot == nullptr) {
         slot = &mZslStates[mZslStateNext];
         mZslStateNext = (mZslStateNext + 1) % kZslStateSlots;
-        memset(slot, 0, sizeof(*slot));
+        *slot = ZslFrameState();
         slot->frame = internalFrame;
         slot->valid = true;
     }

@@ -67,9 +67,26 @@ void writeU32(uint8_t *base, size_t offset, uint32_t value)
     memcpy(base + offset, &value, sizeof(value));
 }
 
+uint8_t readU8(const uint8_t *base, size_t offset)
+{
+    return base[offset];
+}
+
 void writeU8(uint8_t *base, size_t offset, uint8_t value)
 {
     base[offset] = value;
+}
+
+const void *readPtr(const uint8_t *base, size_t offset)
+{
+    const void *value = nullptr;
+    memcpy(&value, base + offset, sizeof(value));
+    return value;
+}
+
+void writePtr(uint8_t *base, size_t offset, const void *value)
+{
+    memcpy(base + offset, &value, sizeof(value));
 }
 
 bool buildParam(uint8_t *param, size_t size, const Frame &frame)
@@ -96,13 +113,23 @@ bool buildParam(uint8_t *param, size_t size, const Frame &frame)
 bool buildFrameCtx(uint8_t *ctx, size_t size, const Frame &frame)
 {
     if (ctx == nullptr || size < kFrameCtxSize) return false;
+    if (frame.width <= 0 || frame.height <= 0) return false;
     memset(ctx, 0, size);
+    writePtr(ctx, FrameCtxOffsets::kImagePtr, frame.data);
     writeU32(ctx, FrameCtxOffsets::kWidth, uint32_t(frame.width));
     writeU32(ctx, FrameCtxOffsets::kHeight, uint32_t(frame.height));
     writeU32(ctx, FrameCtxOffsets::kStride,
             frame.stride > 0 ? uint32_t(frame.stride) : uint32_t(frame.width));
     writeU32(ctx, FrameCtxOffsets::kSlice,
             frame.slice > 0 ? uint32_t(frame.slice) : uint32_t(frame.height));
+    writeU32(ctx, FrameCtxOffsets::kImageFormat, kFormatYuv420Nv21);
+    writeU8(ctx, FrameCtxOffsets::kImageValid, 1);
+    writeU32(ctx, FrameCtxOffsets::kImageCount, 1);
+    if (frame.scratchPtr != nullptr && frame.scratchSize >= kScratchBytes) {
+        writeU32(ctx, FrameCtxOffsets::kScratchFd, uint32_t(frame.scratchFd));
+        writePtr(ctx, FrameCtxOffsets::kScratchPtr, frame.scratchPtr);
+        writeU32(ctx, FrameCtxOffsets::kScratchSize, uint32_t(frame.scratchSize));
+    }
     return true;
 }
 

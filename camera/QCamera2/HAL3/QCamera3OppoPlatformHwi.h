@@ -83,6 +83,13 @@ private:
     bool mUnavailable;
     uint32_t mFrameCount;
     int32_t mLastStatus = -EOPNOTSUPP;
+    /* Session-level scratch buffer for frame ctx +0x2c8/2cc/2d4 (0x1000 B,
+     * 4 KiB aligned). facebeauty/imageadjust/superphoto/blurless read it. */
+    void *mScratch = nullptr;
+    int32_t mScratchFd = -1;
+    size_t mScratchSize = 0x1000;
+    bool ensureScratchLocked();
+    void freeScratchLocked();
 };
 
 #endif /* QCAMERA3_OPPO_PLATFORM_HWI_H */

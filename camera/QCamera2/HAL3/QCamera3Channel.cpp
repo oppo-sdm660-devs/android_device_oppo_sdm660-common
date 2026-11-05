@@ -7148,6 +7148,7 @@ void QCamera3PicChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
     LOGI("[KPI Perf]: superbuf frame_idx %d",
             recvd_frame->bufs[0]->frame_idx);
 
+    QCamera3HardwareInterface *hal_obj = (QCamera3HardwareInterface *)mUserData;
     uint32_t frameNum;
     bool metaNeedPP = true;
     bool past_frame = false;
@@ -7217,6 +7218,34 @@ void QCamera3PicChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
                     }
                 }
             }
+        }
+    }
+
+    /* Vendor-only ZSL: annotate the selected BLOB past frame (age/status) so the
+     * zslApplied/frameAgeMs/frameNumber/fallbackReason result keys are truthful. */
+    if (hal_obj != NULL && hal_obj->isOppoZslFrame(frameNum)) {
+        int64_t selectedFrame = received_frame_num != UINT32_MAX ?
+                int64_t(received_frame_num) : -1;
+        int64_t sensorTimestampNs = -1;
+        for (uint32_t i = 0; i < recvd_frame->num_bufs; i++) {
+            if (recvd_frame->bufs[i]->stream_type != CAM_STREAM_TYPE_METADATA) continue;
+            metadata_buffer_t *metadata =
+                    (metadata_buffer_t *)recvd_frame->bufs[i]->buffer;
+            IF_META_AVAILABLE(int64_t, sensorTimestamp, CAM_INTF_META_SENSOR_TIMESTAMP,
+                    metadata) {
+                sensorTimestampNs = *sensorTimestamp;
+            }
+        }
+        int64_t ageMs = -1;
+        if (sensorTimestampNs > 0) {
+            const int64_t now = systemTime(SYSTEM_TIME_BOOTTIME);
+            ageMs = (now - sensorTimestampNs) / 1000000LL;
+            if (ageMs < 0) ageMs = 0;
+        }
+        if (selectedFrame >= 0 && ageMs >= 0) {
+            hal_obj->noteZslSelection(frameNum, selectedFrame, ageMs);
+        } else {
+            hal_obj->noteZslError(frameNum, QCamera3ZslPolicy::kFallbackNoFrame);
         }
     }
 

@@ -75,11 +75,26 @@ struct ParamOffsets {
 };
 
 struct FrameCtxOffsets {
+    /* Image slot 0 (p_buffer_construct_t, 0x40 bytes per slot). */
+    static constexpr size_t kImagePtr = 0x00;      /* void*: NV21 buffer */
     static constexpr size_t kWidth = 0x10;
     static constexpr size_t kHeight = 0x14;
     static constexpr size_t kStride = 0x18;
     static constexpr size_t kSlice = 0x1C;
+    static constexpr size_t kImageFormat = 0x30;   /* u32 cam_format_t */
+    static constexpr size_t kImageValid = 0x38;    /* u8 valid/primary */
+    static constexpr size_t kImageCount = 0x280;   /* u32 image count */
+    /* Scratch descriptor; core facebeauty/imageadjust/superphoto/blurless read
+     * +0x2cc without a null check. */
+    static constexpr size_t kScratchFd = 0x2C8;    /* u32 */
+    static constexpr size_t kScratchPtr = 0x2CC;   /* void* */
+    static constexpr size_t kScratchSize = 0x2D4;  /* u32 */
 };
+
+/* cam_format_t CAM_FORMAT_YUV_420_NV21 (cam_types.h): HAL3 hands NV21 frames. */
+constexpr uint32_t kFormatYuv420Nv21 = 2;
+/* HAL1 allocates 0x1000 bytes for the HWI scratch (0x400 for bokeh). */
+constexpr size_t kScratchBytes = 0x1000;
 
 /* One NV21 snapshot frame, as handed to the platform algorithm block. */
 struct Frame {
@@ -91,6 +106,10 @@ struct Frame {
     int32_t slice = 0;
     int32_t isFront = 0;
     int32_t jpegRotation = 0;
+    /* Session-level scratch descriptor; -1/null/0 leaves ctx+0x2c8/2cc/2d4 zero. */
+    int32_t scratchFd = -1;
+    void *scratchPtr = nullptr;
+    size_t scratchSize = 0;
 };
 
 /* Explicit org.lineageos stillMode -> original algorithm bit. A zero result means
@@ -106,12 +125,15 @@ const char *algorithmName(uint64_t bit);
 /* Zero-fill and fill the geometry/flags of one param_platform_t block. */
 bool buildParam(uint8_t *param, size_t size, const Frame &frame);
 
-/* Zero-fill and fill the geometry of one platform frame context block. */
+/* Zero-fill and fill image slot 0/scratch of one platform frame context block. */
 bool buildFrameCtx(uint8_t *ctx, size_t size, const Frame &frame);
 
 uint32_t readU32(const uint8_t *base, size_t offset);
 void writeU32(uint8_t *base, size_t offset, uint32_t value);
+uint8_t readU8(const uint8_t *base, size_t offset);
 void writeU8(uint8_t *base, size_t offset, uint8_t value);
+const void *readPtr(const uint8_t *base, size_t offset);
+void writePtr(uint8_t *base, size_t offset, const void *value);
 
 }  // namespace oppo_platform
 }  // namespace qcamera

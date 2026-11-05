@@ -73,7 +73,11 @@ void testParamsUnit() {
 
     uint8_t param[qcamera::oppo_platform::kParamSize] = {};
     uint8_t ctx[qcamera::oppo_platform::kFrameCtxSize] = {};
+    uint8_t pixels[100 * 50 * 3 / 2] = {};
+    uint8_t scratch[qcamera::oppo_platform::kScratchBytes] = {};
     Frame frame;
+    frame.data = pixels;
+    frame.length = sizeof(pixels);
     frame.width = 100;
     frame.height = 50;
     frame.stride = 128;
@@ -93,6 +97,21 @@ void testParamsUnit() {
     CHECK(readU32(ctx, FrameCtxOffsets::kHeight) == 50);
     CHECK(readU32(ctx, FrameCtxOffsets::kStride) == 128);
     CHECK(readU32(ctx, FrameCtxOffsets::kSlice) == 64);
+    CHECK(readPtr(ctx, FrameCtxOffsets::kImagePtr) == pixels);
+    CHECK(readU32(ctx, FrameCtxOffsets::kImageFormat) == kFormatYuv420Nv21);
+    CHECK(readU8(ctx, FrameCtxOffsets::kImageValid) == 1);
+    CHECK(readU32(ctx, FrameCtxOffsets::kImageCount) == 1);
+    // No scratch -> the three descriptor fields stay zero.
+    CHECK(readU32(ctx, FrameCtxOffsets::kScratchFd) == 0);
+    CHECK(readPtr(ctx, FrameCtxOffsets::kScratchPtr) == nullptr);
+    CHECK(readU32(ctx, FrameCtxOffsets::kScratchSize) == 0);
+    frame.scratchFd = 7;
+    frame.scratchPtr = scratch;
+    frame.scratchSize = sizeof(scratch);
+    CHECK(buildFrameCtx(ctx, sizeof(ctx), frame));
+    CHECK(readU32(ctx, FrameCtxOffsets::kScratchFd) == 7);
+    CHECK(readPtr(ctx, FrameCtxOffsets::kScratchPtr) == scratch);
+    CHECK(readU32(ctx, FrameCtxOffsets::kScratchSize) == sizeof(scratch));
     // Fail closed on bad geometry or a too-small block.
     Frame bad = frame;
     bad.width = 0;
@@ -169,6 +188,15 @@ int main(int argc, char **argv) {
     CHECK(readU32(stats->frameCtx, FrameCtxOffsets::kHeight) == 50);
     CHECK(readU32(stats->frameCtx, FrameCtxOffsets::kStride) == 128);
     CHECK(readU32(stats->frameCtx, FrameCtxOffsets::kSlice) == 64);
+    CHECK(readPtr(stats->frameCtx, FrameCtxOffsets::kImagePtr) == frame.data);
+    CHECK(readU32(stats->frameCtx, FrameCtxOffsets::kImageFormat) == kFormatYuv420Nv21);
+    CHECK(readU8(stats->frameCtx, FrameCtxOffsets::kImageValid) == 1);
+    CHECK(readU32(stats->frameCtx, FrameCtxOffsets::kImageCount) == 1);
+    // Scratch is allocated by the HWI (session-level) and never left NULL.
+    CHECK(readPtr(stats->frameCtx, FrameCtxOffsets::kScratchPtr) != nullptr);
+    CHECK(readU32(stats->frameCtx, FrameCtxOffsets::kScratchSize) ==
+            qcamera::oppo_platform::kScratchBytes);
+    CHECK(readU32(stats->frameCtx, FrameCtxOffsets::kScratchFd) == 0xFFFFFFFFu);
 
     // 3. Front beauty uses the ARC face-beauty bit and the front flag.
     QCamera3OppoPlatformHwi::get().onOpenCamera(1, true);

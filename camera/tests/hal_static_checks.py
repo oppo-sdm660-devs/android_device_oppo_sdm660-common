@@ -212,6 +212,106 @@ need(HAL3 / "QCamera3VendorTags.cpp", '"fallbackReason"', "zsl fallback reason t
 need(CAMERA / "Android.bp", "QCamera3ZslPolicy.cpp", "policy module in HAL")
 need(tests / "zsl_policy_test.cpp", "kFallbackAge", "zsl policy host test")
 
+# task-65 build-risk audit: platform scratch (frame ctx +0x2c8/2cc/2d4) and the
+# RE third batch constraints (HDR/LLHDR must not be routed to the platform block).
+params_h = HAL3 / "QCamera3OppoPlatformParams.h"
+params_cpp = HAL3 / "QCamera3OppoPlatformParams.cpp"
+platform_hwi_h = HAL3 / "QCamera3OppoPlatformHwi.h"
+for text, note in (
+        ("kImagePtr = 0x00", "ctx image ptr"),
+        ("kImageFormat = 0x30", "ctx image format"),
+        ("kImageValid = 0x38", "ctx image valid flag"),
+        ("kImageCount = 0x280", "ctx image count"),
+        ("kScratchFd = 0x2C8", "ctx scratch fd"),
+        ("kScratchPtr = 0x2CC", "ctx scratch ptr"),
+        ("kScratchSize = 0x2D4", "ctx scratch size"),
+        ("kFormatYuv420Nv21 = 2", "NV21 cam_format"),
+        ("kScratchBytes = 0x1000", "scratch size")):
+    need(params_h, text, note)
+need(params_cpp, "FrameCtxOffsets::kImageCount, 1", "ctx image count filled")
+need(params_cpp, "FrameCtxOffsets::kScratchPtr", "ctx scratch ptr filled")
+need(platform_hwi, "ensureScratchLocked", "scratch allocation")
+need(platform_hwi, "posix_memalign(&scratch, kOppoHwiScratchAlign", "aligned scratch")
+need(platform_hwi, "memfd_create(\"oppo_hwi_scratch\"", "scratch memfd")
+need(platform_hwi, "freeScratchLocked", "scratch release")
+need(platform_hwi, "refusing platform path", "no-scratch fail closed")
+need(platform_hwi, "oppo_platform::buildFrameCtx(mFrameCtx", "probe ctx uses full layout")
+need(platform_hwi_h, "mScratch = nullptr", "scratch members")
+need(tests / "platform_hwi_host_test.cpp", "FrameCtxOffsets::kScratchPtr",
+     "platform host test scratch fields")
+need(tests / "platform_hwi_host_test.cpp", "FrameCtxOffsets::kImagePtr",
+     "platform host test image ptr")
+need(tests / "platform_hwi_host_test.cpp", "readU8(ctx, FrameCtxOffsets::kImageValid)",
+     "platform host test valid flag")
+# HDR/LLHDR platform bits are not wired in this ROM: PostProc must only call the
+# original block for SCENE and FRONT_BEAUTY.
+post_text = read(post)
+for mode in ("OPPO_NATIVE_HDR", "OPPO_NATIVE_LLHDR", "OPPO_NATIVE_MFNR",
+             "OPPO_NATIVE_SUPERPHOTO", "OPPO_NATIVE_DUAL_BOKEH"):
+    checks += 1
+    if f"processStillFrame(\n                    {mode}" in post_text or \
+            f"processStillFrame({mode}" in post_text:
+        failures.append(f"QCamera3PostProc.cpp: {mode} must not enter the platform block")
+checks += 1
+if post_text.count("processStillFrame(") != 2:
+    failures.append("QCamera3PostProc.cpp: platform block must stay SCENE+FRONT_BEAUTY only")
+
+# task-65 build risks: explicit errno include and no memset on ZslFrameState.
+need(hwi, "#include <errno.h>", "errno include for strtoll")
+absent(hwi, "memset(mZslStates", "class-memaccess on non-trivial state")
+need(hwi, "for (size_t i = 0; i < kZslStateSlots; ++i) mZslStates[i] = ZslFrameState();",
+     "state reset by value assignment")
+need(hwih, "QCamera3ZslPolicy.h", "zsl policy include")
+need(policy_h, "kDefaultMaxAgeMs = 120", "zsl default age 120ms")
+
+# BLOB ZSL success annotation must live in QCamera3PicChannel::ZSLChannelCb, not
+# only in the (vendor YUV ZSL) QCamera3YUVChannel callback.
+channel_text = read(channel)
+pic_start = channel_text.find("void QCamera3PicChannel::ZSLChannelCb(")
+yuv_start = channel_text.find("void QCamera3YUVChannel::ZSLChannelCb(")
+if pic_start < 0:
+    failures.append("QCamera3Channel.cpp: missing QCamera3PicChannel::ZSLChannelCb")
+else:
+    pic_end = channel_text.find("\n}\n", pic_start)
+    pic_body = channel_text[pic_start:pic_end]
+    checks += 2
+    if "isOppoZslFrame" not in pic_body or "noteZslSelection" not in pic_body:
+        failures.append("QCamera3PicChannel::ZSLChannelCb: missing success annotation")
+    if "CAM_INTF_META_SENSOR_TIMESTAMP" not in pic_body:
+        failures.append("QCamera3PicChannel::ZSLChannelCb: missing past-frame timestamp")
+checks += 1
+if yuv_start < 0 or yuv_start > pic_start:
+    failures.append("QCamera3Channel.cpp: YUV ZSL callback ordering changed unexpectedly")
+
+# Vendor tag append integrity: section count, tag count/types, no reordering.
+vt_h = read(HAL3 / "QCamera3VendorTags.h")
+vt_c = read(HAL3 / "QCamera3VendorTags.cpp")
+import re as _re
+section_body = _re.search(r"enum qcamera3_ext_section \{(.*?)\n\};", vt_h, _re.S)
+zsl_tags = _re.search(r"QCAMERA3_ZSL_ENABLE[^\n]*\n(.*?)\n\s*QCAMERA3_ZSL_END", vt_h, _re.S)
+zsl_info = _re.search(r"qcamera3_zsl\[[^\]]*\] = \{(.*?)\n\};", vt_c, _re.S)
+checks += 4
+if section_body is None:
+    failures.append("QCamera3VendorTags.h: section enum not found")
+elif "QCAMERA3_ZSL,\n    QCAMERA3_SECTIONS_END," not in section_body.group(1):
+    failures.append("QCamera3VendorTags.h: ZSL is not the last appended section")
+if zsl_tags is None:
+    failures.append("QCamera3VendorTags.h: ZSL tag enum not found")
+elif len(_re.findall(r"QCAMERA3_ZSL_", zsl_tags.group(1))) != 5:
+    failures.append("QCamera3VendorTags.h: ZSL tag enum must add 5 tags after ENABLE")
+if zsl_info is None:
+    failures.append("QCamera3VendorTags.cpp: qcamera3_zsl tag_info not found")
+else:
+    if len(_re.findall(r'\{ "\w+", TYPE_', zsl_info.group(1))) != 6:
+        failures.append("QCamera3VendorTags.cpp: qcamera3_zsl must have 6 entries")
+for entry in ('{ "zslApplied", TYPE_BYTE }', '{ "frameNumber", TYPE_INT64 }',
+              '{ "frameAgeMs", TYPE_INT32 }', '{ "fallbackReason", TYPE_INT32 }'):
+    need(HAL3 / "QCamera3VendorTags.cpp", entry, "zsl result tag type")
+for tag in ("QCAMERA3_ZSL_ENABLE", "QCAMERA3_ZSL_MAX_AGE_MS", "QCAMERA3_ZSL_APPLIED",
+            "QCAMERA3_ZSL_FRAME_AGE_MS", "QCAMERA3_ZSL_FRAME_NUMBER",
+            "QCAMERA3_ZSL_FALLBACK_REASON"):
+    need(HAL3 / "QCamera3VendorTags.cpp", f"(uint32_t){tag}", "zsl tag registration")
+
 # Tests exist and are Python-parseable.
 for name in ("run_front_beauty_tests.py", "run_auto_capture_tests.py",
              "run_platform_hwi_tests.py", "run_zsl_policy_tests.py",
