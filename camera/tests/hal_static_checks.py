@@ -351,6 +351,15 @@ need(platform_hwi_h, "beautyParamsReady(int32_t stillMode)",
 need(platform_hwi_h, "mBeautyModelRear", "rear beauty model path")
 need(platform_hwi, "oppoHwiResolveModelPath", "beauty model stat resolution")
 need(platform_hwi, "kOppoHwiBeautyModelProp", "beauty model property override")
+need(platform_hwi, '{"/etc/camera/gasryuv.model", "etc-file"}',
+     "task-79 first /etc candidate")
+need(platform_hwi, '{"/system/etc/camera/gasryuv.model", "system-file"}',
+     "task-79 /system file fallback")
+need(platform_hwi, '{"/system/etc/camera", "system-dir"}', "task-79 /system dir fallback")
+need(platform_hwi, '{"/vendor/etc/camera", "vendor-dir"}', "task-79 vendor dir fallback")
+need(platform_hwi, "oppoHwiPathIsDirectory", "model path dir detection")
+need(platform_hwi, "oppo hwi beauty model rear=%s (source=%s%s)",
+     "model path source log")
 need(platform_hwi, "beauty model path unavailable", "beauty fail-closed path")
 need(platform_hwi, "params.beauty.enabled = true", "beauty params constructed")
 need(platform_hwi, "params.beauty.strength = frame.beautyStrength",

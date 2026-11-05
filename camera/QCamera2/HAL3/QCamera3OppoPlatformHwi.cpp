@@ -12,6 +12,7 @@ extern "C" {
 #include <cutils/properties.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -53,12 +54,22 @@ const char *const kOppoHwiFaceInfoModeProp =
         "persist.vendor.camera.oppo.platform_hwi.face_info_mode";
 const char *const kOppoHwiScesParamProp =
         "persist.vendor.camera.oppo.platform_hwi.sces_param";
-const char *const kOppoHwiBeautyModelRearCandidates[] = {
-    "/etc/camera", "/etc/camera/skinSeg.model", "/etc/camera/gasryuv.model",
-    "/etc/camera/faceTpl0.rgb32", "/data/vendor/camera",
+/* task-79: core hardcodes /etc/camera paths; /etc is system/etc on stock (HAL1
+ * uses it directly). Prefix with the actual file first, then the /system path,
+ * then diagnostic fallbacks. The source tag is logged for real-device A/B. */
+struct OppoBeautyModelCandidate {
+    const char *path;
+    const char *source;
 };
-const char *const kOppoHwiBeautyModelFrontCandidates[] = {
-    "/vendor/lib/libarcsoft_beautyshot_lite_image.so", "/etc/camera",
+const OppoBeautyModelCandidate kOppoHwiBeautyModelCandidates[] = {
+    {"/etc/camera/gasryuv.model", "etc-file"},
+    {"/etc/camera/Charming.cng", "etc-file"},
+    {"/etc/camera/skinSeg.model", "etc-file"},
+    {"/etc/camera/faceTpl0.rgb32", "etc-file"},
+    {"/system/etc/camera/gasryuv.model", "system-file"},
+    {"/system/etc/camera", "system-dir"},
+    {"/vendor/etc/camera", "vendor-dir"},
+    {"/data/vendor/camera", "data-dir"},
 };
 const char *const kOppoHwiDumpDir = "/data/vendor/camera";
 const char *const kOppoHwiDefaultPath = "/vendor/lib/liboppo_platform_hwi.so";
@@ -174,21 +185,41 @@ int32_t oppoHwiPropInt(const char *name, int32_t defaultValue)
 
 /* Property override wins (existence still required); otherwise first candidate
  * that exists on this device. Empty result means "do not register beauty". */
-bool oppoHwiResolveModelPath(const char *propName, const char *const *candidates,
-        size_t candidateCount, char *out, size_t outSize)
+bool oppoHwiPathIsDirectory(const char *path)
 {
+    struct stat st = {};
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+/* Property override wins (must be readable); otherwise the first existing
+ * candidate. Reports the selected source tag and whether it is a directory so
+ * the real-device log can tell file vs dir semantics apart. */
+bool oppoHwiResolveModelPath(const char *propName, char *out, size_t outSize,
+        const char **sourceOut, bool *dirOut)
+{
+    *sourceOut = "none";
+    *dirOut = false;
     char prop[PROPERTY_VALUE_MAX] = {};
     property_get(propName, prop, "");
     if (prop[0] != '\0') {
-        if (access(prop, R_OK) != 0) return false;
+        if (access(prop, R_OK) != 0) {
+            LOGW("oppo hwi beauty model prop not readable: %s=%s", propName, prop);
+            return false;
+        }
         snprintf(out, outSize, "%s", prop);
+        *sourceOut = "prop";
+        *dirOut = oppoHwiPathIsDirectory(prop);
         return true;
     }
-    for (size_t i = 0; i < candidateCount; ++i) {
-        if (candidates[i] != nullptr && access(candidates[i], R_OK) == 0) {
-            snprintf(out, outSize, "%s", candidates[i]);
-            return true;
-        }
+    for (size_t i = 0; i < sizeof(kOppoHwiBeautyModelCandidates) /
+            sizeof(kOppoHwiBeautyModelCandidates[0]); ++i) {
+        const OppoBeautyModelCandidate &candidate = kOppoHwiBeautyModelCandidates[i];
+        if (access(candidate.path, R_OK) != 0) continue;
+        snprintf(out, outSize, "%s", candidate.path);
+        *sourceOut = candidate.source;
+        *dirOut = oppoHwiPathIsDirectory(candidate.path) ||
+                strstr(candidate.source, "-dir") != nullptr;
+        return true;
     }
     return false;
 }
@@ -230,16 +261,14 @@ void QCamera3OppoPlatformHwi::resolveBeautyParamsLocked()
 {
     memset(mBeautyModelRear, 0, sizeof(mBeautyModelRear));
     memset(mBeautyModelFront, 0, sizeof(mBeautyModelFront));
+    const char *rearSource = "none";
+    const char *frontSource = "none";
+    bool rearDir = false;
+    bool frontDir = false;
     const bool rear = oppoHwiResolveModelPath(kOppoHwiBeautyModelProp,
-            kOppoHwiBeautyModelRearCandidates,
-            sizeof(kOppoHwiBeautyModelRearCandidates) /
-                    sizeof(kOppoHwiBeautyModelRearCandidates[0]),
-            mBeautyModelRear, sizeof(mBeautyModelRear));
+            mBeautyModelRear, sizeof(mBeautyModelRear), &rearSource, &rearDir);
     const bool front = oppoHwiResolveModelPath(kOppoHwiBeautyModelFrontProp,
-            kOppoHwiBeautyModelFrontCandidates,
-            sizeof(kOppoHwiBeautyModelFrontCandidates) /
-                    sizeof(kOppoHwiBeautyModelFrontCandidates[0]),
-            mBeautyModelFront, sizeof(mBeautyModelFront));
+            mBeautyModelFront, sizeof(mBeautyModelFront), &frontSource, &frontDir);
     mBeautyParam24 = oppoHwiPropInt(kOppoHwiBeautyParam24Prop, 0);
     mBeautyThreshold1 = oppoHwiPropInt("persist.vendor.camera.oppo.platform_hwi.beauty_threshold1", 0);
     mBeautyThreshold2 = oppoHwiPropInt("persist.vendor.camera.oppo.platform_hwi.beauty_threshold2", 0);
@@ -251,8 +280,13 @@ void QCamera3OppoPlatformHwi::resolveBeautyParamsLocked()
     property_get(kOppoHwiScesParamProp, scesProp, "");
     mScesParamOverrideValid = scesProp[0] != '\0';
     mScesParam = mScesParamOverrideValid ? atoi(scesProp) : 0;
-    LOGI("oppo hwi beauty model rear=%s front=%s",
-            rear ? mBeautyModelRear : "(none)", front ? mBeautyModelFront : "(none)");
+    char rearSuffix[8] = "";
+    char frontSuffix[8] = "";
+    if (rearDir && strstr(rearSource, "-dir") == nullptr) snprintf(rearSuffix, sizeof(rearSuffix), ",dir");
+    if (frontDir && strstr(frontSource, "-dir") == nullptr) snprintf(frontSuffix, sizeof(frontSuffix), ",dir");
+    LOGI("oppo hwi beauty model rear=%s (source=%s%s) front=%s (source=%s%s)",
+            rear ? mBeautyModelRear : "(none)", rearSource, rearSuffix,
+            front ? mBeautyModelFront : "(none)", frontSource, frontSuffix);
 }
 
 void QCamera3OppoPlatformHwi::setFaceInfo(uint32_t frameNumber,

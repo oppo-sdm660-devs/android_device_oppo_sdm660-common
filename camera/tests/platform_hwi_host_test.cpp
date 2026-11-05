@@ -16,6 +16,9 @@
 #include <initializer_list>
 #include <stdlib.h>
 #include <unistd.h>
+
+extern "C" void host_fs_set_exists(const char *path, bool exists);
+extern "C" void host_fs_clear_all(void);
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -381,6 +384,48 @@ int main(int argc, char **argv) {
     QCamera3OppoPlatformHwi::get().onOpenCamera(0, false);
     CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(9, scene) == 0);
     CHECK(readU32(stats->processParam, ParamOffsets::kScesParam) == 42);
+    // 3e. Model path candidates: /etc file > /system file > /system dir > none.
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.beauty_model", "");
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.beauty_model_front", "");
+    host_fs_clear_all();
+    host_fs_set_exists("/system/etc/camera/gasryuv.model", true);
+    QCamera3OppoPlatformHwi::get().onOpenCamera(0, false);
+    CHECK(QCamera3OppoPlatformHwi::get().beautyParamsReady(5));
+    QCamera3OppoPlatformFrame modelFrame = frame;
+    modelFrame.beautyStrength = 10;
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, modelFrame) == 0);
+    CHECK(strcmp(reinterpret_cast<const char *>(stats->processParam) +
+            ParamOffsets::kBeautyModelPath, "/system/etc/camera/gasryuv.model") == 0);
+    host_fs_set_exists("/etc/camera/gasryuv.model", true);
+    QCamera3OppoPlatformHwi::get().onOpenCamera(0, false);
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, modelFrame) == 0);
+    CHECK(strcmp(reinterpret_cast<const char *>(stats->processParam) +
+            ParamOffsets::kBeautyModelPath, "/etc/camera/gasryuv.model") == 0);
+    host_fs_clear_all();
+    host_fs_set_exists("/system/etc/camera", true);
+    QCamera3OppoPlatformHwi::get().onOpenCamera(0, false);
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, modelFrame) == 0);
+    CHECK(strcmp(reinterpret_cast<const char *>(stats->processParam) +
+            ParamOffsets::kBeautyModelPath, "/system/etc/camera") == 0);
+    host_fs_clear_all();
+    QCamera3OppoPlatformHwi::get().onOpenCamera(0, false);
+    CHECK(!QCamera3OppoPlatformHwi::get().beautyParamsReady(5));
+    // Property override still wins when both it and a candidate exist.
+    host_fs_set_exists("/etc/camera/gasryuv.model", true);
+    char propModel[] = "/tmp/oppo_beauty_prop_XXXXXX";
+    int propFd = mkstemp(propModel);
+    CHECK(propFd >= 0);
+    if (propFd >= 0) close(propFd);
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.beauty_model", propModel);
+    QCamera3OppoPlatformHwi::get().onOpenCamera(0, false);
+    CHECK(QCamera3OppoPlatformHwi::get().beautyParamsReady(5));
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, modelFrame) == 0);
+    CHECK(strcmp(reinterpret_cast<const char *>(stats->processParam) +
+            ParamOffsets::kBeautyModelPath, propModel) == 0);
+    unlink(propModel);
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.beauty_model", "");
+    host_fs_clear_all();
+
     // 4. HDR/LLHDR/MFNR/SUPER/bokeh are not wired: fail closed before the library.
     const int processBeforeUnwired = stats->processCount;
     CHECK(stats->updateCount == 0);

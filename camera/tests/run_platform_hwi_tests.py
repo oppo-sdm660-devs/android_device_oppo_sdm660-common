@@ -37,6 +37,7 @@ def main():
              "-I", HERE, "-I", HERE / "host_stubs",
              HERE / "platform_hwi_host_test.cpp",
              HERE / "host_stubs" / "properties_stub.cpp",
+             HERE / "host_stubs" / "fs_stub.cpp",
              HAL3 / "QCamera3OppoPlatformHwi.cpp",
              HAL3 / "QCamera3OppoPlatformParams.cpp",
              "-ldl", "-o", test]
