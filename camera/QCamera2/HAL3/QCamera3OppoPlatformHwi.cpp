@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "QCamera3OppoPlatformHwi.h"
+#include "QCamera3OppoPlatformParams.h"
+
+namespace oppo_platform = qcamera::oppo_platform;
 
 /* mm_camera_dbg.h lacks its own extern "C" block; the symbol has C linkage. */
 extern "C" {
@@ -27,6 +30,9 @@ const char *const kOppoHwiProcessProp =
 const char *const kOppoHwiMaskProp = "persist.vendor.camera.oppo.platform_hwi.mask";
 const char *const kOppoHwiPathProp = "persist.vendor.camera.oppo.platform_hwi.path";
 const char *const kOppoHwiDumpProp = "persist.vendor.camera.oppo.platform_hwi.dump";
+const char *const kOppoHwiCallbackProp = "persist.vendor.camera.oppo.platform_hwi.callback";
+const char *const kOppoHwiRunProp = "persist.vendor.camera.oppo.platform_hwi.run";
+const char *const kOppoHwiUpdateProp = "persist.vendor.camera.oppo.platform_hwi.update";
 const char *const kOppoHwiDumpDir = "/data/vendor/camera";
 const char *const kOppoHwiDefaultPath = "/vendor/lib/liboppo_platform_hwi.so";
 /* HDR = bit7, LLHDR = bit14; the runtime mask stays overridable. */
@@ -59,6 +65,18 @@ const size_t kFrameCtxStride = 0x18;
 const size_t kFrameCtxSlice = 0x1c;
 
 bool sOppoHwiCreated = false;
+
+/* notify/data channels of the platform layer; the payload layouts are not
+ * reversed, so the HAL only logs the callback identity for now. */
+void oppoHwiNotifyCallback(long long mask, int algo, int status)
+{
+    LOGI("oppo hwi notify mask=0x%llx algo=%d status=%d", mask, algo, status);
+}
+
+void oppoHwiDataCallback(long long mask, const void *data, int size)
+{
+    LOGI("oppo hwi data mask=0x%llx data=%p size=%d", mask, data, size);
+}
 
 bool oppoHwiPropEnabled(const char *name)
 {
@@ -94,6 +112,25 @@ bool QCamera3OppoPlatformHwi::configured()
 {
     return oppoHwiPropEnabled(kOppoHwiProbeProp) ||
             oppoHwiPropEnabled(kOppoHwiProcessProp);
+}
+
+bool QCamera3OppoPlatformHwi::runEnabled()
+{
+    return oppoHwiPropEnabled(kOppoHwiRunProp);
+}
+
+uint64_t QCamera3OppoPlatformHwi::sessionAlgorithmMask()
+{
+    /* The modes the HAL3 integration can request; see QCamera3OppoPlatformParams. */
+    using namespace qcamera::oppo_platform;
+    return maskForStillMode(1) | maskForStillMode(2) | maskForStillMode(3) |
+            maskForStillMode(4) | maskForStillMode(5) | maskForStillMode(7) |
+            maskForStillMode(9) | maskForStillMode(10);
+}
+
+int32_t QCamera3OppoPlatformHwi::lastStatus() const
+{
+    return mLastStatus;
 }
 
 QCamera3OppoPlatformHwi &QCamera3OppoPlatformHwi::get()
@@ -143,9 +180,11 @@ void QCamera3OppoPlatformHwi::onOpenCamera(int32_t cameraId, bool isFront)
     pthread_mutex_lock(&mLock);
     mCameraId = cameraId;
     mIsFront = isFront;
-    mMask = oppoHwiPropMask();
-    if (oppoHwiPropEnabled(kOppoHwiProbeProp)) {
-        /* Stage 1 probe: no stream exists yet, so p1 carries zero geometry. */
+    mMask = runEnabled() ? sessionAlgorithmMask() : oppoHwiPropMask();
+    mLastStatus = -EOPNOTSUPP;
+    if (!runEnabled() && oppoHwiPropEnabled(kOppoHwiProbeProp)) {
+        /* Stage 1 probe: no stream exists yet, so p1 carries zero geometry.
+         * The explicit-mode run path initializes on the first real frame instead. */
         if (initializeLocked(nullptr)) shutdownLocked();
     }
     pthread_mutex_unlock(&mLock);
@@ -180,6 +219,7 @@ bool QCamera3OppoPlatformHwi::initializeLocked(
         mProcess = dlsym(mLib, "_Z21oppo_platform_processPvS_y");
         mUninit = dlsym(mLib, "_Z20oppo_platform_uninitPvy");
         mUpdateParameters = dlsym(mLib, "_Z30oppo_platform_updateparametersPvS_y");
+        mSetCallbacks = dlsym(mLib, "oppo_platform_set_callbacks");
         if (mInit == nullptr || mProcess == nullptr || mUninit == nullptr) {
             LOGE("oppo hwi dlsym failed: init=%p process=%p uninit=%p",
                     mInit, mProcess, mUninit);
@@ -187,8 +227,8 @@ bool QCamera3OppoPlatformHwi::initializeLocked(
             return false;
         }
         /* updateparameters() is resolved but not called: its blob layout is unknown. */
-        LOGI("oppo hwi symbols: init=%p process=%p uninit=%p update=%p (update unused)",
-                mInit, mProcess, mUninit, mUpdateParameters);
+        LOGI("oppo hwi symbols: init=%p process=%p uninit=%p update=%p callbacks=%p",
+                mInit, mProcess, mUninit, mUpdateParameters, mSetCallbacks);
     }
 
     if (mParam == nullptr || mFrameCtx == nullptr) {
@@ -207,24 +247,35 @@ bool QCamera3OppoPlatformHwi::initializeLocked(
 
     /* Stage 1 passes NULL, stage 2 the first frame with real geometry. */
     buildPlatformParamLocked(frame);
-    uint64_t outOffline = 0;
-    uint64_t outRegistered = 0;
-    uint64_t outPreview = 0;
+    /* out1 = offline mask, out2 = single-frame/preview mask, out3 =
+     * multi-frame/paired mask (platform_hwi init disassembly, bits 0x1ffb8 /
+     * 0x10047); they are diagnostics here: the caller still passes the mask. */
+    uint64_t offlineMask = 0;
+    uint64_t frameMask = 0;
+    uint64_t multiframeMask = 0;
     typedef int32_t (*InitFn)(void *, uint64_t, uint64_t *, uint64_t *, uint64_t *);
     const int32_t rc = reinterpret_cast<InitFn>(mInit)(mParam,
-            mMask | kOppoHwiInProcessBackend, &outOffline, &outRegistered,
-            &outPreview);
+            mMask | kOppoHwiInProcessBackend, &offlineMask, &frameMask,
+            &multiframeMask);
     LOGI("oppo hwi init(%s) cam=%d mask=0x%016" PRIx64 " rc=%d "
-            "outOffline=0x%016" PRIx64 " outRegistered=0x%016" PRIx64
-            " outPreview=0x%016" PRIx64,
+            "offlineMask=0x%016" PRIx64 " frameMask=0x%016" PRIx64
+            " multiFrameMask=0x%016" PRIx64,
             frame != nullptr ? "first-frame" : "probe", mCameraId,
-            mMask | kOppoHwiInProcessBackend, rc, outOffline, outRegistered,
-            outPreview);
+            mMask | kOppoHwiInProcessBackend, rc, offlineMask, frameMask,
+            multiframeMask);
     if (rc != 0) {
         mUnavailable = true;
         return false;
     }
     mInitialized = true;
+    if (oppoHwiPropEnabled(kOppoHwiCallbackProp) && mSetCallbacks != nullptr) {
+        typedef void (*NotifyFn)(long long, int, int);
+        typedef void (*DataFn)(long long, const void *, int);
+        typedef int32_t (*SetCallbacksFn)(NotifyFn, DataFn);
+        const int32_t cbRc = reinterpret_cast<SetCallbacksFn>(mSetCallbacks)(
+                oppoHwiNotifyCallback, oppoHwiDataCallback);
+        LOGI("oppo hwi set_callbacks rc=%d", cbRc);
+    }
     return true;
 }
 
@@ -294,6 +345,94 @@ void QCamera3OppoPlatformHwi::dumpFrameLocked(
     const size_t written = fwrite(frame.data, 1, frame.length, file);
     fclose(file);
     LOGI("oppo hwi dump %s bytes=%zu/%zu", path, written, frame.length);
+}
+
+namespace {
+int32_t oppoHwiCallProcess(void *processFn, void *frameCtx, void *param, uint64_t mask)
+{
+    typedef int32_t (*ProcessFn)(void *, void *, uint64_t);
+    return reinterpret_cast<ProcessFn>(processFn)(frameCtx, param, mask);
+}
+}  // namespace
+
+int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
+        const QCamera3OppoPlatformFrame &frame)
+{
+    if (!runEnabled()) {
+        mLastStatus = -EOPNOTSUPP;
+        return mLastStatus;
+    }
+    const uint64_t modeMask = oppo_platform::maskForStillMode(stillMode);
+    if (!oppo_platform::supportedMask(modeMask)) {
+        LOGE("oppo hwi: stillMode %d has no reversed single-frame algorithm", stillMode);
+        mLastStatus = -EINVAL;
+        return mLastStatus;
+    }
+    if (frame.data == nullptr || frame.length == 0 ||
+            frame.width <= 0 || frame.height <= 0) {
+        mLastStatus = -EINVAL;
+        return mLastStatus;
+    }
+
+    pthread_mutex_lock(&mLock);
+    if (!initializeLocked(&frame)) {
+        mLastStatus = mUnavailable ? -ENODEV : -EIO;
+        pthread_mutex_unlock(&mLock);
+        return mLastStatus;
+    }
+    oppo_platform::Frame params;
+    params.data = frame.data;
+    params.length = frame.length;
+    params.width = frame.width;
+    params.height = frame.height;
+    params.stride = frame.stride > 0 ? frame.stride : frame.width;
+    params.slice = frame.slice > 0 ? frame.slice : frame.height;
+    params.isFront = mIsFront ? 1 : 0;
+    params.jpegRotation = 0;
+    if (!oppo_platform::buildParam(mParam, mParamSize, params) ||
+            !oppo_platform::buildFrameCtx(mFrameCtx, mFrameCtxSize, params)) {
+        mLastStatus = -EINVAL;
+        pthread_mutex_unlock(&mLock);
+        return mLastStatus;
+    }
+    const uint64_t callMask = modeMask | oppo_platform::kInProcessBackend;
+    /* process() filters again against the mask registered by init(): a mode bit
+     * outside the session mask would be silently skipped. */
+    if ((modeMask & ~sessionAlgorithmMask()) != 0) {
+        LOGE("oppo hwi: stillMode %d mask not registered at init", stillMode);
+        mLastStatus = -EINVAL;
+        pthread_mutex_unlock(&mLock);
+        return mLastStatus;
+    }
+    /* updateparameters() takes the same param_platform_t and only the
+     * superphoto/bokeh entries implement it; keep it behind the A/B gate. */
+    if (oppoHwiPropEnabled(kOppoHwiUpdateProp) &&
+            (modeMask & (oppo_platform::kAlgoSuperPhoto | oppo_platform::kAlgoBokeh)) != 0) {
+        if (mUpdateParameters != nullptr) {
+            typedef int32_t (*UpdateFn)(void *, void *, uint64_t);
+            const int32_t updateRc = reinterpret_cast<UpdateFn>(mUpdateParameters)(
+                    mParam, mFrameCtx, callMask);
+            LOGI("oppo hwi updateparameters stillMode=%d mask=0x%016" PRIx64 " rc=%d",
+                    stillMode, callMask, updateRc);
+        } else {
+            LOGW("oppo hwi updateparameters requested but symbol is missing");
+        }
+    }
+    ++mFrameCount;
+    struct timespec begin = {};
+    struct timespec end = {};
+    clock_gettime(CLOCK_MONOTONIC, &begin);
+    const int32_t rc = oppoHwiCallProcess(mProcess, mFrameCtx, mParam, callMask);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    const int64_t elapsedUs = (int64_t(end.tv_sec) - int64_t(begin.tv_sec)) * 1000000 +
+            (int64_t(end.tv_nsec) - int64_t(begin.tv_nsec)) / 1000;
+    mLastStatus = rc == 0 ? 0 : (rc < 0 ? rc : -EIO);
+    LOGI("oppo hwi processStillFrame stillMode=%d algo=%s mask=0x%016" PRIx64
+            " cam=%d size=%dx%d rc=%d elapsed=%" PRId64 "us",
+            stillMode, oppo_platform::algorithmName(modeMask & ~oppo_platform::kInProcessBackend),
+            callMask, mCameraId, frame.width, frame.height, rc, elapsedUs);
+    pthread_mutex_unlock(&mLock);
+    return mLastStatus;
 }
 
 bool QCamera3OppoPlatformHwi::processFrame(const QCamera3OppoPlatformFrame &frame)

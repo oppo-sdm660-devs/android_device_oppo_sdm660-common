@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <errno.h>
 
 /*
  * In-process wiring of the OPPO platform algorithm layer (liboppo_platform_hwi.so).
@@ -22,15 +23,31 @@ struct QCamera3OppoPlatformFrame {
 
 class QCamera3OppoPlatformHwi {
 public:
-    /* True when either gate is on; get() is only valid then. */
+    /* True when either probe gate is on; get() is only valid then. */
     static bool configured();
+    /* True when the explicit-mode run gate is on (persist...platform_hwi.run==1). */
+    static bool runEnabled();
     static QCamera3OppoPlatformHwi &get();
+    /* Union of the original algorithm bits the HAL3 integration can request. */
+    static uint64_t sessionAlgorithmMask();
 
     void onOpenCamera(int32_t cameraId, bool isFront);
     static void shutdownOnClose();
 
-    /* Runs the configured mask on one snapshot frame in place; failure is a no-op. */
+    /* Probe path: runs the configured mask on one snapshot frame in place. */
     bool processFrame(const QCamera3OppoPlatformFrame &frame);
+
+    /*
+     * Runs the original single-frame algorithm selected by an explicit
+     * org.lineageos stillMode (HDR/LLHDR/MFNR/SUPER_PHOTO/REAR_BEAUTY/
+     * DUAL_BOKEH/SCENE/FRONT_BEAUTY). Returns 0 when the platform block ran,
+     * -EOPNOTSUPP when the gate/back end is unavailable (caller falls back),
+     * another negative errno on failure. The frame is modified in place.
+     */
+    int32_t processStillFrame(int32_t stillMode, const QCamera3OppoPlatformFrame &frame);
+
+    /* Last processStillFrame() result, for diagnostics. */
+    int32_t lastStatus() const;
 
 private:
     QCamera3OppoPlatformHwi();
@@ -51,6 +68,7 @@ private:
     void *mProcess;
     void *mUninit;
     void *mUpdateParameters;
+    void *mSetCallbacks = nullptr;
 
     pthread_mutex_t mLock;
     uint8_t *mParam;        /* param_platform_t block, 0x12EC bytes */
@@ -64,6 +82,7 @@ private:
     bool mInitialized;
     bool mUnavailable;
     uint32_t mFrameCount;
+    int32_t mLastStatus = -EOPNOTSUPP;
 };
 
 #endif /* QCAMERA3_OPPO_PLATFORM_HWI_H */

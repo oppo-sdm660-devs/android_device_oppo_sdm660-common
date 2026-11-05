@@ -168,9 +168,26 @@ need(HAL3 / "QCamera3AutoCapturePolicy.cpp",
      "QCamera3AutoCapturePolicy::histogramClipping", "histogram helper implementation")
 need(HAL3 / "QCamera3AutoCapturePolicy.h", "histogramClipping", "histogram helper declaration")
 
-# Tests exist and are Python-parseable.
+# Original HAL1 platform layer wiring (task-54).
 tests = CAMERA / "tests"
-for name in ("run_front_beauty_tests.py", "run_auto_capture_tests.py", "hal_static_checks.py"):
+platform_hwi = HAL3 / "QCamera3OppoPlatformHwi.cpp"
+need(platform_hwi, "processStillFrame", "per-mode platform entry")
+need(platform_hwi, "sessionAlgorithmMask", "platform register mask")
+need(platform_hwi, "persist.vendor.camera.oppo.platform_hwi.run", "explicit run gate")
+need(platform_hwi, "persist.vendor.camera.oppo.platform_hwi.update", "updateparameters gate")
+need(post, "processStillFrame", "PostProc uses the platform entry")
+need(post, "ArcFaceBeauty", "original face-beauty stage name")
+need(post, "VDSces", "original SCES stage name")
+need(HAL3 / "QCamera3OppoPlatformParams.h", "maskForStillMode", "reversed mask mapping")
+need(HAL3 / "QCamera3OppoPlatformParams.h", "kFaceInfoBase", "reversed face-info block")
+need(HAL3 / "QCamera3OppoPlatformParams.cpp", "kAlgoVdSces", "SCES algorithm bit")
+need(CAMERA / "Android.bp", "QCamera3OppoPlatformParams.cpp", "params module in HAL")
+need(tests / "fake_oppo_platform_hwi.cpp", "fake_oppo_platform_init", "fake platform lib")
+need(tests / "platform_hwi_host_test.cpp", "processMask", "platform host test")
+
+# Tests exist and are Python-parseable.
+for name in ("run_front_beauty_tests.py", "run_auto_capture_tests.py",
+             "run_platform_hwi_tests.py", "hal_static_checks.py"):
     need(tests / name, "def main", "host test runner")
 need(tests / "auto_capture_policy_test.cpp", "kReasonDynamicRange", "auto policy host test")
 for path in sorted(tests.glob("*.py")):

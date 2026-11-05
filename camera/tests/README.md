@@ -36,7 +36,19 @@ HOST_SANITIZE=0 python3 run_auto_capture_tests.py
 `updateAutoCaptureStats()`/`fillAutoCaptureStats()` 负责把最近预览帧的
 exposure/ISO/直方图喂给该策略；真实触发仍待真机（预览 stats 是否随属性开启而到达）。
 
-## 3. 静态一致性检查
+## 3. 原厂 platform 算法层（HAL1 重现，task-54）
+
+```sh
+python3 run_platform_hwi_tests.py
+HOST_SANITIZE=0 python3 run_platform_hwi_tests.py
+```
+
+用 fake `liboppo_platform_hwi.so`（导出与反解一致的 mangled 入口并记录调用）验证：
+`QCamera3OppoPlatformParams` 的 mask/偏移构建、`QCamera3OppoPlatformHwi` 的
+gate→init→updateparameters→process 顺序、per-stillMode 算法位、param/frame-ctx 布局、
+失败状态与 close 反初始化。真实库按反解 ABI 调用，仍需真机 A/B 验证效果。
+
+## 4. 静态一致性检查
 
 ```sh
 python3 hal_static_checks.py
@@ -46,7 +58,7 @@ python3 hal_static_checks.py
 前摄美颜协议/消费者/Android.bp、fake 测试文件可加载），防止只改一侧。grep 级别，
 不是编译替代。
 
-## 4. 真机验证入口
+## 5. 真机验证入口
 
 见 `OCam/docs/hal-changes.md` §10 的远程构建/部署/真机命令；本目录不包含任何
 依赖真机或 Android 源码树的测试。
