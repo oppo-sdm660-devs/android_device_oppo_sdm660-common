@@ -7181,9 +7181,9 @@ int32_t QCamera3HardwareInterface::orchestrateAutoCapturePolicy(
     if (!request || request->input_buffer || m_bIsVideo || !mPictureChannel ||
             gCamCapability[mCameraId] == NULL ||
             gCamCapability[mCameraId]->aux_cam_cap != NULL) return NO_ERROR;
-    const camera_metadata_entry_t autoHdr =
+    const camera_metadata_ro_entry_t autoHdr =
             settings.find(QCAMERA3_NATIVE_ALGORITHM_AUTO_HDR_ENABLE);
-    const camera_metadata_entry_t autoNight =
+    const camera_metadata_ro_entry_t autoNight =
             settings.find(QCAMERA3_NATIVE_ALGORITHM_AUTO_NIGHT_ENABLE);
     if (autoHdr.count != 1 && autoNight.count != 1) return NO_ERROR;
     if (oppoNativeMode(settings) != OPPO_NATIVE_OFF) return NO_ERROR;
