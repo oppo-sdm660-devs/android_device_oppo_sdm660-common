@@ -39,6 +39,7 @@ struct QCamera3OppoPlatformFrame {
     int32_t slice;
     QCamera3OppoPlatformFaceInfo faceInfo;
     int32_t beautyStrength = 0; /* 0..100, only used by beauty modes */
+    int32_t sceneStrength = 0;  /* 0..100, only used by SCENE(9) */
 };
 
 class QCamera3OppoPlatformHwi {
@@ -127,6 +128,7 @@ private:
     int32_t mFaceFdSelect = 0;
     int32_t mFaceInfoMode = 0;
     int32_t mScesParam = 0;
+    bool mScesParamOverrideValid = false;
     void resolveBeautyParamsLocked();
     /* Session-level scratch buffer for frame ctx +0x2c8/2cc/2d4 (0x1000 B,
      * 4 KiB aligned). facebeauty/imageadjust/superphoto/blurless read it. */

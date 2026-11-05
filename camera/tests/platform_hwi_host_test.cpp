@@ -361,6 +361,26 @@ int main(int argc, char **argv) {
     host_prop_set("persist.vendor.camera.oppo.platform_hwi.run", "1");
     host_prop_set("persist.vendor.camera.oppo.platform_hwi.path", argv[1]);
 
+    // 3d. SCES strength -> param+0x10bc (mode 9 only; clamp; property A/B).
+    QCamera3OppoPlatformFrame scene = frame;
+    scene.sceneStrength = 42;
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(9, scene) == 0);
+    CHECK(readU32(stats->processParam, ParamOffsets::kScesParam) == 42);
+    scene.sceneStrength = 250;
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(9, scene) == 0);
+    CHECK(readU32(stats->processParam, ParamOffsets::kScesParam) == 100);
+    scene.sceneStrength = 0;
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(9, scene) == 0);
+    CHECK(readU32(stats->processParam, ParamOffsets::kScesParam) == 0);
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.sces_param", "7");
+    QCamera3OppoPlatformHwi::get().onOpenCamera(0, false);
+    scene.sceneStrength = 42;
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(9, scene) == 0);
+    CHECK(readU32(stats->processParam, ParamOffsets::kScesParam) == 7);
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.sces_param", "");
+    QCamera3OppoPlatformHwi::get().onOpenCamera(0, false);
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(9, scene) == 0);
+    CHECK(readU32(stats->processParam, ParamOffsets::kScesParam) == 42);
     // 4. HDR/LLHDR/MFNR/SUPER/bokeh are not wired: fail closed before the library.
     const int processBeforeUnwired = stats->processCount;
     CHECK(stats->updateCount == 0);

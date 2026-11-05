@@ -356,6 +356,12 @@ need(platform_hwi, "params.beauty.enabled = true", "beauty params constructed")
 need(platform_hwi, "params.beauty.strength = frame.beautyStrength",
      "beauty strength passed")
 need(platform_hwi, "params.scesParam", "SCES param written")
+need(platform_hwi_h, "sceneStrength", "SCES strength input")
+need(platform_hwi, "oppo hwi sces strength=%d param=%u", "SCES strength log")
+need(platform_hwi, "mScesParamOverrideValid", "SCES property override")
+need(platform_hwi, "mScesParamOverrideValid ? mScesParam", "SCES override precedence")
+need(post, "platformFrame.sceneStrength = jpeg_settings->native_scene_strength",
+     "PostProc passes scene strength")
 need(params_h, "struct BeautyParams", "beauty params type")
 need(params_h, "kBeautyModelPath = 0x0060", "beauty model path offset")
 need(params_h, "kBeautyStrength = 0x0164", "beauty strength offset")

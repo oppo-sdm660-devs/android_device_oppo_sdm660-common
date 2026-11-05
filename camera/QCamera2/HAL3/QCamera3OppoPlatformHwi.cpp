@@ -247,7 +247,10 @@ void QCamera3OppoPlatformHwi::resolveBeautyParamsLocked()
     mBeautyEnable = oppoHwiPropInt(kOppoHwiBeautyEnableProp, 0);
     mFaceFdSelect = oppoHwiPropInt(kOppoHwiFaceFdSelectProp, 0);
     mFaceInfoMode = oppoHwiPropInt(kOppoHwiFaceInfoModeProp, 0);
-    mScesParam = oppoHwiPropInt(kOppoHwiScesParamProp, 0);
+    char scesProp[PROPERTY_VALUE_MAX] = {};
+    property_get(kOppoHwiScesParamProp, scesProp, "");
+    mScesParamOverrideValid = scesProp[0] != '\0';
+    mScesParam = mScesParamOverrideValid ? atoi(scesProp) : 0;
     LOGI("oppo hwi beauty model rear=%s front=%s",
             rear ? mBeautyModelRear : "(none)", front ? mBeautyModelFront : "(none)");
 }
@@ -643,7 +646,15 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
         params.beauty.fdSelect = mFaceFdSelect;
         params.beauty.faceInfoMode = mFaceInfoMode;
     }
-    params.scesParam = mScesParam;
+    if (stillMode == 9) {
+        int32_t strength = frame.sceneStrength;
+        if (strength < 0) strength = 0;
+        if (strength > 100) strength = 100;
+        params.scesParam = mScesParamOverrideValid ? mScesParam :
+                (strength > 0 ? strength : 0);
+        LOGI("oppo hwi sces strength=%d param=%u", frame.sceneStrength,
+                params.scesParam);
+    }
     if (!oppo_platform::buildParam(mParam, mParamSize, params) ||
             !oppo_platform::buildFrameCtx(mFrameCtx, mFrameCtxSize, params)) {
         mLastStatus = -EINVAL;

@@ -3452,6 +3452,7 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
             platformFrame.height = platformImage.height;
             platformFrame.stride = platformImage.yStride;
             platformFrame.slice = platformImage.yScanline;
+            platformFrame.sceneStrength = jpeg_settings->native_scene_strength;
             if (haveFaces) platformFrame.faceInfo = platformFaces;
             platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
                     OPPO_NATIVE_SCENE, platformFrame);
