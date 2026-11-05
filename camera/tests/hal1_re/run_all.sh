@@ -63,6 +63,7 @@ if [ -f "$STOCK_HAL1" ]; then
     ./face_info.py --stock-hal1 "$STOCK_HAL1" > "$OUT/face_info.txt" 2>&1 || status=1
     ./mode_mask.py --stock-hal1 "$STOCK_HAL1" > "$OUT/mode_mask.txt" 2>&1 || status=1
     ./snapshot.py --stock-hal1 "$STOCK_HAL1" --vendor-lib-dir "$VENDOR_LIB_DIR" > "$OUT/snapshot.txt" 2>&1 || status=1
+    ./face_builder.py --stock-hal1 "$STOCK_HAL1" --vendor-lib-dir "$VENDOR_LIB_DIR" > "$OUT/face_builder.txt" 2>&1 || status=1
 else
     echo "stock HAL1 not found: $STOCK_HAL1 (second batch skipped)" >&2
 fi
