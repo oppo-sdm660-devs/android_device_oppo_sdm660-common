@@ -346,22 +346,27 @@ need(platform_hwi_h, "static void setFaceInfo", "face info cache setter")
 need(platform_hwi_h, "static bool getFaceInfo", "face info cache getter")
 need(platform_hwi, "kOppoFaceMaxAgeFrames", "bounded face cache age")
 need(platform_hwi, "params.faceInfo.count = faceCount", "processStillFrame face conversion")
+need(platform_hwi_h, "beautyParamsReady", "beauty params readiness accessor")
+need(platform_hwi, "beauty params pending (task-74)", "beauty params pending gate")
+need(platform_hwi_h, "mBeautyParamsReady = false", "beauty disabled until task-74")
 need(hwi, "QCamera3OppoPlatformHwi::setFaceInfo", "HWI result feeds face cache")
 need(hwi, "CAM_INTF_META_FACE_DETECTION, metadata)", "HWI reads face detection")
 need(hwi, "mCropRegionMapper.toActiveArray(rect.left, rect.top, rect.width,",
      "HWI maps faces to active array")
 post_text = read(post)
-checks += 3
+checks += 4
 if post_text.count("QCamera3OppoPlatformHwi::getFaceInfo") != 3:
     failures.append("QCamera3PostProc.cpp: platform paths must fetch face info")
-if post_text.count("platformFaces.count > 0") != 2:
-    failures.append("QCamera3PostProc.cpp: beauty modes must gate on faces")
+# task-75 A: beauty must NOT be gated on face count (RE: face block is bokeh/picbest only).
+if "platformFaces.count > 0" in post_text:
+    failures.append("QCamera3PostProc.cpp: beauty must not gate on face count")
+# task-75 B: beauty stays closed with an explicit pending fallback until task-74.
+if post_text.count("beautyParamsReady()") != 2:
+    failures.append("QCamera3PostProc.cpp: beauty pending gate missing")
+if post_text.count("beauty params pending (task-74)") != 2:
+    failures.append("QCamera3PostProc.cpp: pending trace/log missing")
 if "platformFrame.faceInfo = platformFaces;" not in post_text:
     failures.append("QCamera3PostProc.cpp: face info is not passed to platform frame")
-checks += 1
-if post_text.count('"FaceBeauty", -EOPNOTSUPP') == 0 and \
-        "rearHandledByPlatform ? 1 : 0" not in post_text:
-    failures.append("QCamera3PostProc.cpp: no-face beauty applied must stay honest")
 
 # Tests exist and are Python-parseable.
 for name in ("run_front_beauty_tests.py", "run_auto_capture_tests.py",

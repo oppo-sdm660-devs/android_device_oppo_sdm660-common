@@ -68,6 +68,11 @@ public:
     /* Last processStillFrame() result, for diagnostics. */
     int32_t lastStatus() const;
 
+    /* False until the original beauty parameters (model path/strength/...) are
+     * constructed per RE task-74. processStillFrame(5/10) returns -EOPNOTSUPP
+     * while false; callers fall back to the self-developed beauty path. */
+    bool beautyParamsReady() const;
+
     /* Face result cache fed from HAL3 CAM_INTF_META_FACE_DETECTION (active-array
      * rects). getFaceInfo() prefers the exact frame; otherwise it uses the latest
      * result within a bounded frame age (then count may be 0 = honestly no face). */
@@ -109,6 +114,7 @@ private:
     bool mUnavailable;
     uint32_t mFrameCount;
     int32_t mLastStatus = -EOPNOTSUPP;
+    bool mBeautyParamsReady = false; /* task-74: flip once beauty params are built */
     /* Session-level scratch buffer for frame ctx +0x2c8/2cc/2d4 (0x1000 B,
      * 4 KiB aligned). facebeauty/imageadjust/superphoto/blurless read it. */
     void *mScratch = nullptr;

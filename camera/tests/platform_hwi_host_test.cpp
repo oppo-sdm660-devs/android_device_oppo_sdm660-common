@@ -250,25 +250,31 @@ int main(int argc, char **argv) {
             qcamera::oppo_platform::kScratchBytes);
     CHECK(readU32(stats->frameCtx, FrameCtxOffsets::kScratchFd) == 0xFFFFFFFFu);
 
-    // 3. Front beauty uses the ARC face-beauty bit and the front flag.
+    // 3. task-75 A/B: beauty params are pending (task-74) -> fail closed, no call.
     QCamera3OppoPlatformHwi::get().onOpenCamera(1, true);
-    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(10, frame) == 0);
-    CHECK((stats->processMask & ~kInProcessBackend) == kAlgoArcFaceBeauty);
-    CHECK(stats->processParam[ParamOffsets::kIsFront] == 1);
+    CHECK(!QCamera3OppoPlatformHwi::get().beautyParamsReady());
+    const int processBeforeBeauty = stats->processCount;
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(10, frame) == -EOPNOTSUPP);
+    CHECK(QCamera3OppoPlatformHwi::get().lastStatus() == -EOPNOTSUPP);
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, frame) == -EOPNOTSUPP);
+    CHECK(stats->processCount == processBeforeBeauty);
+    CHECK(maskForStillMode(10) == kAlgoArcFaceBeauty);
+    CHECK(maskForStillMode(5) == kAlgoFaceBeauty);
 
-    // 3b. Rear beauty uses the face-beauty bit and the face block passed through.
+    // 3b. The shared face-block builder is still verified via SCENE(9), which
+    // does not depend on beauty params or on consuming faces.
     QCamera3OppoPlatformFrame beauty = frame;
     beauty.faceInfo.count = 1;
     beauty.faceInfo.sourceWidth = 4000;
     beauty.faceInfo.sourceHeight = 3000;
     beauty.faceInfo.faces[0] = {1000, 750, 1000, 750};
-    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, beauty) == 0);
-    CHECK((stats->processMask & ~kInProcessBackend) == kAlgoFaceBeauty);
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(9, beauty) == 0);
+    CHECK((stats->processMask & ~kInProcessBackend) == kAlgoVdSces);
     CHECK(stats->processParam[ParamOffsets::kIsFront] == 1);
     const size_t faceBlock = ParamOffsets::kFaceInfoBase + ParamOffsets::kFaceBlockOffset;
     const size_t faceCount = ParamOffsets::kFaceInfoBase + ParamOffsets::kFaceCountOffset;
     CHECK(readU32(stats->processParam, faceCount) == 1);
-    // Front camera (still active from step 3): width 100, left 100-(25+25)=50.
+    // Front camera (still active): width 100, left 100-(25+25)=50.
     CHECK(readU32(stats->processParam, faceBlock) == 50);
     CHECK(readU32(stats->processParam, faceBlock + ParamOffsets::kFaceArrayStride) == 12);
     CHECK(readU32(stats->processParam,

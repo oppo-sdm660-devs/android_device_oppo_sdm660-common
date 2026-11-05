@@ -165,6 +165,11 @@ int32_t QCamera3OppoPlatformHwi::lastStatus() const
     return mLastStatus;
 }
 
+bool QCamera3OppoPlatformHwi::beautyParamsReady() const
+{
+    return mBeautyParamsReady;
+}
+
 void QCamera3OppoPlatformHwi::setFaceInfo(uint32_t frameNumber,
         const QCamera3OppoPlatformFaceInfo &info)
 {
@@ -483,6 +488,14 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
 {
     if (!runEnabled()) {
         mLastStatus = -EOPNOTSUPP;
+        return mLastStatus;
+    }
+    /* RE task-70: facebeauty/arc do not read the face block; their effect needs
+     * param+0x60/0x164/... which are only built after task-74. Until ready, fail
+     * closed so the caller falls back instead of reporting a no-effect "success". */
+    if ((stillMode == 5 || stillMode == 10) && !mBeautyParamsReady) {
+        mLastStatus = -EOPNOTSUPP;
+        LOGW("oppo hwi: beauty params pending (task-74); stillMode %d not run", stillMode);
         return mLastStatus;
     }
     const uint64_t modeMask = oppo_platform::maskForStillMode(stillMode);
