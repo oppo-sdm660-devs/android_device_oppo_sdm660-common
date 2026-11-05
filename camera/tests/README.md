@@ -24,7 +24,19 @@ HOST_SANITIZE=0 python3 run_front_beauty_tests.py   # 无 libasan 32 位时
 face-info 结构未定，适配器传 NULL，真机验证前必须保持
 `persist.vendor.camera.oppo.front_beauty.enable=0`（默认）。
 
-## 2. 静态一致性检查
+## 2. 自动 HDR/低光策略（纯 C++）
+
+```sh
+python3 run_auto_capture_tests.py
+HOST_SANITIZE=0 python3 run_auto_capture_tests.py
+```
+
+验证 `QCamera3AutoCapturePolicy` 的 histogram 裁剪值计算、低光（曝光/ISO 暗度指数）、
+逆光/动态范围（直方图）触发、motion 阻止、缺 stats 与非法配置分支。HAL3 侧
+`updateAutoCaptureStats()`/`fillAutoCaptureStats()` 负责把最近预览帧的
+exposure/ISO/直方图喂给该策略；真实触发仍待真机（预览 stats 是否随属性开启而到达）。
+
+## 3. 静态一致性检查
 
 ```sh
 python3 hal_static_checks.py
@@ -34,7 +46,7 @@ python3 hal_static_checks.py
 前摄美颜协议/消费者/Android.bp、fake 测试文件可加载），防止只改一侧。grep 级别，
 不是编译替代。
 
-## 3. 真机验证入口
+## 4. 真机验证入口
 
 见 `OCam/docs/hal-changes.md` §10 的远程构建/部署/真机命令；本目录不包含任何
 依赖真机或 Android 源码树的测试。

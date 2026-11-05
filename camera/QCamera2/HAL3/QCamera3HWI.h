@@ -53,6 +53,7 @@
 #include "QCameraPerfTranslator.h"
 #include "QCamera3LogicalMultiCam.h"
 #include "QCamera3SatPolicy.h"
+#include "QCamera3AutoCapturePolicy.h"
 
 extern "C" {
 #include "mm_camera_interface.h"
@@ -369,6 +370,9 @@ public:
     // Per-stage records published as the diagnostics.stageRecords key.
     void noteNativeStage(uint32_t internalFrame, int32_t stageId, int32_t status,
             int32_t applied);
+    // Explicit mode requested but not executed (no BLOB/video/paired/...):
+    // records a failed stage and appliedNativeMode=OFF instead of nothing.
+    void noteNativeStageFailure(uint32_t internalFrame, int32_t stageId, int32_t status);
     // False when the frame has no stage record.
     bool getNativeStageRecords(uint32_t internalFrame, int32_t *records,
             size_t capacity, int32_t &count);
@@ -957,6 +961,25 @@ private:
     int32_t mNativeFrontBeautyStrength = 0;
     int32_t mNativeSceneStrength = 0;
     native_stage_request_t mNativeStages = {};
+    // Last decoded preview statistics for the automatic HDR/night policy,
+    // guarded by mMutex (metadata callback and request path both hold it).
+    struct AutoCaptureStats {
+        int64_t exposureTimeNs = -1;
+        int32_t iso = -1;
+        uint32_t histogram[QCamera3AutoCapturePolicy::kHistogramBins] = {};
+        uint32_t histogramTotal = 0;
+        bool histogramValid = false;
+        int32_t highlightClippedMilli = -1;
+        int32_t shadowClippedMilli = -1;
+        uint32_t frameNumber = UINT32_MAX;
+    };
+    AutoCaptureStats mAutoCaptureStats;
+    // Set once the explicit auto flags are enabled; keeps luma stats requested
+    // for the preview frames that precede the capture request.
+    bool mAutoCaptureStatsEnabled = false;
+    void updateAutoCaptureStats(metadata_buffer_t *metadata, uint32_t frameNumber);
+    void fillAutoCaptureStats(QCamera3AutoCapturePolicy::Stats &stats,
+            const CameraMetadata &settings);
     bool mRestoreFrameworkSettings = false;
     uint32_t mSubmittingBurstFrameNumber = UINT32_MAX;
     uint32_t sync_counter;

@@ -103,6 +103,9 @@ public:
     static bool validStats(const Stats &stats);
     // Returns false unless the histogram is non-empty and consistent.
     static bool histogramPercentiles(const Stats &stats, int32_t &p5, int32_t &p50, int32_t &p95);
+    // Per-mille pixel counts at luma >= 250 (highlight) and <= 5 (shadow).
+    static bool histogramClipping(const uint32_t *histogram, uint32_t total,
+            int32_t &highlightClippedMilli, int32_t &shadowClippedMilli);
     static int32_t backlightScore(const Stats &stats, const Config &config);
     static int32_t nightScore(const Stats &stats, const Config &config, bool *usedRealLux);
     static int32_t hdrScore(const Stats &stats, const Config &config, int32_t &reason);

@@ -136,10 +136,43 @@ else:
     if "QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_FEATURES" not in block:
         failures.append("unsupportedTags[] no longer rejects FRONT_BEAUTY_FEATURES")
 
+# Automatic still policy: decoded preview statistics + failure diagnostics.
+need(hwi, "void QCamera3HardwareInterface::updateAutoCaptureStats", "preview stats decode")
+need(hwi, "void QCamera3HardwareInterface::fillAutoCaptureStats", "policy stats fill")
+need(hwi, "CAM_INTF_META_STATS_HISTOGRAM_MODE", "luma histogram request")
+need(hwi, "mAutoCaptureStatsEnabled", "auto stats enable flag")
+need(hwi, "histogramClipping", "histogram clipping helper")
+need(hwi, "void QCamera3HardwareInterface::noteNativeStageFailure", "failure trace helper")
+need(hwi, "fillAutoCaptureStats(stats, settings);", "policy uses decoded stats")
+need(hwi, "request->input_buffer != NULL || m_bIsVideo", "HDR predicate excludes video")
+need(hwi, "request->input_buffer || m_bIsVideo ||", "LLHDR predicate excludes video")
+need(hwi, "QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH", "scene strength announcement")
+need(hwi, "noteNativeStageFailure(local.frame_number, requestedMode, -ENOTSUP)",
+     "requested-but-not-executed trace")
+need(hwi, "noteNativeStageFailure(single.frame_number, requestedMode, failureStatus)",
+     "single-frame fallback trace")
+need(hwi, "noteNativeStageFailure(frameNumber, OPPO_NATIVE_DUAL_BOKEH, bindStatus)",
+     "paired bind failure trace")
+need(hwi, "cannot be executed must not be reported as applied",
+     "auto trigger availability guard")
+need(hwi, "config.hdrEnable = autoHdr.count == 1", "auto policy per-request config")
+need(hwi, "mAutoCaptureStats = AutoCaptureStats();", "stats reset per session")
+need(hwi, "RAW16 must", "RAW16 admission comment")
+need(hwi, "Explicit MFNR/SUPER_PHOTO cannot run its pipeline",
+     "MFNR/SUPER single-frame degrade")
+need(hwi, "The auto extension requests histogram statistics internally",
+     "internal histogram result keys suppressed")
+absent(hwi, "decision->raw16Available == 1", "inconsistent RAW16 admission")
+need(post, "always publish the stage", "scene stage always recorded")
+need(HAL3 / "QCamera3AutoCapturePolicy.cpp",
+     "QCamera3AutoCapturePolicy::histogramClipping", "histogram helper implementation")
+need(HAL3 / "QCamera3AutoCapturePolicy.h", "histogramClipping", "histogram helper declaration")
+
 # Tests exist and are Python-parseable.
 tests = CAMERA / "tests"
-for name in ("run_front_beauty_tests.py", "hal_static_checks.py"):
+for name in ("run_front_beauty_tests.py", "run_auto_capture_tests.py", "hal_static_checks.py"):
     need(tests / name, "def main", "host test runner")
+need(tests / "auto_capture_policy_test.cpp", "kReasonDynamicRange", "auto policy host test")
 for path in sorted(tests.glob("*.py")):
     checks += 1
     try:

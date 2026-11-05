@@ -93,6 +93,23 @@ bool QCamera3AutoCapturePolicy::histogramPercentiles(const Stats &s,
     return true;
 }
 
+bool QCamera3AutoCapturePolicy::histogramClipping(const uint32_t *histogram,
+        uint32_t total, int32_t &highlightClippedMilli, int32_t &shadowClippedMilli) {
+    highlightClippedMilli = -1;
+    shadowClippedMilli = -1;
+    if (!histogram || !total) return false;
+    uint64_t sum = 0;
+    for (uint32_t i = 0; i < kHistogramBins; ++i) sum += histogram[i];
+    if (sum != total) return false;
+    uint64_t clipped = 0;
+    for (uint32_t i = 250; i < kHistogramBins; ++i) clipped += histogram[i];
+    highlightClippedMilli = int32_t(clipped * 1000 / total);
+    clipped = 0;
+    for (uint32_t i = 0; i < 6; ++i) clipped += histogram[i];
+    shadowClippedMilli = int32_t(clipped * 1000 / total);
+    return true;
+}
+
 int32_t QCamera3AutoCapturePolicy::backlightScore(const Stats &s, const Config &c) {
     int32_t p5 = 0, p50 = 0, p95 = 0;
     if (!histogramPercentiles(s, p5, p50, p95)) return 0;

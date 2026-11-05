@@ -1158,6 +1158,8 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
             };
             if (modeAdvertised(OPPO_NATIVE_FRONT_BEAUTY))
                 basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH);
+            if (modeAdvertised(OPPO_NATIVE_SCENE))
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH);
             if (singleCamera && (modeAdvertised(OPPO_NATIVE_HDR) ||
                     modeAdvertised(OPPO_NATIVE_LLHDR))) {
                 basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_AUTO_HDR_ENABLE);
@@ -1399,13 +1401,17 @@ static const QCamera3RawCapability::Decision *oppoRawCapabilityDecision(uint32_t
     return &gRawCapabilityDecision[cameraId];
 }
 
-// RAW16 = stream/calibration contract AND Complete-RAW decision (erase-only).
+// RAW16 = stream/calibration contract AND Complete-RAW decision. The Complete-RAW
+// capability needs an ON-mode hot-pixel map; this ABI does not carry the decoded
+// hot-pixel record in cam_capability_t, so the decision fails closed. RAW16 must
+// therefore stay out of the format/stream tables as well, otherwise the HAL would
+// advertise a RAW format without ANDROID_REQUEST_AVAILABLE_CAPABILITIES_RAW.
 static bool oppoRaw16Admitted(uint32_t cameraId)
 {
     if (cameraId >= MM_CAMERA_MAX_NUM_SENSORS || gCamCapability[cameraId] == NULL) return false;
     const QCamera3RawCapability::Decision *decision = oppoRawCapabilityDecision(cameraId);
     return oppoRaw16Supported(gCamCapability[cameraId]) && decision != NULL &&
-            decision->status == 0 && decision->raw16Available == 1;
+            decision->status == 0 && decision->completeRawCapability == 1;
 }
 
 namespace {
@@ -4036,6 +4042,8 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
     m_bIsVideo = false;
     m_bEisSupportedSize = false;
     m_bTnrEnabled = false;
+    mAutoCaptureStatsEnabled = false;
+    mAutoCaptureStats = AutoCaptureStats();
     bool isZsl = false;
     uint32_t videoWidth = 0U;
     uint32_t videoHeight = 0U;
@@ -6257,6 +6265,9 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
     frame_number_valid =        *p_frame_number_valid;
     frame_number =              *p_frame_number;
     capture_time =              *p_capture_time;
+    if (frame_number_valid && mAutoCaptureStatsEnabled &&
+            metadata_buf->camera_handle == mCameraHandle->camera_handle)
+        updateAutoCaptureStats(metadata, frame_number);
     urgent_frame_number_valid = *p_urgent_frame_number_valid;
     urgent_frame_number =       *p_urgent_frame_number;
     currentSysTime =            systemTime(CLOCK_MONOTONIC);
@@ -7170,7 +7181,11 @@ int32_t QCamera3HardwareInterface::orchestrateAutoCapturePolicy(
     if (!request || request->input_buffer || m_bIsVideo || !mPictureChannel ||
             gCamCapability[mCameraId] == NULL ||
             gCamCapability[mCameraId]->aux_cam_cap != NULL) return NO_ERROR;
-    if (!mNativeStages.auto_capture_valid) return NO_ERROR;
+    const camera_metadata_entry_t autoHdr =
+            settings.find(QCAMERA3_NATIVE_ALGORITHM_AUTO_HDR_ENABLE);
+    const camera_metadata_entry_t autoNight =
+            settings.find(QCAMERA3_NATIVE_ALGORITHM_AUTO_NIGHT_ENABLE);
+    if (autoHdr.count != 1 && autoNight.count != 1) return NO_ERROR;
     if (oppoNativeMode(settings) != OPPO_NATIVE_OFF) return NO_ERROR;
     bool blob = false;
     for (uint32_t i = 0; i < request->num_output_buffers; ++i) {
@@ -7182,14 +7197,14 @@ int32_t QCamera3HardwareInterface::orchestrateAutoCapturePolicy(
             settings.find(ANDROID_CONTROL_MODE).data.u8[0] != ANDROID_CONTROL_MODE_AUTO)
         return NO_ERROR;
     QCamera3AutoCapturePolicy::Config config;
-    config.hdrEnable = mNativeStages.auto_hdr_enable;
-    config.nightEnable = mNativeStages.auto_night_enable;
+    // Per-request extension values; the stage snapshot may belong to an earlier
+    // request (settings are optional on preview frames).
+    config.hdrEnable = autoHdr.count == 1 ? autoHdr.data.i32[0] : 0;
+    config.nightEnable = autoNight.count == 1 ? autoNight.data.i32[0] : 0;
+    if (!config.hdrEnable && !config.nightEnable) return NO_ERROR;
     if (!QCamera3AutoCapturePolicy::Config::valid(config)) return BAD_VALUE;
     QCamera3AutoCapturePolicy::Stats stats;
-    if (settings.exists(ANDROID_SENSOR_EXPOSURE_TIME))
-        stats.exposureTimeNs = settings.find(ANDROID_SENSOR_EXPOSURE_TIME).data.i64[0];
-    if (settings.exists(ANDROID_SENSOR_SENSITIVITY))
-        stats.iso = settings.find(ANDROID_SENSOR_SENSITIVITY).data.i32[0];
+    fillAutoCaptureStats(stats, settings);
     mAutoCaptureReason = QCamera3AutoCapturePolicy::kReasonKeep;
     if (!QCamera3AutoCapturePolicy::validStats(stats)) {
         mAutoCaptureReason = QCamera3AutoCapturePolicy::kReasonInvalidStats;
@@ -7200,22 +7215,22 @@ int32_t QCamera3HardwareInterface::orchestrateAutoCapturePolicy(
     mAutoCaptureReason = decision.reason;
     mAutoCaptureReasonFrame = request->frame_number;
     if (!decision.triggers()) return NO_ERROR;
-    if (!oppoAdvertisesInt32(gStaticMetadata[mCameraId],
-            QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_MODES, decision.mode)) return NO_ERROR;
-    if (decision.mode == OPPO_NATIVE_HDR) {
-        if (!oppoHdrSupported(gCamCapability[mCameraId])) return NO_ERROR;
-        return orchestrateHDRCapture(request);
+    // A trigger decision that cannot be executed must not be reported as applied.
+    const bool available = oppoAdvertisesInt32(gStaticMetadata[mCameraId],
+            QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_MODES, decision.mode) &&
+            ((decision.mode == OPPO_NATIVE_HDR && oppoHdrSupported(gCamCapability[mCameraId])) ||
+             (decision.mode == OPPO_NATIVE_LLHDR && oppoLowLightSupported(gCamCapability[mCameraId])));
+    if (!available) {
+        mAutoCaptureReason = QCamera3AutoCapturePolicy::kReasonKeep;
+        return NO_ERROR;
     }
-    if (decision.mode == OPPO_NATIVE_LLHDR) {
-        if (!oppoLowLightSupported(gCamCapability[mCameraId])) return NO_ERROR;
-        return orchestrateLowLightCapture(request);
-    }
-    return NO_ERROR;
+    if (decision.mode == OPPO_NATIVE_HDR) return orchestrateHDRCapture(request);
+    return orchestrateLowLightCapture(request);
 }
 
 bool QCamera3HardwareInterface::isHdrSnapshotRequest(camera3_capture_request *request)
 {
-    if (request == NULL || request->input_buffer != NULL) return false;
+    if (request == NULL || request->input_buffer != NULL || m_bIsVideo) return false;
     CameraMetadata settings;
     if (request->settings != NULL) settings = request->settings;
     else settings = mLastFrameworkSettings;
@@ -7231,7 +7246,8 @@ bool QCamera3HardwareInterface::isHdrSnapshotRequest(camera3_capture_request *re
 
 bool QCamera3HardwareInterface::isLowLightSnapshotRequest(camera3_capture_request *request)
 {
-    if (!request || request->input_buffer || !oppoLowLightSupported(gCamCapability[mCameraId]))
+    if (!request || request->input_buffer || m_bIsVideo ||
+            !oppoLowLightSupported(gCamCapability[mCameraId]))
         return false;
     CameraMetadata settings;
     if (request->settings) settings = request->settings;
@@ -7597,6 +7613,22 @@ int32_t QCamera3HardwareInterface::orchestrateRequest(
     if (!advanced) {
         _orchestrationDb.allocStoreInternalFrameNumber(request->frame_number,
                 local.frame_number);
+        // An explicit stillMode accepted by validation may still be inapplicable to
+        // this request (no BLOB surface, video recording, paired/lens mismatch...).
+        // Record the failed stage instead of silently returning a plain JPEG.
+        bool blobRequest = false;
+        for (uint32_t i = 0; i < request->num_output_buffers; ++i)
+            if (request->output_buffers[i].stream != NULL &&
+                    request->output_buffers[i].stream->format == HAL_PIXEL_FORMAT_BLOB)
+                blobRequest = true;
+        if (blobRequest) {
+            CameraMetadata requested;
+            if (request->settings != NULL) requested = request->settings;
+            else requested = mLastFrameworkSettings;
+            const int32_t requestedMode = oppoNativeMode(requested);
+            if (requestedMode != OPPO_NATIVE_OFF)
+                noteNativeStageFailure(local.frame_number, requestedMode, -ENOTSUP);
+        }
         ret = processCaptureRequest(&local, empty);
     }
     if (local.settings != request->settings && !repeated.isEmpty())
@@ -7681,7 +7713,20 @@ int32_t QCamera3HardwareInterface::orchestrateStillCapture(
     int32_t rc = mPictureChannel->beginStillCapture(group, group[0],
             gCamCapability[mCameraId]->position == CAM_POSITION_FRONT, detail);
     if (rc != NO_ERROR) {
-        if (oppoNativeMode(original) != OPPO_NATIVE_OFF) return rc;
+        const int32_t requestedMode = oppoNativeMode(original);
+        if (requestedMode != OPPO_NATIVE_OFF) {
+            // Explicit MFNR/SUPER_PHOTO cannot run its pipeline: deliver the standard
+            // single frame with a failed stage instead of failing the request.
+            camera3_capture_request_t single = *request;
+            _orchestrationDb.allocStoreInternalFrameNumber(request->frame_number,
+                    single.frame_number);
+            noteNativeStageFailure(single.frame_number, requestedMode, rc);
+            single.settings = original.getAndLock();
+            List<InternalRequest> empty;
+            const int32_t fallback = processCaptureRequest(&single, empty);
+            original.unlock(single.settings);
+            return fallback;
+        }
         LOGW("Still MFNR: processor unavailable (%d); using single exposure", rc);
         camera3_capture_request_t single = *request;
         _orchestrationDb.allocStoreInternalFrameNumber(request->frame_number, single.frame_number);
@@ -7750,11 +7795,15 @@ int32_t QCamera3HardwareInterface::orchestrateBurstCapture(
     QCamera3HdrPlan plan;
     QCamera3LowLightPlan lowLightPlan;
     List<InternalRequest> empty;
-    auto captureSingle = [&]() -> int32_t {
-        if (oppoNativeMode(original) != OPPO_NATIVE_OFF) return BAD_VALUE;
+    const int32_t requestedMode = oppoNativeMode(original);
+    auto captureSingle = [&](int32_t failureStatus) -> int32_t {
         camera3_capture_request_t single = *request;
         _orchestrationDb.allocStoreInternalFrameNumber(request->frame_number,
                 single.frame_number);
+        // Explicit mode cannot run its own pipeline here: deliver the standard
+        // single frame together with a failed stage so the result is diagnosable.
+        if (requestedMode != OPPO_NATIVE_OFF)
+            noteNativeStageFailure(single.frame_number, requestedMode, failureStatus);
         single.settings = original.getAndLock();
         int32_t rc = processCaptureRequest(&single, empty);
         original.unlock(single.settings);
@@ -7768,7 +7817,7 @@ int32_t QCamera3HardwareInterface::orchestrateBurstCapture(
             cap->exp_compensation_step.denominator, base, plan);
     if (!usable) {
         LOGW("HDR: exposure range cannot bracket %d; using single exposure", base);
-        return captureSingle();
+        return captureSingle(-ENOTSUP);
     }
 
     // Base frame last: allocate in capture order.
@@ -7787,7 +7836,7 @@ int32_t QCamera3HardwareInterface::orchestrateBurstCapture(
             mPictureChannel->beginHdrCapture(group, group[0], cap->position == CAM_POSITION_FRONT);
     if (rc != NO_ERROR) {
         LOGW("HDR: merger unavailable (%d); using single exposure", rc);
-        return captureSingle();
+        return captureSingle(rc);
     }
 
     struct SubmissionScope {
@@ -9650,7 +9699,9 @@ no_error:
                 rc = beginVerifiedDualRequest(frameNumber, meta);
                 if (rc != NO_ERROR) {
                     LOGW("Dual input binding failed for frame %u: %d; using main JPEG", frameNumber, rc);
-                    mNativeDualBindStatus = rc;
+                    const int32_t bindStatus = rc;
+                    mNativeDualBindStatus = bindStatus;
+                    noteNativeStageFailure(frameNumber, OPPO_NATIVE_DUAL_BOKEH, bindStatus);
                     rc = NO_ERROR;
                 }
                 break;
@@ -11098,6 +11149,114 @@ void QCamera3HardwareInterface::noteNativeStage(uint32_t internalFrame,
     ++entry->recordCount;
 }
 
+void QCamera3HardwareInterface::noteNativeStageFailure(uint32_t internalFrame,
+        int32_t stageId, int32_t status)
+{
+    const char *algorithm = "NativeMode";
+    switch (stageId) {
+    case OPPO_NATIVE_HDR: algorithm = "HDR"; break;
+    case OPPO_NATIVE_LLHDR: algorithm = "ArcSoftLLHDR"; break;
+    case OPPO_NATIVE_MFNR: algorithm = "MFNR"; break;
+    case OPPO_NATIVE_SUPERPHOTO: algorithm = "VDSuperPhoto"; break;
+    case OPPO_NATIVE_REAR_BEAUTY: algorithm = "ARCRLP"; break;
+    case OPPO_NATIVE_DUAL_BOKEH: algorithm = "ArcSoftDualBokeh"; break;
+    case OPPO_NATIVE_SCENE: algorithm = "ArcSoftScene"; break;
+    case OPPO_NATIVE_FRONT_BEAUTY: algorithm = "FrontBeauty"; break;
+    default: break;
+    }
+    uint32_t frameworkFrame = UINT32_MAX;
+    if (getFrameworkFrameNumber(internalFrame, frameworkFrame) != NO_ERROR)
+        frameworkFrame = UINT32_MAX;
+    char trace[QCamera3AlgoTrace::kMaxLength + 1] = {};
+    snprintf(trace, sizeof(trace), "OPPO_HAL3 algorithm=%s status=%d frame=%u inputs=1",
+            algorithm, status, frameworkFrame);
+    noteNativeTrace(internalFrame, trace, OPPO_NATIVE_OFF);
+    noteNativeStage(internalFrame, stageId, status, 0);
+}
+
+// Decode the per-frame preview statistics used by the automatic still policy.
+// A missing field keeps the last value; a frame that carries neither exposure nor
+// histogram is ignored.
+void QCamera3HardwareInterface::updateAutoCaptureStats(metadata_buffer_t *metadata,
+        uint32_t frameNumber)
+{
+    if (metadata == nullptr) return;
+    AutoCaptureStats update;
+    update.frameNumber = frameNumber;
+    bool fresh = false;
+    IF_META_AVAILABLE(int64_t, exposure, CAM_INTF_META_SENSOR_EXPOSURE_TIME, metadata) {
+        if (*exposure > 0 && *exposure <= QCamera3AutoCapturePolicy::kMaxExposureTimeNs) {
+            update.exposureTimeNs = *exposure;
+            fresh = true;
+        }
+    }
+    IF_META_AVAILABLE(int32_t, sensitivity, CAM_INTF_META_SENSOR_SENSITIVITY, metadata) {
+        if (*sensitivity > 0 && *sensitivity <= QCamera3AutoCapturePolicy::kMaxIso) {
+            update.iso = *sensitivity;
+            fresh = true;
+        }
+    }
+    IF_META_AVAILABLE(cam_hist_stats_t, hist, CAM_INTF_META_HISTOGRAM, metadata) {
+        const uint32_t *bins = nullptr;
+        if (hist->type == CAM_HISTOGRAM_TYPE_YUV) {
+            bins = hist->yuv_stats.hist_buf;
+        } else if (hist->type == CAM_HISTOGRAM_TYPE_BAYER) {
+            // Green channel is the closest luma proxy when only Bayer stats exist.
+            bins = hist->bayer_stats.gr_stats.hist_buf;
+        }
+        if (bins != nullptr) {
+            uint64_t total = 0;
+            for (uint32_t i = 0; i < QCamera3AutoCapturePolicy::kHistogramBins; ++i) {
+                update.histogram[i] = bins[i];
+                total += bins[i];
+            }
+            if (total > 0 && total <= UINT32_MAX) {
+                update.histogramTotal = uint32_t(total);
+                update.histogramValid = QCamera3AutoCapturePolicy::histogramClipping(
+                        update.histogram, update.histogramTotal,
+                        update.highlightClippedMilli, update.shadowClippedMilli);
+                fresh = update.histogramValid;
+            }
+        }
+    }
+    if (!fresh) return;
+    if (!update.histogramValid) {
+        // Keep the last decoded histogram when this frame only reports AE values.
+        update.histogramValid = mAutoCaptureStats.histogramValid;
+        update.histogramTotal = mAutoCaptureStats.histogramTotal;
+        update.highlightClippedMilli = mAutoCaptureStats.highlightClippedMilli;
+        update.shadowClippedMilli = mAutoCaptureStats.shadowClippedMilli;
+        if (update.histogramValid)
+            memcpy(update.histogram, mAutoCaptureStats.histogram, sizeof(update.histogram));
+    }
+    mAutoCaptureStats = update;
+}
+
+void QCamera3HardwareInterface::fillAutoCaptureStats(
+        QCamera3AutoCapturePolicy::Stats &stats, const CameraMetadata &settings)
+{
+    stats = QCamera3AutoCapturePolicy::Stats();
+    const bool requestExposure = settings.exists(ANDROID_SENSOR_EXPOSURE_TIME) &&
+            settings.find(ANDROID_SENSOR_EXPOSURE_TIME).count == 1;
+    const bool requestIso = settings.exists(ANDROID_SENSOR_SENSITIVITY) &&
+            settings.find(ANDROID_SENSOR_SENSITIVITY).count == 1;
+    if (requestExposure && requestIso) {
+        // A manual AE request describes the snapshot exposure itself.
+        stats.exposureTimeNs = settings.find(ANDROID_SENSOR_EXPOSURE_TIME).data.i64[0];
+        stats.iso = settings.find(ANDROID_SENSOR_SENSITIVITY).data.i32[0];
+    } else {
+        // Auto exposure: use the latest decoded preview frame as the estimate.
+        stats.exposureTimeNs = mAutoCaptureStats.exposureTimeNs;
+        stats.iso = mAutoCaptureStats.iso;
+    }
+    if (mAutoCaptureStats.histogramValid) {
+        stats.lumaHistogram = mAutoCaptureStats.histogram;
+        stats.histogramTotal = mAutoCaptureStats.histogramTotal;
+        stats.highlightClippedMilli = mAutoCaptureStats.highlightClippedMilli;
+        stats.shadowClippedMilli = mAutoCaptureStats.shadowClippedMilli;
+    }
+}
+
 void QCamera3HardwareInterface::noteOcclusionResult(uint32_t internalFrame,
         int32_t occluded, int32_t confidence, int32_t reason, int32_t coreStatus)
 {
@@ -11960,62 +12119,66 @@ QCamera3HardwareInterface::translateFromHalMetadata(
         }
     }
 
-    IF_META_AVAILABLE(uint32_t, histogramMode, CAM_INTF_META_STATS_HISTOGRAM_MODE, metadata) {
-        uint8_t fwk_histogramMode = (uint8_t) *histogramMode;
-        camMetadata.update(QCAMERA3_HISTOGRAM_MODE, &fwk_histogramMode, 1);
+    // The auto extension requests histogram statistics internally; do not expose
+    // the legacy QCAMERA3_HISTOGRAM_* result keys unless the client asked for them.
+    if (!mAutoCaptureStatsEnabled) {
+        IF_META_AVAILABLE(uint32_t, histogramMode, CAM_INTF_META_STATS_HISTOGRAM_MODE, metadata) {
+            uint8_t fwk_histogramMode = (uint8_t) *histogramMode;
+            camMetadata.update(QCAMERA3_HISTOGRAM_MODE, &fwk_histogramMode, 1);
 
-        if (fwk_histogramMode == QCAMERA3_HISTOGRAM_MODE_ON) {
-            IF_META_AVAILABLE(cam_hist_stats_t, stats_data, CAM_INTF_META_HISTOGRAM, metadata) {
-                // process histogram statistics info
-                uint32_t hist_buf[4][CAM_HISTOGRAM_STATS_SIZE];
-                uint32_t hist_size = sizeof(cam_histogram_data_t::hist_buf);
-                cam_histogram_data_t rHistData, grHistData, gbHistData, bHistData;
-                memset(&rHistData, 0, sizeof(rHistData));
-                memset(&grHistData, 0, sizeof(grHistData));
-                memset(&gbHistData, 0, sizeof(gbHistData));
-                memset(&bHistData, 0, sizeof(bHistData));
+            if (fwk_histogramMode == QCAMERA3_HISTOGRAM_MODE_ON) {
+                IF_META_AVAILABLE(cam_hist_stats_t, stats_data, CAM_INTF_META_HISTOGRAM, metadata) {
+                    // process histogram statistics info
+                    uint32_t hist_buf[4][CAM_HISTOGRAM_STATS_SIZE];
+                    uint32_t hist_size = sizeof(cam_histogram_data_t::hist_buf);
+                    cam_histogram_data_t rHistData, grHistData, gbHistData, bHistData;
+                    memset(&rHistData, 0, sizeof(rHistData));
+                    memset(&grHistData, 0, sizeof(grHistData));
+                    memset(&gbHistData, 0, sizeof(gbHistData));
+                    memset(&bHistData, 0, sizeof(bHistData));
 
-                switch (stats_data->type) {
-                case CAM_HISTOGRAM_TYPE_BAYER:
-                    switch (stats_data->bayer_stats.data_type) {
-                        case CAM_STATS_CHANNEL_GR:
-                            rHistData = grHistData = gbHistData = bHistData =
-                                    stats_data->bayer_stats.gr_stats;
-                            break;
-                        case CAM_STATS_CHANNEL_GB:
-                            rHistData = grHistData = gbHistData = bHistData =
-                                    stats_data->bayer_stats.gb_stats;
-                            break;
-                        case CAM_STATS_CHANNEL_B:
-                            rHistData = grHistData = gbHistData = bHistData =
-                                    stats_data->bayer_stats.b_stats;
-                            break;
-                        case CAM_STATS_CHANNEL_ALL:
-                            rHistData = stats_data->bayer_stats.r_stats;
-                            gbHistData = stats_data->bayer_stats.gb_stats;
-                            grHistData = stats_data->bayer_stats.gr_stats;
-                            bHistData = stats_data->bayer_stats.b_stats;
-                            break;
-                        case CAM_STATS_CHANNEL_Y:
-                        case CAM_STATS_CHANNEL_R:
-                        default:
-                            rHistData = grHistData = gbHistData = bHistData =
-                                    stats_data->bayer_stats.r_stats;
-                            break;
+                    switch (stats_data->type) {
+                    case CAM_HISTOGRAM_TYPE_BAYER:
+                        switch (stats_data->bayer_stats.data_type) {
+                            case CAM_STATS_CHANNEL_GR:
+                                rHistData = grHistData = gbHistData = bHistData =
+                                        stats_data->bayer_stats.gr_stats;
+                                break;
+                            case CAM_STATS_CHANNEL_GB:
+                                rHistData = grHistData = gbHistData = bHistData =
+                                        stats_data->bayer_stats.gb_stats;
+                                break;
+                            case CAM_STATS_CHANNEL_B:
+                                rHistData = grHistData = gbHistData = bHistData =
+                                        stats_data->bayer_stats.b_stats;
+                                break;
+                            case CAM_STATS_CHANNEL_ALL:
+                                rHistData = stats_data->bayer_stats.r_stats;
+                                gbHistData = stats_data->bayer_stats.gb_stats;
+                                grHistData = stats_data->bayer_stats.gr_stats;
+                                bHistData = stats_data->bayer_stats.b_stats;
+                                break;
+                            case CAM_STATS_CHANNEL_Y:
+                            case CAM_STATS_CHANNEL_R:
+                            default:
+                                rHistData = grHistData = gbHistData = bHistData =
+                                        stats_data->bayer_stats.r_stats;
+                                break;
+                        }
+                        break;
+                    case CAM_HISTOGRAM_TYPE_YUV:
+                        rHistData = grHistData = gbHistData = bHistData =
+                                stats_data->yuv_stats;
+                        break;
                     }
-                    break;
-                case CAM_HISTOGRAM_TYPE_YUV:
-                    rHistData = grHistData = gbHistData = bHistData =
-                            stats_data->yuv_stats;
-                    break;
+
+                    memcpy(hist_buf, rHistData.hist_buf, hist_size);
+                    memcpy(hist_buf[1], gbHistData.hist_buf, hist_size);
+                    memcpy(hist_buf[2], grHistData.hist_buf, hist_size);
+                    memcpy(hist_buf[3], bHistData.hist_buf, hist_size);
+
+                    camMetadata.update(QCAMERA3_HISTOGRAM_STATS, (int32_t*)hist_buf, hist_size*4);
                 }
-
-                memcpy(hist_buf, rHistData.hist_buf, hist_size);
-                memcpy(hist_buf[1], gbHistData.hist_buf, hist_size);
-                memcpy(hist_buf[2], grHistData.hist_buf, hist_size);
-                memcpy(hist_buf[3], bHistData.hist_buf, hist_size);
-
-                camMetadata.update(QCAMERA3_HISTOGRAM_STATS, (int32_t*)hist_buf, hist_size*4);
             }
         }
     }
@@ -15961,9 +16124,17 @@ int QCamera3HardwareInterface::setFrameParameters(
                 controls.find(QCAMERA3_NATIVE_ALGORITHM_AUTO_HDR_ENABLE);
         const camera_metadata_entry_t autoNight =
                 controls.find(QCAMERA3_NATIVE_ALGORITHM_AUTO_NIGHT_ENABLE);
-        mNativeStages.auto_hdr_enable = autoHdr.count == 1 ? autoHdr.data.i32[0] : 0;
-        mNativeStages.auto_night_enable = autoNight.count == 1 ? autoNight.data.i32[0] : 0;
+        const bool autoHdrPresent = autoHdr.count == 1;
+        const bool autoNightPresent = autoNight.count == 1;
+        mNativeStages.auto_hdr_enable = autoHdrPresent ? autoHdr.data.i32[0] : 0;
+        mNativeStages.auto_night_enable = autoNightPresent ? autoNight.data.i32[0] : 0;
         mNativeStages.auto_capture_valid = 1;
+        if (autoHdrPresent || autoNightPresent) {
+            mAutoCaptureStatsEnabled = mNativeStages.auto_hdr_enable ||
+                    mNativeStages.auto_night_enable;
+        }
+        // An explicit mode request does not need the automatic luma statistics.
+        if (mNativeStillMode != OPPO_NATIVE_OFF) mAutoCaptureStatsEnabled = false;
         const camera_metadata_entry_t facePreview =
                 controls.find(QCAMERA3_NATIVE_ALGORITHM_FACE_PREVIEW_PARAM);
         if (facePreview.count == 4 && facePreview.data.i32 != NULL) {
@@ -17122,13 +17293,17 @@ int QCamera3HardwareInterface::translateToHalMetadata
 #endif
     }
 
+    // Auto HDR/night needs a luma distribution; request the statistics internally
+    // while the explicit auto extension is on. Standard clients never set those
+    // keys, so their sessions keep the client value (normally OFF).
+    uint8_t histogramMode = QCAMERA3_HISTOGRAM_MODE_OFF;
     if (frame_settings.exists(QCAMERA3_HISTOGRAM_MODE)) {
-        uint8_t histogramMode =
-                frame_settings.find(QCAMERA3_HISTOGRAM_MODE).data.u8[0];
-        if (ADD_SET_PARAM_ENTRY_TO_BATCH(hal_metadata, CAM_INTF_META_STATS_HISTOGRAM_MODE,
-                histogramMode)) {
-            rc = BAD_VALUE;
-        }
+        histogramMode = frame_settings.find(QCAMERA3_HISTOGRAM_MODE).data.u8[0];
+    }
+    if (mAutoCaptureStatsEnabled) histogramMode = QCAMERA3_HISTOGRAM_MODE_ON;
+    if (ADD_SET_PARAM_ENTRY_TO_BATCH(hal_metadata, CAM_INTF_META_STATS_HISTOGRAM_MODE,
+            histogramMode)) {
+        rc = BAD_VALUE;
     }
 
     if (frame_settings.exists(ANDROID_STATISTICS_SHARPNESS_MAP_MODE)) {

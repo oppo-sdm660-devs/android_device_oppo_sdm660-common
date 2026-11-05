@@ -1942,7 +1942,8 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
                 algorithm, job->frameNumber, state->count);
     }
     nativeAlgorithmTrace(job->jpeg_settings, algorithm, rc, job->frameNumber, state->count,
-            static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
+            static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
+            rc == NO_ERROR ? 1 : 0);
     const bool discard = state->cancelled.load();
     if (discard) discardHdrFrame(job, frame);
     finishHdrGroupLocked();
@@ -2021,7 +2022,8 @@ void QCamera3PostProcessor::processDualCapture()
                 job->frameNumber, rc, fallback);
         const char *algorithm = "ArcSoftDualBokeh";
         nativeAlgorithmTrace(job->jpeg_settings, algorithm, rc, job->frameNumber, 2,
-                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
+                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
+                rc == NO_ERROR ? 1 : 0);
         finishHdrGroupLocked();
         queueJpegFrame(job, frame, nullptr);
     }
@@ -3321,7 +3323,8 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
         }
         nativeAlgorithmTrace(jpeg_settings, "ARCRLP", beautyStatus,
                 jpeg_settings->frame_number, 1,
-                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
+                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
+                beautyStatus == NO_ERROR ? 1 : 0);
     }
     // Front beauty (explicit org.lineageos stillMode=FRONT_BEAUTY only).
     if (jpeg_settings && jpeg_settings->native_still_mode == OPPO_NATIVE_FRONT_BEAUTY) {
@@ -3340,7 +3343,8 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
         }
         nativeAlgorithmTrace(jpeg_settings, "FrontBeauty", beautyStatus,
                 jpeg_settings->frame_number, 1,
-                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
+                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
+                beautyStatus == NO_ERROR ? 1 : 0);
     }
     // Mode 9: semantic scene classification and tuning.
     if (jpeg_settings && (jpeg_settings->native_still_mode == OPPO_NATIVE_SCENE ||
@@ -3362,10 +3366,12 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
                 if (sceneStatus != NO_ERROR) return sceneStatus;
             }
         }
-        if (jpeg_settings->native_still_mode == OPPO_NATIVE_SCENE)
-            nativeAlgorithmTrace(jpeg_settings, "ArcSoftScene", sceneStatus,
+        // Explicit SCENE extension: always publish the stage, including the
+        // detection/library failures and identity "not applied" result.
+        nativeAlgorithmTrace(jpeg_settings, "ArcSoftScene", sceneStatus,
                 jpeg_settings->frame_number, 1,
-                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData));
+                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
+                sceneStatus == NO_ERROR && detected.applied ? 1 : 0);
         // Append scene state to the fusion trace; a failed core keeps the frame.
         size_t used = jpeg_settings->image_desc_valid ?
             strnlen(jpeg_settings->image_desc, sizeof(jpeg_settings->image_desc)) : 0;
