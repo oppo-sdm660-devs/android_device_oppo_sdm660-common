@@ -35,6 +35,7 @@ from hal1re import Image, Disassembler
 
 DEFAULT_DIR = ('/home/cy/Project/R11/proprietary_vendor_oppo_sdm660-common/'
                'proprietary/vendor/lib')
+DEFAULT_STOCK_HAL1 = '/home/cy/Project/R11/stock/R11/vendor/lib/hw/camera.sdm660.so'
 
 EXPECTED = {
     'liboppo_platform_hwi.so': {
@@ -122,6 +123,7 @@ def insn_offsets(image, symbol, base_reg='r1'):
 def main(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument('--vendor-lib-dir', default=DEFAULT_DIR)
+    parser.add_argument('--stock-hal1', default=DEFAULT_STOCK_HAL1)
     args = parser.parse_args(argv[1:])
     lib_dir = args.vendor_lib_dir
 
@@ -259,6 +261,23 @@ def main(argv):
         check('%s has no ZSL symbols/strings' % name,
               not symbols and not any('zsl' in s.lower() for s in strings),
               '%s' % symbols[:3])
+
+    # 9. second batch: stock HAL1 builder evidence ------------------------
+    stock = args.stock_hal1
+    if os.path.exists(stock):
+        import frame_ctx
+        import face_info
+        import mode_mask
+        batch = []
+        batch += frame_ctx._checks(stock)
+        batch += face_info._checks(
+            stock, os.path.join(lib_dir, 'liboppo_platform_hwi.so'))
+        batch += mode_mask._checks(stock)
+        for item in batch:
+            check(item[0], bool(item[1]))
+        print('second batch: %s' % stock)
+    else:
+        print('skip second batch: %s not found' % stock)
 
     failed = [name for name, ok, _ in results if not ok]
     print('\n%d checks, %d failed' % (len(results), len(failed)))

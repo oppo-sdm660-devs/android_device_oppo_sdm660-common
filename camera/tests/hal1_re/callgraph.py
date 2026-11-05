@@ -34,6 +34,7 @@ def scan_edges(image):
         return {}, {}
     md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_LITTLE_ENDIAN)
     md.detail = True
+    md.skipdata = True
     veneers = image.veneers()
     data = text.data()
     base = text['sh_addr']

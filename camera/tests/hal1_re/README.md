@@ -40,7 +40,16 @@ llvm-objdump --version                   # 可选，人工核对用
 | `callgraph.py` | Thumb-2 线性扫描建调用图：`--callees`/`--callers`/`--roots` |
 | `extract_offsets.py` | 从各算法 hook 提取 `param_platform_t` / frame ctx 的字段访问 |
 | `verify_evidence.py` | 断言文档中的全部关键结论（哈希/掩码/偏移/注册表/ZSL 缺失），失败即非 0 |
+| `frame_ctx.py` | 第二批：stock HAL1 `camera.sdm660.so` 的 frame ctx(0x308)/param_platform_t(0x12EC) builder 锚点与写入表 |
+| `face_info.py` | 第二批：param+0x214 的 10×0x174 逐图描述符内层布局（face block / AF ROI / focus） |
+| `mode_mask.py` | 第二批：OPPO cap mode 枚举与 preview/snapshot 的 mode→mask 选择点 |
 | `run_all.sh` | 一次性跑完并收集输出到临时目录 |
+
+第二批证据源（stock dump，只读）：
+
+| 库 | 大小 | sha256 | BuildID |
+| --- | --- | --- | --- |
+| `vendor/lib/hw/camera.sdm660.so` | 1742388 | `226d41ad86eff0199aaff356f77f0c6a7b786da320efad0bb130500ccd166863` | `3a0843572d64e6fe96ef49d49f183090` |
 
 ## 复跑
 
@@ -67,7 +76,11 @@ cd camera/tests/hal1_re
 ./callgraph.py <vendor>/lib/libcamera_core_hwi.so --callers _Z13llhdr_processPvS_
 
 # 6) 一键验证（CI 友好，退出码 0 = 全部通过）
-./verify_evidence.py && echo "evidence OK"
+./verify_evidence.py && echo "evidence OK"      # 196 断言（含第二批）
+./frame_ctx.py --verify && ./face_info.py --verify && ./mode_mask.py --verify   # 118 条第二批断言
+
+# 第二批证据（stock HAL1 builder / face-info / mode→mask；可用 STOCK_HAL1 覆盖路径）
+./frame_ctx.py ; ./face_info.py ; ./mode_mask.py
 ```
 
 二进制不在仓库内，任何路径都以命令行参数传入；脚本只读、不写厂商目录。

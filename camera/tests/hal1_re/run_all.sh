@@ -56,8 +56,18 @@ cd "$HERE"
     ./callgraph.py "$CORE" --callees _Z23oppo_wrapper_offline_cbxPKvib --depth 2
 } > "$OUT/core.callchains.txt" 2>&1 || status=1
 
+# Second batch: stock HAL1 builder evidence.
+STOCK_HAL1=${STOCK_HAL1:-/home/cy/Project/R11/stock/R11/vendor/lib/hw/camera.sdm660.so}
+if [ -f "$STOCK_HAL1" ]; then
+    ./frame_ctx.py --stock-hal1 "$STOCK_HAL1" > "$OUT/frame_ctx.txt" 2>&1 || status=1
+    ./face_info.py --stock-hal1 "$STOCK_HAL1" > "$OUT/face_info.txt" 2>&1 || status=1
+    ./mode_mask.py --stock-hal1 "$STOCK_HAL1" > "$OUT/mode_mask.txt" 2>&1 || status=1
+else
+    echo "stock HAL1 not found: $STOCK_HAL1 (second batch skipped)" >&2
+fi
+
 # Evidence assertions last; their exit code is the script's result.
-if ./verify_evidence.py --vendor-lib-dir "$VENDOR_LIB_DIR" | tee "$OUT/verify.txt"; then
+if ./verify_evidence.py --vendor-lib-dir "$VENDOR_LIB_DIR" --stock-hal1 "$STOCK_HAL1" | tee "$OUT/verify.txt"; then
     echo "evidence: OK"
 else
     echo "evidence: FAILED" >&2

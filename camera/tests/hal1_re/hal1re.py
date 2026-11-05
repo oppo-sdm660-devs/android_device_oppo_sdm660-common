@@ -239,8 +239,12 @@ class Disassembler:
         self.image = image
         self.md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_LITTLE_ENDIAN)
         self.md.detail = True
+        # Linear sweeps of large mixed real-world .text hit data/UD fields; skip
+        # the bad bytes instead of stopping the whole sweep.
+        self.md.skipdata = True
         self.md_arm = Cs(CS_ARCH_ARM, CS_MODE_ARM | CS_MODE_LITTLE_ENDIAN)
         self.md_arm.detail = True
+        self.md_arm.skipdata = True
         self.veneers = image.veneers()
 
     def _lit_addr(self, insn, op):
@@ -329,6 +333,22 @@ class Disassembler:
                 notes.append(note)
             rec['note'] = '  '.join(notes)
         return insns
+
+
+def function_calls(image, name):
+    """Resolved call targets (BL/BLX) of one function, using the veneer map."""
+    syms = [s for s in image.syms if s['name'] == name and s['value'] and s['size']]
+    if not syms:
+        return []
+    dis = Disassembler(image)
+    out = []
+    for rec in dis.disasm(syms[0]['value'], syms[0]['size']):
+        target = rec['call']
+        if target is None:
+            continue
+        imported = dis.veneers.get(target)
+        out.append(imported if imported is not None else image.symbolize(target))
+    return out
 
 
 # ------------------------------------------------------------------- outputs
