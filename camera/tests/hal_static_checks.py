@@ -346,9 +346,27 @@ need(platform_hwi_h, "static void setFaceInfo", "face info cache setter")
 need(platform_hwi_h, "static bool getFaceInfo", "face info cache getter")
 need(platform_hwi, "kOppoFaceMaxAgeFrames", "bounded face cache age")
 need(platform_hwi, "params.faceInfo.count = faceCount", "processStillFrame face conversion")
-need(platform_hwi_h, "beautyParamsReady", "beauty params readiness accessor")
-need(platform_hwi, "beauty params pending (task-74)", "beauty params pending gate")
-need(platform_hwi_h, "mBeautyParamsReady = false", "beauty disabled until task-74")
+need(platform_hwi_h, "beautyParamsReady(int32_t stillMode)",
+     "beauty params readiness accessor")
+need(platform_hwi_h, "mBeautyModelRear", "rear beauty model path")
+need(platform_hwi, "oppoHwiResolveModelPath", "beauty model stat resolution")
+need(platform_hwi, "kOppoHwiBeautyModelProp", "beauty model property override")
+need(platform_hwi, "beauty model path unavailable", "beauty fail-closed path")
+need(platform_hwi, "params.beauty.enabled = true", "beauty params constructed")
+need(platform_hwi, "params.beauty.strength = frame.beautyStrength",
+     "beauty strength passed")
+need(platform_hwi, "params.scesParam", "SCES param written")
+need(params_h, "struct BeautyParams", "beauty params type")
+need(params_h, "kBeautyModelPath = 0x0060", "beauty model path offset")
+need(params_h, "kBeautyStrength = 0x0164", "beauty strength offset")
+need(params_h, "kScesParam = 0x10BC", "SCES param offset")
+need(params_cpp, "buildBeautyParams", "beauty param builder")
+need(params_cpp, "case 5: return kAlgoFaceBeauty | kAlgoFaceInfo",
+     "rear beauty mask includes faceInfo")
+need(params_cpp, "case 10: return kAlgoArcFaceBeauty | kAlgoFaceInfo",
+     "front beauty mask includes faceInfo")
+need(params_h, "kAlgoFaceInfo;", "supported platform mask includes faceInfo")
+need(platform_hwi, "beauty_model_front", "front beauty model property")
 need(hwi, "QCamera3OppoPlatformHwi::setFaceInfo", "HWI result feeds face cache")
 need(hwi, "CAM_INTF_META_FACE_DETECTION, metadata)", "HWI reads face detection")
 need(hwi, "mCropRegionMapper.toActiveArray(rect.left, rect.top, rect.width,",
@@ -360,11 +378,14 @@ if post_text.count("QCamera3OppoPlatformHwi::getFaceInfo") != 3:
 # task-75 A: beauty must NOT be gated on face count (RE: face block is bokeh/picbest only).
 if "platformFaces.count > 0" in post_text:
     failures.append("QCamera3PostProc.cpp: beauty must not gate on face count")
-# task-75 B: beauty stays closed with an explicit pending fallback until task-74.
-if post_text.count("beautyParamsReady()") != 2:
-    failures.append("QCamera3PostProc.cpp: beauty pending gate missing")
-if post_text.count("beauty params pending (task-74)") != 2:
-    failures.append("QCamera3PostProc.cpp: pending trace/log missing")
+# task-75 D/E: beauty enabled per mode only when the model path is ready, with
+# the user strength mapped into the platform frame; missing path falls back.
+if post_text.count("beautyParamsReady(") != 2:
+    failures.append("QCamera3PostProc.cpp: per-mode beauty readiness missing")
+if post_text.count("platformFrame.beautyStrength") != 2:
+    failures.append("QCamera3PostProc.cpp: beauty strength not passed")
+if post_text.count("beauty model path unavailable") != 2:
+    failures.append("QCamera3PostProc.cpp: beauty fallback log missing")
 if "platformFrame.faceInfo = platformFaces;" not in post_text:
     failures.append("QCamera3PostProc.cpp: face info is not passed to platform frame")
 

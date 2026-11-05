@@ -70,6 +70,18 @@ struct ParamOffsets {
     static constexpr size_t kFaceBlockOffset = 0x28;
     static constexpr size_t kFaceArrayStride = 0x28;
     static constexpr size_t kFaceCountOffset = 0x170;
+    /* Original beauty/SCES parameters (RE task-74). */
+    static constexpr size_t kBeautyModelPath = 0x0060;   /* char[0x80] */
+    static constexpr size_t kBeautyModelPathSize = 0x80;
+    static constexpr size_t kBeautyParam24 = 0x0024;
+    static constexpr size_t kBeautyThreshold1 = 0x0158;
+    static constexpr size_t kBeautyThreshold2 = 0x015C;
+    static constexpr size_t kBeautyStrength = 0x0164;
+    static constexpr size_t kBeautyMode = 0x016A;        /* u8 */
+    static constexpr size_t kBeautyEnable = 0x016F;      /* u8 */
+    static constexpr size_t kFaceFdSelect = 0x01F0;
+    static constexpr size_t kFaceInfoMode = 0x01F4;
+    static constexpr size_t kScesParam = 0x10BC;
     /* 10-frame per-frame parameter arrays read by hdr/llhdr (arrays of 10 u32). */
     static constexpr size_t kFrameArray0 = 0x023C;
     static constexpr size_t kFrameArray1 = 0x0264;
@@ -122,6 +134,20 @@ struct FaceInfo {
     FaceRect faces[kMaxFaceInfo];
 };
 
+/* Original beauty parameters (task-74); only evidence-backed fields are filled. */
+struct BeautyParams {
+    bool enabled = false;
+    const char *modelPath = nullptr; /* param+0x60 (Venus resource dir/file) */
+    int32_t strength = 0;            /* 0..100 -> param+0x164 */
+    int32_t param24 = 0;             /* param+0x24 (D) */
+    int32_t threshold1 = 0;          /* param+0x158 (D, keep 0) */
+    int32_t threshold2 = 0;          /* param+0x15C (D, keep 0) */
+    int32_t mode = 0;                /* param+0x16A u8 (D switch) */
+    int32_t enable = 0;              /* param+0x16F u8 (D switch) */
+    int32_t fdSelect = 0;            /* param+0x1F0 (D, Venus FD) */
+    int32_t faceInfoMode = 0;        /* param+0x1F4 (D, Venus FD) */
+};
+
 /* One NV21 snapshot frame, as handed to the platform algorithm block. */
 struct Frame {
     const uint8_t *data = nullptr;
@@ -137,6 +163,8 @@ struct Frame {
     void *scratchPtr = nullptr;
     size_t scratchSize = 0;
     FaceInfo faceInfo;
+    BeautyParams beauty;
+    int32_t scesParam = 0;               /* param+0x10BC (SCES) */
 };
 
 /* Explicit org.lineageos stillMode -> original algorithm bit. A zero result means
@@ -150,7 +178,7 @@ bool supportedMask(uint64_t mask);
  * SCES/AI scene (bit9), front beauty (bit8), rear beauty (bit5).
  * HDR/LLHDR/MFNR/SUPER/bokeh are intentionally excluded. */
 constexpr uint64_t kSupportedPlatformMask =
-        kAlgoVdSces | kAlgoArcFaceBeauty | kAlgoFaceBeauty;
+        kAlgoVdSces | kAlgoArcFaceBeauty | kAlgoFaceBeauty | kAlgoFaceInfo;
 bool isPlatformStillMode(int32_t stillMode);
 
 /* Stable name for a single algorithm bit, for diagnostics. */
@@ -165,6 +193,11 @@ bool buildParam(uint8_t *param, size_t size, const Frame &frame);
  * Returns false on bad size/geometry; count=0 clears the block. */
 bool buildFaceInfo(uint8_t *param, size_t size, const FaceInfo &faces,
         int32_t imageWidth, int32_t imageHeight, bool mirror);
+
+/* Fill the original beauty parameters (param+0x60/0x164/0x168/0x24/0x158/0x15C/
+ * 0x16A/0x16F/0x1F0/0x1F4). The caller must only enable this when the model path
+ * exists; unknown/D fields stay whatever the caller passes (0 recommended). */
+bool buildBeautyParams(uint8_t *param, size_t size, const BeautyParams &beauty);
 
 /* Zero-fill and fill image slot 0/scratch of one platform frame context block. */
 bool buildFrameCtx(uint8_t *ctx, size_t size, const Frame &frame);

@@ -38,6 +38,7 @@ struct QCamera3OppoPlatformFrame {
     int32_t stride;
     int32_t slice;
     QCamera3OppoPlatformFaceInfo faceInfo;
+    int32_t beautyStrength = 0; /* 0..100, only used by beauty modes */
 };
 
 class QCamera3OppoPlatformHwi {
@@ -68,10 +69,10 @@ public:
     /* Last processStillFrame() result, for diagnostics. */
     int32_t lastStatus() const;
 
-    /* False until the original beauty parameters (model path/strength/...) are
-     * constructed per RE task-74. processStillFrame(5/10) returns -EOPNOTSUPP
-     * while false; callers fall back to the self-developed beauty path. */
-    bool beautyParamsReady() const;
+    /* True when the beauty model path for this mode was found on the device
+     * (RE task-74: never run with an empty/nonexistent path). processStillFrame
+     * for 5/10 returns -EOPNOTSUPP while false; callers fall back. */
+    bool beautyParamsReady(int32_t stillMode) const;
 
     /* Face result cache fed from HAL3 CAM_INTF_META_FACE_DETECTION (active-array
      * rects). getFaceInfo() prefers the exact frame; otherwise it uses the latest
@@ -114,7 +115,19 @@ private:
     bool mUnavailable;
     uint32_t mFrameCount;
     int32_t mLastStatus = -EOPNOTSUPP;
-    bool mBeautyParamsReady = false; /* task-74: flip once beauty params are built */
+    /* Original beauty parameters (task-74). Paths are resolved on camera open
+     * from properties or existing device files; empty = beauty not registered. */
+    char mBeautyModelRear[0x80] = {};
+    char mBeautyModelFront[0x80] = {};
+    int32_t mBeautyParam24 = 0;
+    int32_t mBeautyThreshold1 = 0;
+    int32_t mBeautyThreshold2 = 0;
+    int32_t mBeautyMode = 0;
+    int32_t mBeautyEnable = 0;
+    int32_t mFaceFdSelect = 0;
+    int32_t mFaceInfoMode = 0;
+    int32_t mScesParam = 0;
+    void resolveBeautyParamsLocked();
     /* Session-level scratch buffer for frame ctx +0x2c8/2cc/2d4 (0x1000 B,
      * 4 KiB aligned). facebeauty/imageadjust/superphoto/blurless read it. */
     void *mScratch = nullptr;

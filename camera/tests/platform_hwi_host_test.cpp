@@ -14,6 +14,8 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <initializer_list>
+#include <stdlib.h>
+#include <unistd.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -56,15 +58,16 @@ void testParamsUnit() {
     CHECK(maskForStillMode(2) == kAlgoLlhdr);
     CHECK(maskForStillMode(3) == kAlgoPicBest);
     CHECK(maskForStillMode(4) == kAlgoSuperPhoto);
-    CHECK(maskForStillMode(5) == kAlgoFaceBeauty);
+    CHECK(maskForStillMode(5) == (kAlgoFaceBeauty | kAlgoFaceInfo));
     CHECK(maskForStillMode(7) == kAlgoBokeh);
     CHECK(maskForStillMode(9) == kAlgoVdSces);
-    CHECK(maskForStillMode(10) == kAlgoArcFaceBeauty);
+    CHECK(maskForStillMode(10) == (kAlgoArcFaceBeauty | kAlgoFaceInfo));
     CHECK(maskForStillMode(0) == 0);
     CHECK(maskForStillMode(6) == 0);
     CHECK(maskForStillMode(11) == 0);
     // Only SCES(9)/front beauty(10)/rear beauty(5) are wired to platform.
-    CHECK(kSupportedPlatformMask == (kAlgoVdSces | kAlgoArcFaceBeauty | kAlgoFaceBeauty));
+    CHECK(kSupportedPlatformMask == (kAlgoVdSces | kAlgoArcFaceBeauty |
+            kAlgoFaceBeauty | kAlgoFaceInfo));
     CHECK(isPlatformStillMode(5));
     CHECK(isPlatformStillMode(9));
     CHECK(isPlatformStillMode(10));
@@ -164,6 +167,35 @@ void testParamsUnit() {
     none.sourceHeight = 3000;
     CHECK(buildFaceInfo(param, sizeof(param), none, 100, 50, false));
     CHECK(readU32(param, faceCount) == 0);
+
+    // Beauty params (RE task-74): model path/strength/isFront/optional switches.
+    Frame beautyFrame = frame;
+    beautyFrame.beauty.enabled = true;
+    beautyFrame.beauty.modelPath = "/tmp/does-not-matter.model";
+    beautyFrame.beauty.strength = 60;
+    beautyFrame.beauty.param24 = 3;
+    beautyFrame.beauty.threshold1 = 0;
+    beautyFrame.beauty.threshold2 = 0;
+    beautyFrame.beauty.mode = 1;
+    beautyFrame.beauty.enable = 1;
+    beautyFrame.beauty.fdSelect = 2;
+    beautyFrame.beauty.faceInfoMode = 4;
+    beautyFrame.scesParam = 7;
+    CHECK(buildParam(param, sizeof(param), beautyFrame));
+    CHECK(strcmp(reinterpret_cast<const char *>(param) + ParamOffsets::kBeautyModelPath,
+            "/tmp/does-not-matter.model") == 0);
+    CHECK(readU32(param, ParamOffsets::kBeautyStrength) == 60);
+    CHECK(readU32(param, ParamOffsets::kBeautyParam24) == 3);
+    CHECK(readU8(param, ParamOffsets::kBeautyMode) == 1);
+    CHECK(readU8(param, ParamOffsets::kBeautyEnable) == 1);
+    CHECK(readU32(param, ParamOffsets::kFaceFdSelect) == 2);
+    CHECK(readU32(param, ParamOffsets::kFaceInfoMode) == 4);
+    CHECK(readU32(param, ParamOffsets::kScesParam) == 7);
+    CHECK(param[ParamOffsets::kIsFront] == 1);
+    // Strength is clamped to 0..100.
+    beautyFrame.beauty.strength = 250;
+    CHECK(buildParam(param, sizeof(param), beautyFrame));
+    CHECK(readU32(param, ParamOffsets::kBeautyStrength) == 100);
     // Fail closed on bad geometry or a too-small block.
     Frame bad = frame;
     bad.width = 0;
@@ -252,14 +284,15 @@ int main(int argc, char **argv) {
 
     // 3. task-75 A/B: beauty params are pending (task-74) -> fail closed, no call.
     QCamera3OppoPlatformHwi::get().onOpenCamera(1, true);
-    CHECK(!QCamera3OppoPlatformHwi::get().beautyParamsReady());
+    CHECK(!QCamera3OppoPlatformHwi::get().beautyParamsReady(10));
+    CHECK(!QCamera3OppoPlatformHwi::get().beautyParamsReady(5));
     const int processBeforeBeauty = stats->processCount;
     CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(10, frame) == -EOPNOTSUPP);
     CHECK(QCamera3OppoPlatformHwi::get().lastStatus() == -EOPNOTSUPP);
     CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, frame) == -EOPNOTSUPP);
     CHECK(stats->processCount == processBeforeBeauty);
-    CHECK(maskForStillMode(10) == kAlgoArcFaceBeauty);
-    CHECK(maskForStillMode(5) == kAlgoFaceBeauty);
+    CHECK(maskForStillMode(10) == (kAlgoArcFaceBeauty | kAlgoFaceInfo));
+    CHECK(maskForStillMode(5) == (kAlgoFaceBeauty | kAlgoFaceInfo));
 
     // 3b. The shared face-block builder is still verified via SCENE(9), which
     // does not depend on beauty params or on consuming faces.
@@ -281,6 +314,52 @@ int main(int argc, char **argv) {
             faceBlock + 2 * ParamOffsets::kFaceArrayStride) == 25);
     CHECK(readU32(stats->processParam,
             faceBlock + 3 * ParamOffsets::kFaceArrayStride) == 12);
+
+    // 3c. Beauty: only runs when the model path exists (stat/property).
+    char rearModel[] = "/tmp/oppo_beauty_rear_XXXXXX";
+    char frontModel[] = "/tmp/oppo_beauty_front_XXXXXX";
+    int rearFd = mkstemp(rearModel);
+    int frontFd = mkstemp(frontModel);
+    CHECK(rearFd >= 0 && frontFd >= 0);
+    if (rearFd >= 0) close(rearFd);
+    if (frontFd >= 0) close(frontFd);
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.beauty_model", rearModel);
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.beauty_model_front", frontModel);
+    QCamera3OppoPlatformHwi::get().onOpenCamera(1, true);
+    CHECK(QCamera3OppoPlatformHwi::get().beautyParamsReady(10));
+    QCamera3OppoPlatformFrame front = frame;
+    front.beautyStrength = 70;
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(10, front) == 0);
+    CHECK((stats->processMask & ~kInProcessBackend) ==
+            (kAlgoArcFaceBeauty | kAlgoFaceInfo));
+    CHECK(stats->processParam[ParamOffsets::kIsFront] == 1);
+    CHECK(strcmp(reinterpret_cast<const char *>(stats->processParam) +
+            ParamOffsets::kBeautyModelPath, frontModel) == 0);
+    CHECK(readU32(stats->processParam, ParamOffsets::kBeautyStrength) == 70);
+    QCamera3OppoPlatformHwi::get().onOpenCamera(0, false);
+    CHECK(QCamera3OppoPlatformHwi::get().beautyParamsReady(5));
+    QCamera3OppoPlatformFrame rear = frame;
+    rear.beautyStrength = 40;
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, rear) == 0);
+    CHECK((stats->processMask & ~kInProcessBackend) ==
+            (kAlgoFaceBeauty | kAlgoFaceInfo));
+    CHECK(stats->processParam[ParamOffsets::kIsFront] == 0);
+    CHECK(strcmp(reinterpret_cast<const char *>(stats->processParam) +
+            ParamOffsets::kBeautyModelPath, rearModel) == 0);
+    CHECK(readU32(stats->processParam, ParamOffsets::kBeautyStrength) == 40);
+    // Without an existing path/property the mode fails closed again.
+    host_prop_clear_all();
+    QCamera3OppoPlatformHwi::get().onOpenCamera(0, false);
+    CHECK(!QCamera3OppoPlatformHwi::get().beautyParamsReady(5));
+    const int processAfterBeauty = stats->processCount;
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, rear) == -EOPNOTSUPP);
+    CHECK(stats->processCount == processAfterBeauty);
+    unlink(rearModel);
+    unlink(frontModel);
+    // Restore the run environment cleared above (host_prop_clear_all also unsets path).
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi", "1");
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.run", "1");
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.path", argv[1]);
 
     // 4. HDR/LLHDR/MFNR/SUPER/bokeh are not wired: fail closed before the library.
     const int processBeforeUnwired = stats->processCount;

@@ -35,6 +35,31 @@ const char *const kOppoHwiDumpProp = "persist.vendor.camera.oppo.platform_hwi.du
 const char *const kOppoHwiCallbackProp = "persist.vendor.camera.oppo.platform_hwi.callback";
 const char *const kOppoHwiRunProp = "persist.vendor.camera.oppo.platform_hwi.run";
 const char *const kOppoHwiUpdateProp = "persist.vendor.camera.oppo.platform_hwi.update";
+/* Beauty params (RE task-74). Model paths must exist; overrides are A/B.
+ * Optional switches/thresholds are D-level and default to 0 (never invented). */
+const char *const kOppoHwiBeautyModelProp =
+        "persist.vendor.camera.oppo.platform_hwi.beauty_model";
+const char *const kOppoHwiBeautyModelFrontProp =
+        "persist.vendor.camera.oppo.platform_hwi.beauty_model_front";
+const char *const kOppoHwiBeautyParam24Prop =
+        "persist.vendor.camera.oppo.platform_hwi.beauty_param24";
+const char *const kOppoHwiBeautyModeProp =
+        "persist.vendor.camera.oppo.platform_hwi.beauty_mode";
+const char *const kOppoHwiBeautyEnableProp =
+        "persist.vendor.camera.oppo.platform_hwi.beauty_enable";
+const char *const kOppoHwiFaceFdSelectProp =
+        "persist.vendor.camera.oppo.platform_hwi.face_fd_select";
+const char *const kOppoHwiFaceInfoModeProp =
+        "persist.vendor.camera.oppo.platform_hwi.face_info_mode";
+const char *const kOppoHwiScesParamProp =
+        "persist.vendor.camera.oppo.platform_hwi.sces_param";
+const char *const kOppoHwiBeautyModelRearCandidates[] = {
+    "/etc/camera", "/etc/camera/skinSeg.model", "/etc/camera/gasryuv.model",
+    "/etc/camera/faceTpl0.rgb32", "/data/vendor/camera",
+};
+const char *const kOppoHwiBeautyModelFrontCandidates[] = {
+    "/vendor/lib/libarcsoft_beautyshot_lite_image.so", "/etc/camera",
+};
 const char *const kOppoHwiDumpDir = "/data/vendor/camera";
 const char *const kOppoHwiDefaultPath = "/vendor/lib/liboppo_platform_hwi.so";
 /* HDR = bit7, LLHDR = bit14; the runtime mask stays overridable. */
@@ -139,6 +164,35 @@ void oppoHwiPutU8(uint8_t *base, size_t offset, uint8_t value)
     base[offset] = value;
 }
 
+int32_t oppoHwiPropInt(const char *name, int32_t defaultValue)
+{
+    char prop[PROPERTY_VALUE_MAX] = {};
+    property_get(name, prop, "");
+    if (prop[0] == '\0') return defaultValue;
+    return atoi(prop);
+}
+
+/* Property override wins (existence still required); otherwise first candidate
+ * that exists on this device. Empty result means "do not register beauty". */
+bool oppoHwiResolveModelPath(const char *propName, const char *const *candidates,
+        size_t candidateCount, char *out, size_t outSize)
+{
+    char prop[PROPERTY_VALUE_MAX] = {};
+    property_get(propName, prop, "");
+    if (prop[0] != '\0') {
+        if (access(prop, R_OK) != 0) return false;
+        snprintf(out, outSize, "%s", prop);
+        return true;
+    }
+    for (size_t i = 0; i < candidateCount; ++i) {
+        if (candidates[i] != nullptr && access(candidates[i], R_OK) == 0) {
+            snprintf(out, outSize, "%s", candidates[i]);
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 bool QCamera3OppoPlatformHwi::configured()
@@ -165,9 +219,37 @@ int32_t QCamera3OppoPlatformHwi::lastStatus() const
     return mLastStatus;
 }
 
-bool QCamera3OppoPlatformHwi::beautyParamsReady() const
+bool QCamera3OppoPlatformHwi::beautyParamsReady(int32_t stillMode) const
 {
-    return mBeautyParamsReady;
+    if (stillMode == 5) return mBeautyModelRear[0] != '\0';
+    if (stillMode == 10) return mBeautyModelFront[0] != '\0';
+    return true;
+}
+
+void QCamera3OppoPlatformHwi::resolveBeautyParamsLocked()
+{
+    memset(mBeautyModelRear, 0, sizeof(mBeautyModelRear));
+    memset(mBeautyModelFront, 0, sizeof(mBeautyModelFront));
+    const bool rear = oppoHwiResolveModelPath(kOppoHwiBeautyModelProp,
+            kOppoHwiBeautyModelRearCandidates,
+            sizeof(kOppoHwiBeautyModelRearCandidates) /
+                    sizeof(kOppoHwiBeautyModelRearCandidates[0]),
+            mBeautyModelRear, sizeof(mBeautyModelRear));
+    const bool front = oppoHwiResolveModelPath(kOppoHwiBeautyModelFrontProp,
+            kOppoHwiBeautyModelFrontCandidates,
+            sizeof(kOppoHwiBeautyModelFrontCandidates) /
+                    sizeof(kOppoHwiBeautyModelFrontCandidates[0]),
+            mBeautyModelFront, sizeof(mBeautyModelFront));
+    mBeautyParam24 = oppoHwiPropInt(kOppoHwiBeautyParam24Prop, 0);
+    mBeautyThreshold1 = oppoHwiPropInt("persist.vendor.camera.oppo.platform_hwi.beauty_threshold1", 0);
+    mBeautyThreshold2 = oppoHwiPropInt("persist.vendor.camera.oppo.platform_hwi.beauty_threshold2", 0);
+    mBeautyMode = oppoHwiPropInt(kOppoHwiBeautyModeProp, 0);
+    mBeautyEnable = oppoHwiPropInt(kOppoHwiBeautyEnableProp, 0);
+    mFaceFdSelect = oppoHwiPropInt(kOppoHwiFaceFdSelectProp, 0);
+    mFaceInfoMode = oppoHwiPropInt(kOppoHwiFaceInfoModeProp, 0);
+    mScesParam = oppoHwiPropInt(kOppoHwiScesParamProp, 0);
+    LOGI("oppo hwi beauty model rear=%s front=%s",
+            rear ? mBeautyModelRear : "(none)", front ? mBeautyModelFront : "(none)");
 }
 
 void QCamera3OppoPlatformHwi::setFaceInfo(uint32_t frameNumber,
@@ -299,6 +381,7 @@ void QCamera3OppoPlatformHwi::onOpenCamera(int32_t cameraId, bool isFront)
     mIsFront = isFront;
     mMask = runEnabled() ? sessionAlgorithmMask() : oppoHwiPropMask();
     mLastStatus = -EOPNOTSUPP;
+    resolveBeautyParamsLocked();
     if (!runEnabled() && oppoHwiPropEnabled(kOppoHwiProbeProp)) {
         /* Stage 1 probe: no stream exists yet, so p1 carries zero geometry.
          * The explicit-mode run path initializes on the first real frame instead. */
@@ -490,12 +573,11 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
         mLastStatus = -EOPNOTSUPP;
         return mLastStatus;
     }
-    /* RE task-70: facebeauty/arc do not read the face block; their effect needs
-     * param+0x60/0x164/... which are only built after task-74. Until ready, fail
-     * closed so the caller falls back instead of reporting a no-effect "success". */
-    if ((stillMode == 5 || stillMode == 10) && !mBeautyParamsReady) {
+    /* RE task-74: beauty needs an existing model path; never run with an empty
+     * path ("success but no effect"). Fail closed so callers fall back. */
+    if ((stillMode == 5 || stillMode == 10) && !beautyParamsReady(stillMode)) {
         mLastStatus = -EOPNOTSUPP;
-        LOGW("oppo hwi: beauty params pending (task-74); stillMode %d not run", stillMode);
+        LOGW("oppo hwi: beauty model path unavailable; stillMode %d not run", stillMode);
         return mLastStatus;
     }
     const uint64_t modeMask = oppo_platform::maskForStillMode(stillMode);
@@ -549,6 +631,19 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
         params.faceInfo.faces[i].width = frame.faceInfo.faces[i].width;
         params.faceInfo.faces[i].height = frame.faceInfo.faces[i].height;
     }
+    if (stillMode == 5 || stillMode == 10) {
+        params.beauty.enabled = true;
+        params.beauty.modelPath = stillMode == 10 ? mBeautyModelFront : mBeautyModelRear;
+        params.beauty.strength = frame.beautyStrength;
+        params.beauty.param24 = mBeautyParam24;
+        params.beauty.threshold1 = mBeautyThreshold1;
+        params.beauty.threshold2 = mBeautyThreshold2;
+        params.beauty.mode = mBeautyMode;
+        params.beauty.enable = mBeautyEnable;
+        params.beauty.fdSelect = mFaceFdSelect;
+        params.beauty.faceInfoMode = mFaceInfoMode;
+    }
+    params.scesParam = mScesParam;
     if (!oppo_platform::buildParam(mParam, mParamSize, params) ||
             !oppo_platform::buildFrameCtx(mFrameCtx, mFrameCtxSize, params)) {
         mLastStatus = -EINVAL;

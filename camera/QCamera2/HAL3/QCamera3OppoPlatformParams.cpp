@@ -14,10 +14,10 @@ uint64_t maskForStillMode(int32_t stillMode)
     case 2: return kAlgoLlhdr;            /* LLHDR / low light */
     case 3: return kAlgoPicBest;          /* MFNR: original block reuses picbest */
     case 4: return kAlgoSuperPhoto;       /* super photo / high resolution */
-    case 5: return kAlgoFaceBeauty;       /* rear beauty */
+    case 5: return kAlgoFaceBeauty | kAlgoFaceInfo; /* rear beauty + Venus FD */
     case 7: return kAlgoBokeh;            /* dual-camera bokeh */
     case 9: return kAlgoVdSces;           /* AI scene / SCES */
-    case 10: return kAlgoArcFaceBeauty;   /* front beauty (ARC face beauty) */
+    case 10: return kAlgoArcFaceBeauty | kAlgoFaceInfo; /* front beauty (ARC) + faceInfo */
     default: return 0;
     }
 }
@@ -117,6 +117,30 @@ bool buildParam(uint8_t *param, size_t size, const Frame &frame)
         buildFaceInfo(param, size, frame.faceInfo, frame.width, frame.height,
                 frame.isFront != 0);
     }
+    if (frame.beauty.enabled) buildBeautyParams(param, size, frame.beauty);
+    writeU32(param, ParamOffsets::kScesParam, uint32_t(frame.scesParam));
+    return true;
+}
+
+bool buildBeautyParams(uint8_t *param, size_t size, const BeautyParams &beauty)
+{
+    if (param == nullptr || size < kParamSize) return false;
+    if (beauty.modelPath != nullptr) {
+        const size_t maxLen = ParamOffsets::kBeautyModelPathSize - 1;
+        const size_t length = strnlen(beauty.modelPath, maxLen);
+        memcpy(param + ParamOffsets::kBeautyModelPath, beauty.modelPath, length);
+    }
+    const int32_t strength = beauty.strength < 0 ? 0 :
+            (beauty.strength > 100 ? 100 : beauty.strength);
+    writeU32(param, ParamOffsets::kBeautyStrength, uint32_t(strength));
+    writeU32(param, ParamOffsets::kBeautyThreshold1, uint32_t(beauty.threshold1));
+    writeU32(param, ParamOffsets::kBeautyThreshold2, uint32_t(beauty.threshold2));
+    writeU32(param, ParamOffsets::kBeautyParam24, uint32_t(beauty.param24));
+    writeU8(param, ParamOffsets::kBeautyMode, uint8_t(beauty.mode & 0xFF));
+    writeU8(param, ParamOffsets::kBeautyEnable, uint8_t(beauty.enable & 0xFF));
+    writeU32(param, ParamOffsets::kFaceFdSelect, uint32_t(beauty.fdSelect));
+    writeU32(param, ParamOffsets::kFaceInfoMode, uint32_t(beauty.faceInfoMode));
+    /* param+0x168 isFront is written by the geometry/flags builder. */
     return true;
 }
 

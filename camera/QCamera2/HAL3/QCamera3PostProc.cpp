@@ -3313,7 +3313,8 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
             int32_t platformStatus = -EOPNOTSUPP;
             // RE task-70: beauty does not consume the face block; it needs the
             // beauty params that task-74 will construct. Until then fail closed.
-            if (QCamera3OppoPlatformHwi::get().beautyParamsReady()) {
+            if (QCamera3OppoPlatformHwi::get().beautyParamsReady(
+                    OPPO_NATIVE_REAR_BEAUTY)) {
                 QCamera3HdrAlgo::Image platformImage;
                 QCamera3StreamMem *platformMemory = nullptr;
                 if (getHdrImage(recvd_frame, platformImage, platformMemory)) {
@@ -3324,6 +3325,7 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
                     platformFrame.height = platformImage.height;
                     platformFrame.stride = platformImage.yStride;
                     platformFrame.slice = platformImage.yScanline;
+                    platformFrame.beautyStrength = jpeg_settings->native_beauty_strength;
                     if (haveFaces) platformFrame.faceInfo = platformFaces;
                     platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
                             OPPO_NATIVE_REAR_BEAUTY, platformFrame);
@@ -3334,7 +3336,7 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
                     }
                 }
             } else {
-                LOGW("beauty params pending (task-74); using self-developed fallback");
+                LOGW("beauty model path unavailable; using self-developed fallback");
             }
             nativeAlgorithmTrace(jpeg_settings, "FaceBeauty", platformStatus,
                     jpeg_settings->frame_number, 1,
@@ -3379,7 +3381,8 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
                     jpeg_settings->frame_number, platformFaces);
             int32_t platformStatus = -EOPNOTSUPP;
             // ArcFaceBeauty has no reversed param layout yet (task-74); fail closed.
-            if (QCamera3OppoPlatformHwi::get().beautyParamsReady()) {
+            if (QCamera3OppoPlatformHwi::get().beautyParamsReady(
+                    OPPO_NATIVE_FRONT_BEAUTY)) {
                 QCamera3HdrAlgo::Image platformImage;
                 QCamera3StreamMem *platformMemory = nullptr;
                 if (getHdrImage(recvd_frame, platformImage, platformMemory)) {
@@ -3390,6 +3393,7 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
                     platformFrame.height = platformImage.height;
                     platformFrame.stride = platformImage.yStride;
                     platformFrame.slice = platformImage.yScanline;
+                    platformFrame.beautyStrength = jpeg_settings->native_front_beauty_strength;
                     if (haveFaces) platformFrame.faceInfo = platformFaces;
                     platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
                             OPPO_NATIVE_FRONT_BEAUTY, platformFrame);
@@ -3400,7 +3404,7 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
                     }
                 }
             } else {
-                LOGW("beauty params pending (task-74); using self-developed fallback");
+                LOGW("beauty model path unavailable; using self-developed fallback");
             }
             nativeAlgorithmTrace(jpeg_settings, "ArcFaceBeauty", platformStatus,
                     jpeg_settings->frame_number, 1,
