@@ -124,6 +124,46 @@ void testParamsUnit() {
     CHECK(readU32(ctx, FrameCtxOffsets::kScratchFd) == 7);
     CHECK(readPtr(ctx, FrameCtxOffsets::kScratchPtr) == scratch);
     CHECK(readU32(ctx, FrameCtxOffsets::kScratchSize) == sizeof(scratch));
+
+    // Face block: inferred left/top/width/height arrays + count (descriptor 0).
+    FaceInfo faces;
+    faces.sourceWidth = 4000;
+    faces.sourceHeight = 3000;
+    faces.count = 2;
+    faces.faces[0] = {1000, 750, 1000, 750};
+    faces.faces[1] = {2000, 1500, 2000, 1500};
+    CHECK(buildFaceInfo(param, sizeof(param), faces, 100, 50, false));
+    const size_t faceBlock = ParamOffsets::kFaceInfoBase + ParamOffsets::kFaceBlockOffset;
+    const size_t faceCount = ParamOffsets::kFaceInfoBase + ParamOffsets::kFaceCountOffset;
+    CHECK(readU32(param, faceCount) == 2);
+    CHECK(readU32(param, faceBlock + 0 * ParamOffsets::kFaceArrayStride) == 25);
+    CHECK(readU32(param, faceBlock + 1 * ParamOffsets::kFaceArrayStride) == 12);
+    CHECK(readU32(param, faceBlock + 2 * ParamOffsets::kFaceArrayStride) == 25);
+    CHECK(readU32(param, faceBlock + 3 * ParamOffsets::kFaceArrayStride) == 12);
+    CHECK(readU32(param, faceBlock + 4 * ParamOffsets::kFaceArrayStride) == 0);
+    CHECK(readU32(param, faceBlock + 0 * ParamOffsets::kFaceArrayStride +
+            sizeof(uint32_t)) == 50);
+    CHECK(readU32(param, faceBlock + 2 * ParamOffsets::kFaceArrayStride +
+            sizeof(uint32_t)) == 50);
+    // Front camera mirror on X.
+    CHECK(buildFaceInfo(param, sizeof(param), faces, 100, 50, true));
+    CHECK(readU32(param, faceBlock + 0 * ParamOffsets::kFaceArrayStride) == 50);
+    CHECK(readU32(param, faceBlock + 0 * ParamOffsets::kFaceArrayStride +
+            sizeof(uint32_t)) == 0);
+    // Invalid faces are skipped, count clamped to 10.
+    FaceInfo many;
+    many.sourceWidth = 4000;
+    many.sourceHeight = 3000;
+    many.count = 12;
+    for (int i = 0; i < kMaxFaceInfo; ++i) many.faces[i] = {1000, 750, 1000, 750};
+    CHECK(buildFaceInfo(param, sizeof(param), many, 100, 50, false));
+    CHECK(readU32(param, faceCount) == 10);
+    // count=0 clears the block and keeps unknown arrays zero.
+    FaceInfo none;
+    none.sourceWidth = 4000;
+    none.sourceHeight = 3000;
+    CHECK(buildFaceInfo(param, sizeof(param), none, 100, 50, false));
+    CHECK(readU32(param, faceCount) == 0);
     // Fail closed on bad geometry or a too-small block.
     Frame bad = frame;
     bad.width = 0;
@@ -216,10 +256,25 @@ int main(int argc, char **argv) {
     CHECK((stats->processMask & ~kInProcessBackend) == kAlgoArcFaceBeauty);
     CHECK(stats->processParam[ParamOffsets::kIsFront] == 1);
 
-    // 3b. Rear beauty uses the face-beauty bit; front flag cleared again.
-    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, frame) == 0);
+    // 3b. Rear beauty uses the face-beauty bit and the face block passed through.
+    QCamera3OppoPlatformFrame beauty = frame;
+    beauty.faceInfo.count = 1;
+    beauty.faceInfo.sourceWidth = 4000;
+    beauty.faceInfo.sourceHeight = 3000;
+    beauty.faceInfo.faces[0] = {1000, 750, 1000, 750};
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(5, beauty) == 0);
     CHECK((stats->processMask & ~kInProcessBackend) == kAlgoFaceBeauty);
     CHECK(stats->processParam[ParamOffsets::kIsFront] == 1);
+    const size_t faceBlock = ParamOffsets::kFaceInfoBase + ParamOffsets::kFaceBlockOffset;
+    const size_t faceCount = ParamOffsets::kFaceInfoBase + ParamOffsets::kFaceCountOffset;
+    CHECK(readU32(stats->processParam, faceCount) == 1);
+    // Front camera (still active from step 3): width 100, left 100-(25+25)=50.
+    CHECK(readU32(stats->processParam, faceBlock) == 50);
+    CHECK(readU32(stats->processParam, faceBlock + ParamOffsets::kFaceArrayStride) == 12);
+    CHECK(readU32(stats->processParam,
+            faceBlock + 2 * ParamOffsets::kFaceArrayStride) == 25);
+    CHECK(readU32(stats->processParam,
+            faceBlock + 3 * ParamOffsets::kFaceArrayStride) == 12);
 
     // 4. HDR/LLHDR/MFNR/SUPER/bokeh are not wired: fail closed before the library.
     const int processBeforeUnwired = stats->processCount;
@@ -249,7 +304,20 @@ int main(int argc, char **argv) {
     invalid.width = 0;
     CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(9, invalid) == -EINVAL);
 
-    // 8. Close uninitializes the platform block exactly once.
+    // 8. Face result cache: exact frame, bounded recent frame, never stale.
+    QCamera3OppoPlatformFaceInfo cached;
+    cached.count = 1;
+    cached.sourceWidth = 4000;
+    cached.sourceHeight = 3000;
+    cached.faces[0] = {1000, 750, 1000, 750};
+    QCamera3OppoPlatformHwi::setFaceInfo(100, cached);
+    QCamera3OppoPlatformFaceInfo out;
+    CHECK(QCamera3OppoPlatformHwi::getFaceInfo(100, out) && out.count == 1);
+    CHECK(QCamera3OppoPlatformHwi::getFaceInfo(110, out) && out.count == 1);
+    CHECK(!QCamera3OppoPlatformHwi::getFaceInfo(100 + 31, out) && out.count == 0);
+    CHECK(!QCamera3OppoPlatformHwi::getFaceInfo(99, out));
+
+    // 9. Close uninitializes the platform block exactly once.
     QCamera3OppoPlatformHwi::shutdownOnClose();
     CHECK(stats->uninitCount == 1);
 

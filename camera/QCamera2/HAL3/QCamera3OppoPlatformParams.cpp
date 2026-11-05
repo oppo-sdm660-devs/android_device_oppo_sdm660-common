@@ -110,9 +110,55 @@ bool buildParam(uint8_t *param, size_t size, const Frame &frame)
     writeU32(param, ParamOffsets::kSlice, slice);
     writeU8(param, ParamOffsets::kIsFront, frame.isFront ? 1 : 0);
     writeU32(param, ParamOffsets::kJpegRotation, uint32_t(frame.jpegRotation));
-    /* The face-info record fields and the HDR per-frame arrays are located but
-     * their inner semantics are not reversed yet; they stay zero (plain memset)
-     * so an unknown layout cannot corrupt the algorithm input. */
+    /* The HDR per-frame arrays and the unknown face-block arrays are not fully
+     * reversed yet; they stay zero (plain memset). Only the inferred rect/count
+     * subset is filled. */
+    if (frame.faceInfo.count > 0) {
+        buildFaceInfo(param, size, frame.faceInfo, frame.width, frame.height,
+                frame.isFront != 0);
+    }
+    return true;
+}
+
+bool buildFaceInfo(uint8_t *param, size_t size, const FaceInfo &faces,
+        int32_t imageWidth, int32_t imageHeight, bool mirror)
+{
+    if (param == nullptr || size < kParamSize) return false;
+    if (imageWidth <= 0 || imageHeight <= 0 || faces.sourceWidth <= 0 ||
+            faces.sourceHeight <= 0) return false;
+    const size_t block = ParamOffsets::kFaceInfoBase + ParamOffsets::kFaceBlockOffset;
+    const size_t countOffset = ParamOffsets::kFaceInfoBase + ParamOffsets::kFaceCountOffset;
+    /* Clear the whole face block (arrays 0..6 + count); 4..6 stay unknown zero. */
+    memset(param + block, 0, ParamOffsets::kFaceInfoStride - ParamOffsets::kFaceBlockOffset);
+    int32_t count = faces.count;
+    if (count < 0) count = 0;
+    if (count > kMaxFaceInfo) count = kMaxFaceInfo;
+    int32_t written = 0;
+    for (int32_t i = 0; i < count; ++i) {
+        const FaceRect &face = faces.faces[i];
+        if (face.width <= 0 || face.height <= 0) continue;
+        int64_t left = int64_t(face.left) * imageWidth / faces.sourceWidth;
+        int64_t top = int64_t(face.top) * imageHeight / faces.sourceHeight;
+        int64_t width = int64_t(face.width) * imageWidth / faces.sourceWidth;
+        int64_t height = int64_t(face.height) * imageHeight / faces.sourceHeight;
+        if (width < 1) width = 1;
+        if (height < 1) height = 1;
+        if (left < 0) left = 0;
+        if (top < 0) top = 0;
+        if (left >= imageWidth) left = imageWidth - 1;
+        if (top >= imageHeight) top = imageHeight - 1;
+        if (left + width > imageWidth) width = imageWidth - left;
+        if (top + height > imageHeight) height = imageHeight - top;
+        if (mirror) left = imageWidth - (left + width);
+        if (left < 0) left = 0;
+        const size_t slot = size_t(written) * sizeof(uint32_t);
+        writeU32(param, block + 0 * ParamOffsets::kFaceArrayStride + slot, uint32_t(left));
+        writeU32(param, block + 1 * ParamOffsets::kFaceArrayStride + slot, uint32_t(top));
+        writeU32(param, block + 2 * ParamOffsets::kFaceArrayStride + slot, uint32_t(width));
+        writeU32(param, block + 3 * ParamOffsets::kFaceArrayStride + slot, uint32_t(height));
+        ++written;
+    }
+    writeU32(param, countOffset, uint32_t(written));
     return true;
 }
 

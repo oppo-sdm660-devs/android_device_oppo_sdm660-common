@@ -64,6 +64,12 @@ struct ParamOffsets {
     static constexpr size_t kFaceInfoBase = 0x0214;
     static constexpr size_t kFaceInfoStride = 0x174;
     static constexpr int kFaceInfoCount = 10;
+    /* Face block inside one 0x174 image descriptor: +0x28..+0x174.
+     * Arrays 0..3 are the inferred left/top/width/height int32[10]; arrays 4..6
+     * and all other fields are not reversed yet and stay 0. Count at +0x170. */
+    static constexpr size_t kFaceBlockOffset = 0x28;
+    static constexpr size_t kFaceArrayStride = 0x28;
+    static constexpr size_t kFaceCountOffset = 0x170;
     /* 10-frame per-frame parameter arrays read by hdr/llhdr (arrays of 10 u32). */
     static constexpr size_t kFrameArray0 = 0x023C;
     static constexpr size_t kFrameArray1 = 0x0264;
@@ -96,6 +102,26 @@ constexpr uint32_t kFormatYuv420Nv21 = 2;
 /* HAL1 allocates 0x1000 bytes for the HWI scratch (0x400 for bokeh). */
 constexpr size_t kScratchBytes = 0x1000;
 
+constexpr int32_t kMaxFaceInfo = 10;
+
+/* One HAL3-detected face rect in the coordinate space given by FaceInfo. */
+struct FaceRect {
+    int32_t left = 0;
+    int32_t top = 0;
+    int32_t width = 0;
+    int32_t height = 0;
+};
+
+/* Face set handed to the original face-beauty/SCES blocks. sourceWidth/Height is
+ * the coordinate space of faces[] (HAL3 active array); buildFaceInfo scales it to
+ * the image geometry and mirrors it for the front camera. */
+struct FaceInfo {
+    int32_t count = 0;
+    int32_t sourceWidth = 0;
+    int32_t sourceHeight = 0;
+    FaceRect faces[kMaxFaceInfo];
+};
+
 /* One NV21 snapshot frame, as handed to the platform algorithm block. */
 struct Frame {
     const uint8_t *data = nullptr;
@@ -110,6 +136,7 @@ struct Frame {
     int32_t scratchFd = -1;
     void *scratchPtr = nullptr;
     size_t scratchSize = 0;
+    FaceInfo faceInfo;
 };
 
 /* Explicit org.lineageos stillMode -> original algorithm bit. A zero result means
@@ -131,6 +158,13 @@ const char *algorithmName(uint64_t bit);
 
 /* Zero-fill and fill the geometry/flags of one param_platform_t block. */
 bool buildParam(uint8_t *param, size_t size, const Frame &frame);
+
+/* Fill the platform param face block of image descriptor 0 (single-image path):
+ * count + rect arrays (left/top/width/height), scaled from faces.sourceWidth/Height
+ * to imageWidth/Height and mirrored for the front camera. Unknown arrays stay 0.
+ * Returns false on bad size/geometry; count=0 clears the block. */
+bool buildFaceInfo(uint8_t *param, size_t size, const FaceInfo &faces,
+        int32_t imageWidth, int32_t imageHeight, bool mirror);
 
 /* Zero-fill and fill image slot 0/scratch of one platform frame context block. */
 bool buildFrameCtx(uint8_t *ctx, size_t size, const Frame &frame);

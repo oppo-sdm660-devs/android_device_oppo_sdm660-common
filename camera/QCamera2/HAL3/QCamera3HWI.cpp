@@ -12236,6 +12236,42 @@ QCamera3HardwareInterface::translateFromHalMetadata(
         camMetadata.update(ANDROID_SHADING_MODE, &fwk_shadingMode, 1);
     }
 
+    /* Feed the original face-beauty/SCES blocks: cache this frame's face result in
+     * active-array coordinates; PostProc scales it to the processed image. */
+    {
+        QCamera3OppoPlatformFaceInfo platformFaces = {};
+        const int32_t capabilityFaces = gCamCapability[mCameraId] != NULL ?
+                oppoMaxFaceCount(gCamCapability[mCameraId]) : 0;
+        if (gCamCapability[mCameraId] != NULL) {
+            platformFaces.sourceWidth = gCamCapability[mCameraId]->active_array_size.width;
+            platformFaces.sourceHeight = gCamCapability[mCameraId]->active_array_size.height;
+        }
+        IF_META_AVAILABLE(cam_face_detection_data_t, platformFaceData,
+                CAM_INTF_META_FACE_DETECTION, metadata) {
+            const int32_t faceLimit = MIN(capabilityFaces, kOppoPlatformMaxFaces);
+            const size_t count = faceLimit > 0 ?
+                    MIN(static_cast<size_t>(platformFaceData->num_faces_detected),
+                            static_cast<size_t>(faceLimit)) : 0;
+            for (size_t i = 0; i < count; ++i) {
+                cam_rect_t rect = platformFaceData->faces[i].face_boundary;
+                mCropRegionMapper.toActiveArray(rect.left, rect.top, rect.width,
+                        rect.height);
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                QCamera3OppoPlatformFaceRect &face =
+                        platformFaces.faces[platformFaces.count];
+                face.left = rect.left;
+                face.top = rect.top;
+                face.width = rect.width;
+                face.height = rect.height;
+                ++platformFaces.count;
+                if (platformFaces.count >= kOppoPlatformMaxFaces) break;
+            }
+        }
+        IF_META_AVAILABLE(uint32_t, platformFaceFrame, CAM_INTF_META_FRAME_NUMBER,
+                metadata) {
+            QCamera3OppoPlatformHwi::setFaceInfo(*platformFaceFrame, platformFaces);
+        }
+    }
     {
         const int32_t maxFaces = oppoMaxFaceCount(gCamCapability[mCameraId]);
         const uint8_t mode = maxFaces > 0 &&

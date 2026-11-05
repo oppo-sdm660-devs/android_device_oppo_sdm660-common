@@ -332,6 +332,37 @@ for tag in ("QCAMERA3_ZSL_ENABLE", "QCAMERA3_ZSL_MAX_AGE_MS", "QCAMERA3_ZSL_APPL
             "QCAMERA3_ZSL_FALLBACK_REASON"):
     need(HAL3 / "QCamera3VendorTags.cpp", f"(uint32_t){tag}", "zsl tag registration")
 
+# task-71 face-info: HAL3 CAM_INTF_META_FACE_DETECTION -> platform param face block.
+for text, note in (
+        ("kMaxFaceInfo = 10", "face info max count"),
+        ("kFaceBlockOffset = 0x28", "face block offset"),
+        ("kFaceArrayStride = 0x28", "face array stride"),
+        ("kFaceCountOffset = 0x170", "face count offset"),
+        ("buildFaceInfo", "face info builder")):
+    need(params_h, text, note)
+need(params_cpp, "buildFaceInfo(param, size, frame.faceInfo", "buildParam feeds face block")
+need(platform_hwi_h, "QCamera3OppoPlatformFaceInfo", "platform face info type")
+need(platform_hwi_h, "static void setFaceInfo", "face info cache setter")
+need(platform_hwi_h, "static bool getFaceInfo", "face info cache getter")
+need(platform_hwi, "kOppoFaceMaxAgeFrames", "bounded face cache age")
+need(platform_hwi, "params.faceInfo.count = faceCount", "processStillFrame face conversion")
+need(hwi, "QCamera3OppoPlatformHwi::setFaceInfo", "HWI result feeds face cache")
+need(hwi, "CAM_INTF_META_FACE_DETECTION, metadata)", "HWI reads face detection")
+need(hwi, "mCropRegionMapper.toActiveArray(rect.left, rect.top, rect.width,",
+     "HWI maps faces to active array")
+post_text = read(post)
+checks += 3
+if post_text.count("QCamera3OppoPlatformHwi::getFaceInfo") != 3:
+    failures.append("QCamera3PostProc.cpp: platform paths must fetch face info")
+if post_text.count("platformFaces.count > 0") != 2:
+    failures.append("QCamera3PostProc.cpp: beauty modes must gate on faces")
+if "platformFrame.faceInfo = platformFaces;" not in post_text:
+    failures.append("QCamera3PostProc.cpp: face info is not passed to platform frame")
+checks += 1
+if post_text.count('"FaceBeauty", -EOPNOTSUPP') == 0 and \
+        "rearHandledByPlatform ? 1 : 0" not in post_text:
+    failures.append("QCamera3PostProc.cpp: no-face beauty applied must stay honest")
+
 # Tests exist and are Python-parseable.
 for name in ("run_front_beauty_tests.py", "run_auto_capture_tests.py",
              "run_platform_hwi_tests.py", "run_zsl_policy_tests.py",

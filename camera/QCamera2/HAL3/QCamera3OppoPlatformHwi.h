@@ -12,6 +12,24 @@
  * Off by default: the persist.vendor.camera.oppo.platform_hwi[.process] gates enable it.
  */
 
+constexpr int32_t kOppoPlatformMaxFaces = 10;
+
+/* One face rect in the coordinate space given by sourceWidth/Height (HAL3 active
+ * array); the platform param builder scales it to the image geometry. */
+struct QCamera3OppoPlatformFaceRect {
+    int32_t left = 0;
+    int32_t top = 0;
+    int32_t width = 0;
+    int32_t height = 0;
+};
+
+struct QCamera3OppoPlatformFaceInfo {
+    int32_t count = 0;
+    int32_t sourceWidth = 0;
+    int32_t sourceHeight = 0;
+    QCamera3OppoPlatformFaceRect faces[kOppoPlatformMaxFaces];
+};
+
 struct QCamera3OppoPlatformFrame {
     const uint8_t *data;    /* NV21 frame, modified in place */
     size_t length;
@@ -19,6 +37,7 @@ struct QCamera3OppoPlatformFrame {
     int32_t height;
     int32_t stride;
     int32_t slice;
+    QCamera3OppoPlatformFaceInfo faceInfo;
 };
 
 class QCamera3OppoPlatformHwi {
@@ -48,6 +67,13 @@ public:
 
     /* Last processStillFrame() result, for diagnostics. */
     int32_t lastStatus() const;
+
+    /* Face result cache fed from HAL3 CAM_INTF_META_FACE_DETECTION (active-array
+     * rects). getFaceInfo() prefers the exact frame; otherwise it uses the latest
+     * result within a bounded frame age (then count may be 0 = honestly no face). */
+    static void setFaceInfo(uint32_t frameNumber,
+            const QCamera3OppoPlatformFaceInfo &info);
+    static bool getFaceInfo(uint32_t frameNumber, QCamera3OppoPlatformFaceInfo &info);
 
 private:
     QCamera3OppoPlatformHwi();

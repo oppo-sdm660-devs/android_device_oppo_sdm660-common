@@ -3307,25 +3307,32 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
         // ZSL past frames must not enter the platform algorithms.
         if (!jpeg_settings->zsl_snapshot && QCamera3OppoPlatformHwi::configured() &&
                 QCamera3OppoPlatformHwi::runEnabled()) {
-            QCamera3HdrAlgo::Image platformImage;
-            QCamera3StreamMem *platformMemory = nullptr;
+            QCamera3OppoPlatformFaceInfo platformFaces;
+            const bool haveFaces = QCamera3OppoPlatformHwi::getFaceInfo(
+                    jpeg_settings->frame_number, platformFaces);
             int32_t platformStatus = -EOPNOTSUPP;
-            if (getHdrImage(recvd_frame, platformImage, platformMemory)) {
-                QCamera3OppoPlatformFrame platformFrame = {};
-                platformFrame.data = platformImage.data;
-                platformFrame.length = platformImage.length;
-                platformFrame.width = platformImage.width;
-                platformFrame.height = platformImage.height;
-                platformFrame.stride = platformImage.yStride;
-                platformFrame.slice = platformImage.yScanline;
-                platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
-                        OPPO_NATIVE_REAR_BEAUTY, platformFrame);
-                if (platformStatus == NO_ERROR) {
-                    platformStatus = platformMemory->cleanCache(main_frame->buf_idx);
-                    if (platformStatus != NO_ERROR) return platformStatus;
-                    rearHandledByPlatform = true;
+            if (haveFaces && platformFaces.count > 0) {
+                QCamera3HdrAlgo::Image platformImage;
+                QCamera3StreamMem *platformMemory = nullptr;
+                if (getHdrImage(recvd_frame, platformImage, platformMemory)) {
+                    QCamera3OppoPlatformFrame platformFrame = {};
+                    platformFrame.data = platformImage.data;
+                    platformFrame.length = platformImage.length;
+                    platformFrame.width = platformImage.width;
+                    platformFrame.height = platformImage.height;
+                    platformFrame.stride = platformImage.yStride;
+                    platformFrame.slice = platformImage.yScanline;
+                    platformFrame.faceInfo = platformFaces;
+                    platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
+                            OPPO_NATIVE_REAR_BEAUTY, platformFrame);
+                    if (platformStatus == NO_ERROR) {
+                        platformStatus = platformMemory->cleanCache(main_frame->buf_idx);
+                        if (platformStatus != NO_ERROR) return platformStatus;
+                        rearHandledByPlatform = true;
+                    }
                 }
             }
+            // count=0/unavailable faces: applied stays 0 and the stock fallback runs.
             nativeAlgorithmTrace(jpeg_settings, "FaceBeauty", platformStatus,
                     jpeg_settings->frame_number, 1,
                     static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
@@ -3364,25 +3371,32 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
         // Original HAL1 path first: the same face-beauty block the stock HAL1 uses.
         if (!jpeg_settings->zsl_snapshot && QCamera3OppoPlatformHwi::configured() &&
                 QCamera3OppoPlatformHwi::runEnabled()) {
-            QCamera3HdrAlgo::Image platformImage;
-            QCamera3StreamMem *platformMemory = nullptr;
+            QCamera3OppoPlatformFaceInfo platformFaces;
+            const bool haveFaces = QCamera3OppoPlatformHwi::getFaceInfo(
+                    jpeg_settings->frame_number, platformFaces);
             int32_t platformStatus = -EOPNOTSUPP;
-            if (getHdrImage(recvd_frame, platformImage, platformMemory)) {
-                QCamera3OppoPlatformFrame platformFrame = {};
-                platformFrame.data = platformImage.data;
-                platformFrame.length = platformImage.length;
-                platformFrame.width = platformImage.width;
-                platformFrame.height = platformImage.height;
-                platformFrame.stride = platformImage.yStride;
-                platformFrame.slice = platformImage.yScanline;
-                platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
-                        OPPO_NATIVE_FRONT_BEAUTY, platformFrame);
-                if (platformStatus == NO_ERROR) {
-                    platformStatus = platformMemory->cleanCache(main_frame->buf_idx);
-                    if (platformStatus != NO_ERROR) return platformStatus;
-                    frontHandled = true;
+            if (haveFaces && platformFaces.count > 0) {
+                QCamera3HdrAlgo::Image platformImage;
+                QCamera3StreamMem *platformMemory = nullptr;
+                if (getHdrImage(recvd_frame, platformImage, platformMemory)) {
+                    QCamera3OppoPlatformFrame platformFrame = {};
+                    platformFrame.data = platformImage.data;
+                    platformFrame.length = platformImage.length;
+                    platformFrame.width = platformImage.width;
+                    platformFrame.height = platformImage.height;
+                    platformFrame.stride = platformImage.yStride;
+                    platformFrame.slice = platformImage.yScanline;
+                    platformFrame.faceInfo = platformFaces;
+                    platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
+                            OPPO_NATIVE_FRONT_BEAUTY, platformFrame);
+                    if (platformStatus == NO_ERROR) {
+                        platformStatus = platformMemory->cleanCache(main_frame->buf_idx);
+                        if (platformStatus != NO_ERROR) return platformStatus;
+                        frontHandled = true;
+                    }
                 }
             }
+            // No face result: do not claim the original block applied; fall back.
             nativeAlgorithmTrace(jpeg_settings, "ArcFaceBeauty", platformStatus,
                     jpeg_settings->frame_number, 1,
                     static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
@@ -3415,6 +3429,9 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
     if (jpeg_settings && jpeg_settings->native_still_mode == OPPO_NATIVE_SCENE &&
             !jpeg_settings->zsl_snapshot &&
             QCamera3OppoPlatformHwi::configured() && QCamera3OppoPlatformHwi::runEnabled()) {
+        QCamera3OppoPlatformFaceInfo platformFaces;
+        const bool haveFaces = QCamera3OppoPlatformHwi::getFaceInfo(
+                jpeg_settings->frame_number, platformFaces);
         QCamera3HdrAlgo::Image platformImage;
         QCamera3StreamMem *platformMemory = nullptr;
         int32_t platformStatus = -EOPNOTSUPP;
@@ -3426,6 +3443,7 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
             platformFrame.height = platformImage.height;
             platformFrame.stride = platformImage.yStride;
             platformFrame.slice = platformImage.yScanline;
+            if (haveFaces) platformFrame.faceInfo = platformFaces;
             platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
                     OPPO_NATIVE_SCENE, platformFrame);
             if (platformStatus == NO_ERROR) {

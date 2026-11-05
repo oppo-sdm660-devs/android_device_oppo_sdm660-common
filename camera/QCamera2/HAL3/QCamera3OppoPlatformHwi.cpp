@@ -87,6 +87,18 @@ int oppoHwiCreateScratchFd(size_t size)
 
 bool sOppoHwiCreated = false;
 
+/* Face result cache shared with PostProc; lock-protected, keyed by internal frame. */
+struct OppoFaceCacheEntry {
+    uint32_t frame = 0;
+    bool valid = false;
+    QCamera3OppoPlatformFaceInfo info;
+};
+constexpr size_t kOppoFaceCacheSlots = 8;
+constexpr uint32_t kOppoFaceMaxAgeFrames = 30;
+OppoFaceCacheEntry sOppoFaceCache[kOppoFaceCacheSlots];
+size_t sOppoFaceNext = 0;
+pthread_mutex_t sOppoFaceLock = PTHREAD_MUTEX_INITIALIZER;
+
 /* notify/data channels of the platform layer; the payload layouts are not
  * reversed, so the HAL only logs the callback identity for now. */
 void oppoHwiNotifyCallback(long long mask, int algo, int status)
@@ -151,6 +163,58 @@ uint64_t QCamera3OppoPlatformHwi::sessionAlgorithmMask()
 int32_t QCamera3OppoPlatformHwi::lastStatus() const
 {
     return mLastStatus;
+}
+
+void QCamera3OppoPlatformHwi::setFaceInfo(uint32_t frameNumber,
+        const QCamera3OppoPlatformFaceInfo &info)
+{
+    pthread_mutex_lock(&sOppoFaceLock);
+    OppoFaceCacheEntry *slot = nullptr;
+    for (size_t i = 0; i < kOppoFaceCacheSlots; ++i) {
+        if (sOppoFaceCache[i].valid && sOppoFaceCache[i].frame == frameNumber) {
+            slot = &sOppoFaceCache[i];
+            break;
+        }
+    }
+    if (slot == nullptr) {
+        slot = &sOppoFaceCache[sOppoFaceNext];
+        sOppoFaceNext = (sOppoFaceNext + 1) % kOppoFaceCacheSlots;
+    }
+    slot->frame = frameNumber;
+    slot->valid = true;
+    slot->info = info;
+    pthread_mutex_unlock(&sOppoFaceLock);
+}
+
+bool QCamera3OppoPlatformHwi::getFaceInfo(uint32_t frameNumber,
+        QCamera3OppoPlatformFaceInfo &info)
+{
+    pthread_mutex_lock(&sOppoFaceLock);
+    for (size_t i = 0; i < kOppoFaceCacheSlots; ++i) {
+        const OppoFaceCacheEntry &slot = sOppoFaceCache[i];
+        if (slot.valid && slot.frame == frameNumber) {
+            info = slot.info;
+            pthread_mutex_unlock(&sOppoFaceLock);
+            return true;
+        }
+    }
+    /* The snapshot request usually has a face result from a slightly older
+     * preview frame; only reuse it within a bounded age, never stale forever. */
+    const OppoFaceCacheEntry *best = nullptr;
+    for (size_t i = 0; i < kOppoFaceCacheSlots; ++i) {
+        const OppoFaceCacheEntry &slot = sOppoFaceCache[i];
+        if (!slot.valid || slot.frame > frameNumber) continue;
+        if ((frameNumber - slot.frame) > kOppoFaceMaxAgeFrames) continue;
+        if (best == nullptr || slot.frame > best->frame) best = &slot;
+    }
+    if (best != nullptr) {
+        info = best->info;
+        pthread_mutex_unlock(&sOppoFaceLock);
+        return true;
+    }
+    info = QCamera3OppoPlatformFaceInfo();
+    pthread_mutex_unlock(&sOppoFaceLock);
+    return false;
 }
 
 QCamera3OppoPlatformHwi &QCamera3OppoPlatformHwi::get()
@@ -460,6 +524,18 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
     params.scratchFd = mScratchFd;
     params.scratchPtr = mScratch;
     params.scratchSize = mScratchSize;
+    int32_t faceCount = frame.faceInfo.count;
+    if (faceCount < 0) faceCount = 0;
+    if (faceCount > kOppoPlatformMaxFaces) faceCount = kOppoPlatformMaxFaces;
+    params.faceInfo.count = faceCount;
+    params.faceInfo.sourceWidth = frame.faceInfo.sourceWidth;
+    params.faceInfo.sourceHeight = frame.faceInfo.sourceHeight;
+    for (int32_t i = 0; i < faceCount; ++i) {
+        params.faceInfo.faces[i].left = frame.faceInfo.faces[i].left;
+        params.faceInfo.faces[i].top = frame.faceInfo.faces[i].top;
+        params.faceInfo.faces[i].width = frame.faceInfo.faces[i].width;
+        params.faceInfo.faces[i].height = frame.faceInfo.faces[i].height;
+    }
     if (!oppo_platform::buildParam(mParam, mParamSize, params) ||
             !oppo_platform::buildFrameCtx(mFrameCtx, mFrameCtxSize, params)) {
         mLastStatus = -EINVAL;
