@@ -43,6 +43,7 @@ llvm-objdump --version                   # 可选，人工核对用
 | `frame_ctx.py` | 第二批：stock HAL1 `camera.sdm660.so` 的 frame ctx(0x308)/param_platform_t(0x12EC) builder 锚点与写入表 |
 | `face_info.py` | 第二批：param+0x214 的 10×0x174 逐图描述符内层布局（face block / AF ROI / focus） |
 | `mode_mask.py` | 第二批：OPPO cap mode 枚举与 preview/snapshot 的 mode→mask 选择点 |
+| `snapshot.py` | 第三批：frame ctx==p_buffer_construct_t 布局、scratch buffer 描述符、snapshot mask/调用顺序、标定路径、face 数组命名 |
 | `run_all.sh` | 一次性跑完并收集输出到临时目录 |
 
 第二批证据源（stock dump，只读）：
@@ -77,7 +78,8 @@ cd camera/tests/hal1_re
 
 # 6) 一键验证（CI 友好，退出码 0 = 全部通过）
 ./verify_evidence.py && echo "evidence OK"      # 196 断言（含第二批）
-./frame_ctx.py --verify && ./face_info.py --verify && ./mode_mask.py --verify   # 118 条第二批断言
+./frame_ctx.py --verify && ./face_info.py --verify && ./mode_mask.py --verify \
+  && ./snapshot.py --verify   # 118 条第二批断言
 
 # 第二批证据（stock HAL1 builder / face-info / mode→mask；可用 STOCK_HAL1 覆盖路径）
 ./frame_ctx.py ; ./face_info.py ; ./mode_mask.py

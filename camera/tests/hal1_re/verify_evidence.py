@@ -273,6 +273,10 @@ def main(argv):
         batch += face_info._checks(
             stock, os.path.join(lib_dir, 'liboppo_platform_hwi.so'))
         batch += mode_mask._checks(stock)
+        import snapshot as snapshot_mod
+        batch += snapshot_mod._checks(stock,
+                                      args.vendor_lib_dir if
+                                      hasattr(args, 'vendor_lib_dir') else lib_dir)
         for item in batch:
             check(item[0], bool(item[1]))
         print('second batch: %s' % stock)
