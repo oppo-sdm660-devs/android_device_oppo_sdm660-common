@@ -185,9 +185,37 @@ need(CAMERA / "Android.bp", "QCamera3OppoPlatformParams.cpp", "params module in 
 need(tests / "fake_oppo_platform_hwi.cpp", "fake_oppo_platform_init", "fake platform lib")
 need(tests / "platform_hwi_host_test.cpp", "processMask", "platform host test")
 
+# Vendor-only ZSL path (task-59): reuse the stock HAL ZSL snapshot channel.
+policy_h = HAL3 / "QCamera3ZslPolicy.h"
+policy_cpp = HAL3 / "QCamera3ZslPolicy.cpp"
+need(policy_h, "QCamera3ZslPolicy", "zsl policy class")
+need(policy_h, "kFallbackUnsupported", "zsl fallback reasons")
+need(policy_cpp, "classifySelection", "zsl selection classification")
+need(policy_cpp, "standardEnableZsl", "zsl requires both triggers")
+need(hwi, "needZSLCapture(const camera3_capture_request_t *request,", "zsl policy hook")
+need(hwi, "readOppoZslProperties", "zsl properties at configureStreams")
+need(hwi, "mHALZSL = CAM_HAL3_ZSL_TYPE_SNAPSHOT;", "reuse stock HAL ZSL snapshot")
+need(hwi, "persist.vendor.camera.oppo.zsl.enable", "zsl master gate")
+need(hwi, "persist.vendor.camera.oppo.zsl.max_age_ms", "zsl age property")
+need(hwi, "persist.vendor.camera.oppo.zsl.max_bytes", "zsl memory cap")
+need(hwi, "QCAMERA3_ZSL_APPLIED", "zsl result key applied")
+need(hwi, "QCAMERA3_ZSL_FRAME_AGE_MS", "zsl result key age")
+need(hwi, "QCAMERA3_ZSL_FRAME_NUMBER", "zsl result key frame")
+need(hwi, "QCAMERA3_ZSL_FALLBACK_REASON", "zsl result key reason")
+need(hwi, "noteZslSelection", "zsl selection bookkeeping")
+need(hwi, "QCAMERA3_ZSL_APPLIED", "zsl result advertisement")
+need(HAL3 / "QCamera3Channel.cpp", "noteZslSelection", "zsl age reporting")
+need(HAL3 / "QCamera3Channel.cpp", "QCamera3ZslPolicy::kFallbackChannelError",
+     "zsl channel error reporting")
+need(HAL3 / "QCamera3VendorTags.cpp", '"org.lineageos.camera.zsl"', "zsl vendor section")
+need(HAL3 / "QCamera3VendorTags.cpp", '"fallbackReason"', "zsl fallback reason tag")
+need(CAMERA / "Android.bp", "QCamera3ZslPolicy.cpp", "policy module in HAL")
+need(tests / "zsl_policy_test.cpp", "kFallbackAge", "zsl policy host test")
+
 # Tests exist and are Python-parseable.
 for name in ("run_front_beauty_tests.py", "run_auto_capture_tests.py",
-             "run_platform_hwi_tests.py", "hal_static_checks.py"):
+             "run_platform_hwi_tests.py", "run_zsl_policy_tests.py",
+             "hal_static_checks.py"):
     need(tests / name, "def main", "host test runner")
 need(tests / "auto_capture_policy_test.cpp", "kReasonDynamicRange", "auto policy host test")
 for path in sorted(tests.glob("*.py")):

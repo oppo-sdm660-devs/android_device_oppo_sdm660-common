@@ -70,6 +70,8 @@ enum qcamera3_ext_section {
     QCAMERA3_STREAM,
     QCAMERA3_DIAGNOSTICS,
     QCAMERA3_AR,
+    // Appended after AR so every existing section/tag number stays fixed.
+    QCAMERA3_ZSL,
     QCAMERA3_SECTIONS_END,
 };
 
@@ -107,6 +109,7 @@ enum qcamera3_ext_section_ranges {
     QCAMERA3_STREAM_START = QCAMERA3_STREAM << 16,
     QCAMERA3_DIAGNOSTICS_START = QCAMERA3_DIAGNOSTICS << 16,
     QCAMERA3_AR_START = QCAMERA3_AR << 16,
+    QCAMERA3_ZSL_START = QCAMERA3_ZSL << 16,
 };
 
 enum qcamera3_ext_tags {
@@ -440,7 +443,16 @@ enum qcamera3_ext_tags {
     QCAMERA3_AR_TRACKING_SUPPORTED,                    // byte static
     QCAMERA3_AR_TRACKING_STATUS,                       // int32 result errno
     QCAMERA3_AR_GRAVITY_AIDED,                         // byte result 0/1
-    QCAMERA3_AR_END
+    QCAMERA3_AR_END,
+
+    // org.lineageos.camera.zsl - vendor-only ZSL path (default closed).
+    QCAMERA3_ZSL_ENABLE = QCAMERA3_ZSL_START,  // int32 request 0/1 vendor marker
+    QCAMERA3_ZSL_MAX_AGE_MS,                   // int32 request 0..5000, 0 = property default
+    QCAMERA3_ZSL_APPLIED,                      // byte result 0/1
+    QCAMERA3_ZSL_FRAME_AGE_MS,                 // int32 result ms, -1 = no frame
+    QCAMERA3_ZSL_FRAME_NUMBER,                 // int64 result daemon frame, 0 = none
+    QCAMERA3_ZSL_FALLBACK_REASON,              // int32 result 0 none/1 no-frame/2 age/3 unsupported/4 channel
+    QCAMERA3_ZSL_END
 };
 
 // QCAMERA3_VIDEO_HDR_MODE

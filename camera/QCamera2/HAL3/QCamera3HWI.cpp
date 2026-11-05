@@ -280,6 +280,34 @@ static bool oppoFrontBeautySupported(const cam_capability_t *capability)
             oppoFrontBeautyEnabled() && QCamera3FrontBeauty::isAvailable();
 }
 
+// Vendor-only ZSL path (stock HAL ZSL snapshot channel). All defaults closed.
+static bool oppoZslMasterEnabled()
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get("persist.vendor.camera.oppo.zsl.enable", prop, "0");
+    return atoi(prop) == 1;
+}
+
+static int32_t oppoZslPropertyInt(const char *name, int32_t defaultValue)
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get(name, prop, "");
+    if (prop[0] == '\0') return defaultValue;
+    return atoi(prop);
+}
+
+static int64_t oppoZslPropertyInt64(const char *name, int64_t defaultValue)
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get(name, prop, "");
+    if (prop[0] == '\0') return defaultValue;
+    errno = 0;
+    char *end = nullptr;
+    const long long value = strtoll(prop, &end, 0);
+    if (end == prop || errno != 0) return defaultValue;
+    return int64_t(value);
+}
+
 // A/B switch for the automatic request-template AE keys; 0 = fixed behaviour.
 static bool oppoLegacyAeTemplateEnabled()
 {
@@ -1165,6 +1193,10 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
                 basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_AUTO_HDR_ENABLE);
                 basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_AUTO_NIGHT_ENABLE);
             }
+            if (oppoZslMasterEnabled()) {
+                basicKeys.add(QCAMERA3_ZSL_ENABLE);
+                basicKeys.add(QCAMERA3_ZSL_MAX_AGE_MS);
+            }
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_EXIF_COMMENT);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_WATERMARK_ASSET);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_STICKER_ASSET);
@@ -1194,6 +1226,12 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
             if (sensorCapability != NULL && sensorCapability->aux_cam_cap == NULL) {
                 basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_ESTIMATED_SNAPSHOT_EXP_TIME);
                 basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_AUTO_CAPTURE_REASON);
+                if (oppoZslMasterEnabled()) {
+                    basicKeys.add(QCAMERA3_ZSL_APPLIED);
+                    basicKeys.add(QCAMERA3_ZSL_FRAME_AGE_MS);
+                    basicKeys.add(QCAMERA3_ZSL_FRAME_NUMBER);
+                    basicKeys.add(QCAMERA3_ZSL_FALLBACK_REASON);
+                }
             }
             if (reprocess) {
                 basicKeys.add(ANDROID_REPROCESS_EFFECTIVE_EXPOSURE_FACTOR);
@@ -4421,6 +4459,9 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
     mPictureChannel = NULL;
     mZSLChannel = NULL;
 
+    resetOppoZslState();
+    mOppoZslEnabled = false;
+    mOppoZslMemOk = false;
     mHALZSL = CAM_HAL3_ZSL_TYPE_NONE;
     if(mOpMode == QCAMERA3_VENDOR_STREAM_CONFIGURATION_YUV_ZSL_MODE)
     {
@@ -5045,6 +5086,17 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                            }
                        }
 
+                        cam_dimension_t zslPictureDim = {
+                                (int32_t)newStream->width, (int32_t)newStream->height};
+                        readOppoZslProperties(zslPictureDim);
+                        if (mOppoZslEnabled &&
+                                mOpMode != QCAMERA3_VENDOR_STREAM_CONFIGURATION_YUV_ZSL_MODE &&
+                                !m_bIsVideo && !isZsl) {
+                            /* Vendor path reuses the stock HAL ZSL snapshot channel;
+                             * only the trigger and the ring depth are ours. */
+                            mHALZSL = CAM_HAL3_ZSL_TYPE_SNAPSHOT;
+                            maxZSLBuffers = mOppoZslRingBuffers;
+                        }
                         LOGI("%s HAL ZSL : ",
                             (mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT) ? "Enabling":"Disabling");
                         LOGH("isZsl %d, m_bIsVideo %d, numStreamsOnEncoder %d, bJpegOnEncoder %d",
@@ -10314,7 +10366,12 @@ no_error:
                 }
             } else {
                 if (channel->isZSLChannel()) {
-                    isZSLCapture = needZSLCapture(request);
+                    isZSLCapture = needZSLCapture(request, frameNumber, true);
+                    if (!isZSLCapture && mOppoZslFailFrame == frameNumber) {
+                        LOGE("vendor ZSL requested but not eligible and fallback disabled");
+                        pthread_mutex_unlock(&mMutex);
+                        return -EINVAL;
+                    }
                     pendingBufferIter->isZSL = isZSLCapture;
                 }
                 LOGD("snapshot request with buffer %p, frame_number %d isZSLCapture %d",
@@ -10370,7 +10427,7 @@ no_error:
             || (IS_USAGE_HEIF(output.stream->usage))) {
             bool needMetadata = false;
             if (channel->isZSLChannel()) {
-                isZSLCapture = needZSLCapture(request);
+                isZSLCapture = needZSLCapture(request, frameNumber, false);
                 pendingBufferIter->isZSL = isZSLCapture;
             }
             QCamera3YUVChannel *yuvChannel = (QCamera3YUVChannel *)channel;
@@ -11341,6 +11398,132 @@ bool QCamera3HardwareInterface::getNativeTrace(uint32_t internalFrame,
  *
  * RETURN     : NONE
  *==========================================================================*/
+void QCamera3HardwareInterface::resetOppoZslState()
+{
+    Mutex::Autolock lock(mZslStateLock);
+    memset(mZslStates, 0, sizeof(mZslStates));
+    mZslStateNext = 0;
+    mOppoZslFailFrame = UINT32_MAX;
+}
+
+void QCamera3HardwareInterface::readOppoZslProperties(const cam_dimension_t &pictureDim)
+{
+    mOppoZslEnabled = false;
+    mOppoZslMemOk = false;
+    if (!oppoZslMasterEnabled()) {
+        LOGI("vendor ZSL disabled by persist.vendor.camera.oppo.zsl.enable");
+        return;
+    }
+    mOppoZslDepth = QCamera3ZslPolicy::clampDepth(
+            oppoZslPropertyInt("persist.vendor.camera.oppo.zsl.depth", 2));
+    mOppoZslMaxAgeMs = QCamera3ZslPolicy::clampMaxAgeMs(
+            oppoZslPropertyInt("persist.vendor.camera.oppo.zsl.max_age_ms",
+                    QCamera3ZslPolicy::kDefaultMaxAgeMs));
+    mOppoZslMaxBytes = oppoZslPropertyInt64("persist.vendor.camera.oppo.zsl.max_bytes",
+            QCamera3ZslPolicy::kDefaultMaxBytes);
+    if (mOppoZslMaxBytes <= 0) mOppoZslMaxBytes = QCamera3ZslPolicy::kDefaultMaxBytes;
+    mOppoZslFallback = QCamera3ZslPolicy::clampFallback(
+            oppoZslPropertyInt("persist.vendor.camera.oppo.zsl.fallback", 1));
+    mOppoZslRingBuffers = QCamera3ZslPolicy::ringBufferCount(mOppoZslDepth);
+    mOppoZslMemOk = QCamera3ZslPolicy::fitsMemory(pictureDim.width, pictureDim.height,
+            mOppoZslRingBuffers, mOppoZslMaxBytes);
+    mOppoZslEnabled = mOppoZslMemOk;
+    LOGI("vendor ZSL enable=%d depth=%d buffers=%d maxAge=%d maxBytes=%" PRId64
+            " fallback=%d picture=%dx%d",
+            mOppoZslEnabled ? 1 : 0, mOppoZslDepth, mOppoZslRingBuffers,
+            mOppoZslMaxAgeMs, mOppoZslMaxBytes, mOppoZslFallback,
+            pictureDim.width, pictureDim.height);
+}
+
+void QCamera3HardwareInterface::noteZslRequest(uint32_t internalFrame,
+        const QCamera3ZslPolicy::Decision &decision)
+{
+    Mutex::Autolock lock(mZslStateLock);
+    ZslFrameState *slot = nullptr;
+    for (size_t i = 0; i < kZslStateSlots; ++i) {
+        if (mZslStates[i].valid && mZslStates[i].frame == internalFrame) {
+            slot = &mZslStates[i];
+            break;
+        }
+    }
+    if (slot == nullptr) {
+        slot = &mZslStates[mZslStateNext];
+        mZslStateNext = (mZslStateNext + 1) % kZslStateSlots;
+        memset(slot, 0, sizeof(*slot));
+        slot->frame = internalFrame;
+        slot->valid = true;
+    }
+    slot->requested = decision.requested;
+    slot->useZsl = decision.useZsl;
+    slot->maxAgeMs = decision.maxAgeMs;
+    slot->applied = false;
+    slot->fallbackReason = decision.fallbackReason;
+    slot->frameAgeMs = -1;
+    slot->frameNumber = 0;
+}
+
+bool QCamera3HardwareInterface::getZslState(uint32_t internalFrame, ZslFrameState &state)
+{
+    Mutex::Autolock lock(mZslStateLock);
+    for (size_t i = 0; i < kZslStateSlots; ++i) {
+        if (!mZslStates[i].valid) continue;
+        if (mZslStates[i].frame == internalFrame ||
+                (mZslStates[i].frameNumber > 0 &&
+                 uint64_t(mZslStates[i].frameNumber) == internalFrame)) {
+            state = mZslStates[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+bool QCamera3HardwareInterface::isOppoZslFrame(uint32_t internalFrame)
+{
+    Mutex::Autolock lock(mZslStateLock);
+    for (size_t i = 0; i < kZslStateSlots; ++i) {
+        if (mZslStates[i].valid && mZslStates[i].frame == internalFrame &&
+                mZslStates[i].requested && mZslStates[i].useZsl) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void QCamera3HardwareInterface::noteZslSelection(uint32_t requestedFrame,
+        int64_t selectedFrame, int64_t ageMs)
+{
+    Mutex::Autolock lock(mZslStateLock);
+    for (size_t i = 0; i < kZslStateSlots; ++i) {
+        ZslFrameState &state = mZslStates[i];
+        if (!state.valid || state.frame != requestedFrame || !state.requested) continue;
+        const QCamera3ZslPolicy::Selection selection =
+                QCamera3ZslPolicy::classifySelection(ageMs,
+                        state.maxAgeMs > 0 ? state.maxAgeMs : mOppoZslMaxAgeMs);
+        state.applied = selection.applied;
+        state.fallbackReason = selection.fallbackReason;
+        state.frameAgeMs = selection.frameAgeMs;
+        state.frameNumber = selectedFrame;
+        LOGI("vendor ZSL frame=%u selected=%" PRId64 " age=%" PRId64
+                " applied=%d reason=%d", requestedFrame, selectedFrame, ageMs,
+                selection.applied ? 1 : 0, selection.fallbackReason);
+        return;
+    }
+}
+
+void QCamera3HardwareInterface::noteZslError(uint32_t requestedFrame, int32_t fallbackReason)
+{
+    Mutex::Autolock lock(mZslStateLock);
+    for (size_t i = 0; i < kZslStateSlots; ++i) {
+        ZslFrameState &state = mZslStates[i];
+        if (!state.valid || state.frame != requestedFrame || !state.requested) continue;
+        state.applied = false;
+        state.fallbackReason = fallbackReason;
+        state.frameAgeMs = -1;
+        state.frameNumber = 0;
+        return;
+    }
+}
+
 void QCamera3HardwareInterface::captureResultCb(mm_camera_super_buf_t *metadata_buf,
                 camera3_stream_buffer_t *buffer, uint32_t frame_number, bool isInputBuffer)
 {
@@ -11774,6 +11957,19 @@ QCamera3HardwareInterface::translateFromHalMetadata(
             camMetadata.update(QCAMERA3_DIAGNOSTICS_OCCLUSION_CONFIDENCE, &occlusion[1], 1);
             camMetadata.update(QCAMERA3_DIAGNOSTICS_OCCLUSION_REASON, &occlusion[2], 1);
             camMetadata.update(QCAMERA3_DIAGNOSTICS_OCCLUSION_CORE, &occlusion[3], 1);
+        }
+    }
+
+    if (mOppoZslEnabled) {
+        IF_META_AVAILABLE(uint32_t, zslFrame, CAM_INTF_META_FRAME_NUMBER, metadata) {
+            ZslFrameState zsl;
+            if (getZslState(*zslFrame, zsl) && zsl.requested) {
+                const uint8_t applied = zsl.applied ? 1 : 0;
+                camMetadata.update(QCAMERA3_ZSL_APPLIED, &applied, 1);
+                camMetadata.update(QCAMERA3_ZSL_FRAME_AGE_MS, &zsl.frameAgeMs, 1);
+                camMetadata.update(QCAMERA3_ZSL_FRAME_NUMBER, &zsl.frameNumber, 1);
+                camMetadata.update(QCAMERA3_ZSL_FALLBACK_REASON, &zsl.fallbackReason, 1);
+            }
         }
     }
 
@@ -20120,22 +20316,96 @@ void QCamera3HardwareInterface::setColorMetadata(camera3_stream_buffer_t *buffer
     setMetaData(priv_handle, COLOR_METADATA, &bufferMetadata);
 }
 
-bool QCamera3HardwareInterface::needZSLCapture(const camera3_capture_request_t *request)
+bool QCamera3HardwareInterface::needZSLCapture(const camera3_capture_request_t *request,
+        uint32_t frameNumber, bool blobRequest)
 {
     char prop[PROPERTY_VALUE_MAX];
     memset(prop, 0, sizeof(prop));
     property_get("persist.vendor.camera.forcezsl", prop, "0");
+    mOppoZslFailFrame = UINT32_MAX;
+
+    if (request == NULL || request->settings == NULL) return false;
+    CameraMetadata frame_settings;
+    frame_settings = request->settings;
+
+    /* Vendor trigger first: only OCam sends it, and only the vendor property can
+     * enable it. The stock CONTROL_ENABLE_ZSL / forcezsl behaviour below is kept
+     * byte-for-byte when the vendor key is absent (standard clients unchanged). */
+    if (mOppoZslEnabled) {
+        const camera_metadata_entry_t zslEnable = frame_settings.find(QCAMERA3_ZSL_ENABLE);
+        if (zslEnable.count == 1 && zslEnable.data.i32[0] == 1) {
+            QCamera3ZslPolicy::RequestFeatures features;
+            features.zslEnable = true;
+            if (frame_settings.exists(ANDROID_CONTROL_ENABLE_ZSL)) {
+                const camera_metadata_entry_t standardZsl =
+                        frame_settings.find(ANDROID_CONTROL_ENABLE_ZSL);
+                features.standardEnableZsl = standardZsl.count == 1 &&
+                        standardZsl.data.u8[0] == 1;
+            }
+            if (frame_settings.exists(QCAMERA3_ZSL_MAX_AGE_MS)) {
+                const camera_metadata_entry_t maxAge =
+                        frame_settings.find(QCAMERA3_ZSL_MAX_AGE_MS);
+                features.maxAgeMs = maxAge.count == 1 ? maxAge.data.i32[0] : 0;
+            }
+            const camera_metadata_entry_t intent =
+                    frame_settings.find(ANDROID_CONTROL_CAPTURE_INTENT);
+            features.stillCapture = intent.count == 1 &&
+                    intent.data.u8[0] == ANDROID_CONTROL_CAPTURE_INTENT_STILL_CAPTURE;
+            features.blobRequest = blobRequest;
+            features.video = m_bIsVideo;
+            features.nativeStillMode = oppoNativeMode(frame_settings);
+            features.inputReprocess = request->input_buffer != NULL;
+            features.pairedOrAux = isDualCamera() || isVerifiedPairedSession() ||
+                    (gCamCapability[mCameraId] != NULL &&
+                     gCamCapability[mCameraId]->aux_cam_cap != NULL);
+            features.secure = isSecureMode();
+            if (frame_settings.exists(ANDROID_FLASH_MODE)) {
+                const camera_metadata_entry_t flash = frame_settings.find(ANDROID_FLASH_MODE);
+                features.flashActive = flash.count == 1 &&
+                        flash.data.u8[0] != ANDROID_FLASH_MODE_OFF;
+            }
+            if (frame_settings.exists(ANDROID_CONTROL_AE_MODE)) {
+                const camera_metadata_entry_t ae = frame_settings.find(ANDROID_CONTROL_AE_MODE);
+                features.aeOff = ae.count == 1 && ae.data.u8[0] == ANDROID_CONTROL_AE_MODE_OFF;
+            }
+            if (frame_settings.exists(ANDROID_CONTROL_AE_LOCK)) {
+                const camera_metadata_entry_t aeLock = frame_settings.find(ANDROID_CONTROL_AE_LOCK);
+                features.aeLock = aeLock.count == 1 &&
+                        aeLock.data.u8[0] == ANDROID_CONTROL_AE_LOCK_ON &&
+                        frame_settings.exists(ANDROID_CONTROL_AE_EXPOSURE_COMPENSATION);
+            }
+            if (frame_settings.exists(ANDROID_CONTROL_AWB_MODE)) {
+                const camera_metadata_entry_t awb = frame_settings.find(ANDROID_CONTROL_AWB_MODE);
+                features.awbOff = awb.count == 1 && awb.data.u8[0] == ANDROID_CONTROL_AWB_MODE_OFF;
+            }
+            if (frame_settings.exists(ANDROID_CONTROL_AF_MODE)) {
+                const camera_metadata_entry_t af = frame_settings.find(ANDROID_CONTROL_AF_MODE);
+                features.afOff = af.count == 1 && af.data.u8[0] == ANDROID_CONTROL_AF_MODE_OFF;
+            }
+            features.flashActive = features.flashActive || mFlashNeeded;
+            features.ringAvailable = mOppoZslMemOk &&
+                    mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT;
+            QCamera3ZslPolicy::Config config;
+            config.enabled = true;
+            config.depth = mOppoZslDepth;
+            config.maxAgeMs = mOppoZslMaxAgeMs;
+            config.maxBytes = mOppoZslMaxBytes;
+            config.fallback = mOppoZslFallback;
+            const QCamera3ZslPolicy::Decision decision =
+                    QCamera3ZslPolicy::decide(features, config);
+            noteZslRequest(frameNumber, decision);
+            if (decision.failRequest) mOppoZslFailFrame = frameNumber;
+            LOGI("vendor ZSL frame=%u use=%d status=%d reason=%s",
+                    frameNumber, decision.useZsl, decision.status,
+                    QCamera3ZslPolicy::reasonName(decision.reason));
+            return decision.useZsl;
+        }
+    }
 
     bool needZSL = false;
     bool bZSLSetting = false;
-    uint8_t captureIntent;
-    CameraMetadata frame_settings;
+    uint8_t captureIntent = ANDROID_CONTROL_CAPTURE_INTENT_STILL_CAPTURE;
 
-    if (!request->settings) {
-        return false;
-    }
-
-    frame_settings = request->settings;
     if (frame_settings.exists(ANDROID_CONTROL_ENABLE_ZSL)) {
         bZSLSetting = frame_settings.find(ANDROID_CONTROL_ENABLE_ZSL).data.u8[0];
         LOGD("Control ZSL in request settings is %d", bZSLSetting);

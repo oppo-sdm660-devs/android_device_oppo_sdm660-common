@@ -48,7 +48,20 @@ HOST_SANITIZE=0 python3 run_platform_hwi_tests.py
 gate→init→updateparameters→process 顺序、per-stillMode 算法位、param/frame-ctx 布局、
 失败状态与 close 反初始化。真实库按反解 ABI 调用，仍需真机 A/B 验证效果。
 
-## 4. 静态一致性检查
+## 4. Vendor 专属 ZSL 策略（纯 C++，task-59）
+
+```sh
+python3 run_zsl_policy_tests.py
+HOST_SANITIZE=0 python3 run_zsl_policy_tests.py
+```
+
+验证 `QCamera3ZslPolicy` 的触发判定（standard `ANDROID_CONTROL_ENABLE_ZSL=1` +
+vendor `zslEnable=1` 双条件）、互斥矩阵（native stillMode/video/RAW/paired/secure/
+flash/AE/AWB/AF 锁定）、ring 深度与内存估算（16MP depth=2→4 buffers、128MiB 上限）、
+年龄分类（默认 120ms，超龄 applied=0/fallbackReason=2）与 fallbackReason 映射。
+HAL3 侧复用 stock HAL ZSL snapshot channel；真实取帧/时延/内存与结果键需真机验证。
+
+## 5. 静态一致性检查
 
 ```sh
 python3 hal_static_checks.py
@@ -58,7 +71,7 @@ python3 hal_static_checks.py
 前摄美颜协议/消费者/Android.bp、fake 测试文件可加载），防止只改一侧。grep 级别，
 不是编译替代。
 
-## 5. 真机验证入口
+## 6. 真机验证入口
 
 见 `OCam/docs/hal-changes.md` §10 的远程构建/部署/真机命令；本目录不包含任何
 依赖真机或 Android 源码树的测试。

@@ -76,6 +76,7 @@ enum qcamera3_ext_tags qcamera3_ext3_section_bounds[QCAMERA3_SECTIONS_END -
         QCAMERA3_STREAM_END,
         QCAMERA3_DIAGNOSTICS_END,
         QCAMERA3_AR_END,
+        QCAMERA3_ZSL_END,
 };
 
 typedef struct vendor_tag_info {
@@ -117,7 +118,8 @@ const char *qcamera3_ext_section_names[QCAMERA3_SECTIONS_END -
     "org.lineageos.camera.postprocess",
     "org.lineageos.camera.stream",
     "org.lineageos.camera.diagnostics",
-    "org.lineageos.camera.ar"
+    "org.lineageos.camera.ar",
+    "org.lineageos.camera.zsl"
 };
 
 vendor_tag_info_t qcamera3_privatedata[QCAMERA3_PRIVATEDATA_END - QCAMERA3_PRIVATEDATA_START] = {
@@ -419,6 +421,15 @@ vendor_tag_info_t qcamera3_eis_flush[QCAMERA3_EIS_FLUSH_END -
     { "endOfStream", TYPE_BYTE }
 };
 
+vendor_tag_info_t qcamera3_zsl[QCAMERA3_ZSL_END - QCAMERA3_ZSL_START] = {
+    { "zslEnable", TYPE_INT32 },
+    { "zslMaxAgeMs", TYPE_INT32 },
+    { "zslApplied", TYPE_BYTE },
+    { "frameAgeMs", TYPE_INT32 },
+    { "frameNumber", TYPE_INT64 },
+    { "fallbackReason", TYPE_INT32 },
+};
+
 vendor_tag_info_t *qcamera3_tag_info[QCAMERA3_SECTIONS_END -
         VENDOR_SECTION] = {
     qcamera3_privatedata,
@@ -454,6 +465,7 @@ vendor_tag_info_t *qcamera3_tag_info[QCAMERA3_SECTIONS_END -
     qcamera3_stream,
     qcamera3_diagnostics,
     qcamera3_ar,
+    qcamera3_zsl,
 };
 
 uint32_t qcamera3_all_tags[] = {
@@ -672,7 +684,13 @@ uint32_t qcamera3_all_tags[] = {
     (uint32_t)QCAMERA3_AR_POSE_CONFIDENCE,
     (uint32_t)QCAMERA3_AR_TRACKING_SUPPORTED,
     (uint32_t)QCAMERA3_AR_TRACKING_STATUS,
-    (uint32_t)QCAMERA3_AR_GRAVITY_AIDED
+    (uint32_t)QCAMERA3_AR_GRAVITY_AIDED,
+    (uint32_t)QCAMERA3_ZSL_ENABLE,
+    (uint32_t)QCAMERA3_ZSL_MAX_AGE_MS,
+    (uint32_t)QCAMERA3_ZSL_APPLIED,
+    (uint32_t)QCAMERA3_ZSL_FRAME_AGE_MS,
+    (uint32_t)QCAMERA3_ZSL_FRAME_NUMBER,
+    (uint32_t)QCAMERA3_ZSL_FALLBACK_REASON
 };
 
 const vendor_tag_ops_t* QCamera3VendorTags::Ops = NULL;

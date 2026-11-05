@@ -54,6 +54,7 @@
 #include "QCamera3LogicalMultiCam.h"
 #include "QCamera3SatPolicy.h"
 #include "QCamera3AutoCapturePolicy.h"
+#include "QCamera3ZslPolicy.h"
 
 extern "C" {
 #include "mm_camera_interface.h"
@@ -381,6 +382,10 @@ public:
     // Occlusion analysis of the still frame; a miss is normal.
     void noteOcclusionResult(uint32_t internalFrame, int32_t occluded,
             int32_t confidence, int32_t reason, int32_t coreStatus);
+    // Vendor-only ZSL (stock HAL ZSL snapshot path); all no-ops when disabled.
+    bool isOppoZslFrame(uint32_t internalFrame);
+    void noteZslSelection(uint32_t requestedFrame, int64_t selectedFrame, int64_t ageMs);
+    void noteZslError(uint32_t requestedFrame, int32_t fallbackReason);
     // {occluded, confidence, reason, coreStatus}; false without a record.
     bool getOcclusionResult(uint32_t internalFrame, int32_t *values, size_t count);
     bool needReprocess(cam_feature_mask_t postprocess_mask);
@@ -612,7 +617,8 @@ private:
     void initDCSettings();
     void fillUBWCStats(camera3_stream_buffer_t *buffer);
     void setColorMetadata(camera3_stream_buffer_t *buffer);
-    bool needZSLCapture(const camera3_capture_request_t *request);
+    bool needZSLCapture(const camera3_capture_request_t *request,
+            uint32_t frameNumber, bool blobRequest);
     int32_t addZSLChannel();
     static void zsl_channel_cb(mm_camera_super_buf_t *recvd_frame, void *userdata);
     int getConfiguredSATStreamDim(cam_dimension_t &dim);
@@ -961,6 +967,35 @@ private:
     int32_t mNativeFrontBeautyStrength = 0;
     int32_t mNativeSceneStrength = 0;
     native_stage_request_t mNativeStages = {};
+    // Vendor-only ZSL path (reuses the stock HAL ZSL snapshot channel).
+    bool mOppoZslEnabled = false;
+    bool mOppoZslMemOk = false;
+    int32_t mOppoZslDepth = 2;
+    int32_t mOppoZslMaxAgeMs = 120;
+    int64_t mOppoZslMaxBytes = 128LL * 1024 * 1024;
+    int32_t mOppoZslFallback = 1;
+    int32_t mOppoZslRingBuffers = 4;
+    uint32_t mOppoZslFailFrame = UINT32_MAX;
+    struct ZslFrameState {
+        uint32_t frame = 0;
+        bool valid = false;
+        bool requested = false;
+        bool useZsl = false;
+        bool applied = false;
+        int32_t fallbackReason = 0;
+        int32_t frameAgeMs = -1;
+        int64_t frameNumber = 0;
+        int32_t maxAgeMs = 0;
+    };
+    static const size_t kZslStateSlots = 8;
+    ZslFrameState mZslStates[kZslStateSlots];
+    size_t mZslStateNext = 0;
+    Mutex mZslStateLock;
+    void resetOppoZslState();
+    void noteZslRequest(uint32_t internalFrame,
+            const QCamera3ZslPolicy::Decision &decision);
+    bool getZslState(uint32_t internalFrame, ZslFrameState &state);
+    void readOppoZslProperties(const cam_dimension_t &pictureDim);
     // Last decoded preview statistics for the automatic HDR/night policy,
     // guarded by mMutex (metadata callback and request path both hold it).
     struct AutoCaptureStats {

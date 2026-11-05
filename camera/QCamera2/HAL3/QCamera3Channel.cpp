@@ -4760,6 +4760,7 @@ void QCamera3YUVChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
     LOGI("[KPI Perf]: superbuf frame_idx %d",
             recvd_frame->bufs[0]->frame_idx);
 
+    QCamera3HardwareInterface *hal_obj = (QCamera3HardwareInterface *)mUserData;
     uint32_t frameNum;
     bool metaNeedPP = true;
     bool past_frame = false;
@@ -4826,6 +4827,34 @@ void QCamera3YUVChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
                     }
                 }
             }
+        }
+    }
+
+    /* Vendor-only ZSL: report the frame age of the selected past frame. The
+     * stock HAL ZSL path already owns the ring; this only annotates the result. */
+    if (hal_obj != NULL && hal_obj->isOppoZslFrame(frameNum)) {
+        int64_t selectedFrame = received_frame_num != UINT32_MAX ?
+                int64_t(received_frame_num) : -1;
+        int64_t sensorTimestampNs = -1;
+        for (uint32_t i = 0; i < recvd_frame->num_bufs; i++) {
+            if (recvd_frame->bufs[i]->stream_type != CAM_STREAM_TYPE_METADATA) continue;
+            metadata_buffer_t *metadata =
+                    (metadata_buffer_t *)recvd_frame->bufs[i]->buffer;
+            IF_META_AVAILABLE(int64_t, sensorTimestamp, CAM_INTF_META_SENSOR_TIMESTAMP,
+                    metadata) {
+                sensorTimestampNs = *sensorTimestamp;
+            }
+        }
+        int64_t ageMs = -1;
+        if (sensorTimestampNs > 0) {
+            const int64_t now = systemTime(SYSTEM_TIME_BOOTTIME);
+            ageMs = (now - sensorTimestampNs) / 1000000LL;
+            if (ageMs < 0) ageMs = 0;
+        }
+        if (selectedFrame >= 0 && ageMs >= 0) {
+            hal_obj->noteZslSelection(frameNum, selectedFrame, ageMs);
+        } else {
+            hal_obj->noteZslError(frameNum, QCamera3ZslPolicy::kFallbackNoFrame);
         }
     }
 
@@ -7149,6 +7178,9 @@ void QCamera3PicChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
                 if(frameNum != received_frame_num)
                 {
                     LOGD("frame dropped %d, sending error",frameNum);
+                    if (hal_obj != NULL && hal_obj->isOppoZslFrame(frameNum))
+                        hal_obj->noteZslError(frameNum,
+                                QCamera3ZslPolicy::kFallbackChannelError);
                     m_postprocessor.eraseJpegSetting(frameNum);
                     returnBufferError(frameNum);
                     continue;
@@ -7175,6 +7207,9 @@ void QCamera3PicChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
                 for (uint32_t k = 0; k < p_cam_frame_drop->num_streams; k++) {
                     if (mStreams[0]->getMyServerID() ==
                             p_cam_frame_drop->stream_request[k].streamID) {
+                        if (hal_obj != NULL && hal_obj->isOppoZslFrame(frameNum))
+                            hal_obj->noteZslError(frameNum,
+                                    QCamera3ZslPolicy::kFallbackChannelError);
                         m_postprocessor.eraseJpegSetting(frameNum);
                         returnBufferError(frameNum);
                         releaseSuperBuf(recvd_frame);
