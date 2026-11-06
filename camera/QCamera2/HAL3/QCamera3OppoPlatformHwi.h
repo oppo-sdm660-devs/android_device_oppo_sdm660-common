@@ -13,6 +13,7 @@
  */
 
 constexpr int32_t kOppoPlatformMaxFaces = 10;
+constexpr int32_t kOppoPlatformMaxImages = 10;
 
 /* One face rect in the coordinate space given by sourceWidth/Height (HAL3 active
  * array); the platform param builder scales it to the image geometry. */
@@ -30,8 +31,18 @@ struct QCamera3OppoPlatformFaceInfo {
     QCamera3OppoPlatformFaceRect faces[kOppoPlatformMaxFaces];
 };
 
+/* One contiguous NV21 input image for the multi-frame engine context. */
+struct QCamera3OppoPlatformImage {
+    const uint8_t *data = nullptr;
+    size_t length = 0;
+    int32_t width = 0;
+    int32_t height = 0;
+    int32_t stride = 0;
+    int32_t slice = 0;
+};
+
 struct QCamera3OppoPlatformFrame {
-    const uint8_t *data;    /* NV21 frame, modified in place */
+    const uint8_t *data;    /* NV21 frame, modified in place (legacy single) */
     size_t length;
     int32_t width;
     int32_t height;
@@ -40,6 +51,10 @@ struct QCamera3OppoPlatformFrame {
     QCamera3OppoPlatformFaceInfo faceInfo;
     int32_t beautyStrength = 0; /* 0..100, only used by beauty modes */
     int32_t sceneStrength = 0;  /* 0..100, only used by SCENE(9) */
+    /* P3: current-capture bracket inputs (never ZSL history). imageCount==0
+     * keeps the legacy single-image fields above. */
+    int32_t imageCount = 0;
+    QCamera3OppoPlatformImage images[kOppoPlatformMaxImages];
 };
 
 class QCamera3OppoPlatformHwi {
@@ -74,6 +89,11 @@ public:
      * (RE task-74: never run with an empty/nonexistent path). processStillFrame
      * for 5/10 returns -EOPNOTSUPP while false; callers fall back. */
     bool beautyParamsReady(int32_t stillMode) const;
+
+    /* SUPER(4) single-frame probe gate (persist...platform_hwi.super, default 0)
+     * and its updateparameters prerequisite (persist...platform_hwi.update).
+     * processStillFrame(4) returns -EOPNOTSUPP unless both are enabled. */
+    bool superProbeReady() const;
 
     /* Face result cache fed from HAL3 CAM_INTF_META_FACE_DETECTION (active-array
      * rects). getFaceInfo() prefers the exact frame; otherwise it uses the latest

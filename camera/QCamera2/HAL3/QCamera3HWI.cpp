@@ -307,6 +307,19 @@ static bool oppoZslMasterEnabled()
     return atoi(prop) == 1;
 }
 
+/* Camera2 treats CONTROL_ENABLE_ZSL as a hint: a HAL may decline it. The stock
+ * HAL-ZSL snapshot channel on this device is a frame-specific (pseudo-ZSL)
+ * picture channel; taking the past-frame branch returns no JPEG on current
+ * builds (5s App timeout), while the frame-specific path is the one proven on
+ * device. Default: decline the hint when vendor ZSL is not in use; 1 restores
+ * the stock past-frame request for A/B. */
+static bool oppoStandardZslPastFrameAllowed()
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get("persist.vendor.camera.oppo.zsl.standard_past_frame", prop, "0");
+    return atoi(prop) == 1;
+}
+
 /* RE task-98 P2 fallback: native stillMode requests are excluded from the vendor
  * ZSL queue but the session-level pseudo-ZSL picture channel still defers JPEG
  * delivery. Force the plain snapshot channel for A/B when P1 alone is not enough. */
@@ -6593,18 +6606,21 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
                     // For instant AEC drop the stream untill AEC is settled.
                     dropFrame = true;
                 }
-                /* HAL ZSL snapshot: the daemon-drop of the deferred JPEG stream is
-                 * expected, not a capture failure. Suppress only the daemon drop
-                 * case; instant-AEC drops keep their existing behaviour. */
+                /* HAL ZSL snapshot: a past-frame ZSL request (isZSLCapture) has
+                 * its JPEG delivered by the ZSL channel callback, so the daemon
+                 * drop of the deferred JPEG stream is expected. Pseudo-ZSL
+                 * requests are not part of that contract: suppressing their drop
+                 * hides the only failure signal and the App waits until its own
+                 * timeout, so keep the stock error for them. */
                 const bool expectedHalZslDrop = p_cam_frame_drop && dropFrame &&
-                        (mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT) &&
+                        (mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT) && j->isZSL &&
                         QCamera3ZslPolicy::suppressHalZslBlobDrop(
                                 j->stream->format == HAL_PIXEL_FORMAT_BLOB,
                                 channel->isZSLChannel(), halZslDropBypass);
                 if (expectedHalZslDrop) {
                     LOGI("HAL ZSL expected JPEG drop suppressed frame#=%u,"
-                            "streamID=%u mCameraId: %d",
-                            i->frame_number, streamID, mCameraId);
+                            "streamID=%u isZSLCapture=%d halzsl=%d mCameraId: %d",
+                            i->frame_number, streamID, j->isZSL, mHALZSL, mCameraId);
                     continue;
                 }
                 if (dropFrame && !j->isZSL) {
@@ -6612,8 +6628,8 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
                     if (p_cam_frame_drop) {
                         // Treat msg as error for system buffer drops
                         LOGI("Start of reporting error frame#=%u,"
-                                 "streamID=%u, mCameraId: %d",
-                                 i->frame_number, streamID, mCameraId);
+                                 "streamID=%u, isZSLCapture=%d halzsl=%d mCameraId: %d",
+                                 i->frame_number, streamID, j->isZSL, mHALZSL, mCameraId);
                     } else {
                         // For instant AEC, inform frame drop and frame number
                         LOGH("Start of reporting error frame#=%u for instant AEC, streamID=%u, "
@@ -20520,6 +20536,17 @@ bool QCamera3HardwareInterface::needZSLCapture(const camera3_capture_request_t *
         needZSL = true;
     } else {
         //No need to check other params
+        return false;
+    }
+
+    /* Pseudo-ZSL session (HAL-ZSL snapshot channel, no vendor ring): a standard
+     * ENABLE_ZSL request has no past frame to serve on this build. Decline the
+     * hint (legal per Camera2) and keep the frame-specific path that is known to
+     * deliver JPEG; the stock past-frame path stays available with property=1. */
+    if (needZSL && mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT && !mOppoZslEnabled &&
+            !oppoStandardZslPastFrameAllowed()) {
+        LOGI("standard ENABLE_ZSL on pseudo-ZSL session: frame-specific capture"
+                " (frame=%u)", frameNumber);
         return false;
     }
 

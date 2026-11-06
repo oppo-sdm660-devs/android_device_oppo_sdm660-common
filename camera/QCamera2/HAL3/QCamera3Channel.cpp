@@ -7233,9 +7233,19 @@ void QCamera3PicChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
                     if (mStreams[0]->getMyServerID() ==
                             p_cam_frame_drop->stream_request[k].streamID) {
                         /* Pseudo-ZSL (frame-specific capture): the daemon drop of
-                         * the deferred picture stream is expected; a real past-
-                         * frame ZSL drop keeps the stock channel-error path. */
-                        if (QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(
+                         * the deferred picture stream is expected only when this
+                         * callback still carries a snapshot buffer to deliver.
+                         * A metadata-only callback has no JPEG path left, so keep
+                         * the stock channel error instead of hanging the App. */
+                        bool haveSnapshot = false;
+                        for (uint32_t b = 0; b < recvd_frame->num_bufs; b++) {
+                            if (recvd_frame->bufs[b]->stream_type ==
+                                    CAM_STREAM_TYPE_SNAPSHOT) {
+                                haveSnapshot = true;
+                                break;
+                            }
+                        }
+                        if (haveSnapshot && QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(
                                 past_frame, oppoHalZslChannelDropBypassEnabled())) {
                             LOGI("HAL ZSL expected pseudo-frame drop suppressed"
                                     " frame=%u", frameNum);

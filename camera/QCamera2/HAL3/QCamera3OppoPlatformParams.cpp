@@ -186,21 +186,59 @@ bool buildFaceInfo(uint8_t *param, size_t size, const FaceInfo &faces,
     return true;
 }
 
+namespace {
+/* imageCount==0 keeps the legacy single-image Frame fields; otherwise images[]
+ * is authoritative. */
+int32_t frameImageCount(const Frame &frame)
+{
+    return frame.imageCount > 0 ? frame.imageCount : 1;
+}
+
+bool frameImageAt(const Frame &frame, int32_t index, Image &image)
+{
+    if (frame.imageCount > 0) {
+        if (index < 0 || index >= frame.imageCount ||
+                index >= kMaxFrameImages) return false;
+        image = frame.images[index];
+        return true;
+    }
+    if (index != 0) return false;
+    image.data = frame.data;
+    image.length = frame.length;
+    image.width = frame.width;
+    image.height = frame.height;
+    image.stride = frame.stride;
+    image.slice = frame.slice;
+    return true;
+}
+}  // namespace
+
 bool buildFrameCtx(uint8_t *ctx, size_t size, const Frame &frame)
 {
     if (ctx == nullptr || size < kFrameCtxSize) return false;
-    if (frame.width <= 0 || frame.height <= 0) return false;
+    const int32_t count = frameImageCount(frame);
+    if (count <= 0 || frame.imageCount > kMaxFrameImages) return false;
     memset(ctx, 0, size);
-    writePtr(ctx, FrameCtxOffsets::kImagePtr, frame.data);
-    writeU32(ctx, FrameCtxOffsets::kWidth, uint32_t(frame.width));
-    writeU32(ctx, FrameCtxOffsets::kHeight, uint32_t(frame.height));
-    writeU32(ctx, FrameCtxOffsets::kStride,
-            frame.stride > 0 ? uint32_t(frame.stride) : uint32_t(frame.width));
-    writeU32(ctx, FrameCtxOffsets::kSlice,
-            frame.slice > 0 ? uint32_t(frame.slice) : uint32_t(frame.height));
-    writeU32(ctx, FrameCtxOffsets::kImageFormat, kFormatYuv420Nv21);
-    writeU8(ctx, FrameCtxOffsets::kImageValid, 1);
-    writeU32(ctx, FrameCtxOffsets::kImageCount, 1);
+    for (int32_t i = 0; i < count; ++i) {
+        Image image;
+        if (!frameImageAt(frame, i, image)) return false;
+        if (image.data == nullptr || image.length == 0 ||
+                image.width <= 0 || image.height <= 0) return false;
+        const size_t base = size_t(i) * FrameCtxOffsets::kImageSlotStride;
+        if (base + FrameCtxOffsets::kImageSlotStride > FrameCtxOffsets::kImageCount) {
+            return false;
+        }
+        writePtr(ctx, base + FrameCtxOffsets::kImagePtr, image.data);
+        writeU32(ctx, base + FrameCtxOffsets::kWidth, uint32_t(image.width));
+        writeU32(ctx, base + FrameCtxOffsets::kHeight, uint32_t(image.height));
+        writeU32(ctx, base + FrameCtxOffsets::kStride,
+                image.stride > 0 ? uint32_t(image.stride) : uint32_t(image.width));
+        writeU32(ctx, base + FrameCtxOffsets::kSlice,
+                image.slice > 0 ? uint32_t(image.slice) : uint32_t(image.height));
+        writeU32(ctx, base + FrameCtxOffsets::kImageFormat, kFormatYuv420Nv21);
+        writeU8(ctx, base + FrameCtxOffsets::kImageValid, 1);
+    }
+    writeU32(ctx, FrameCtxOffsets::kImageCount, uint32_t(count));
     if (frame.scratchPtr != nullptr && frame.scratchSize >= kScratchBytes) {
         writeU32(ctx, FrameCtxOffsets::kScratchFd, uint32_t(frame.scratchFd));
         writePtr(ctx, FrameCtxOffsets::kScratchPtr, frame.scratchPtr);

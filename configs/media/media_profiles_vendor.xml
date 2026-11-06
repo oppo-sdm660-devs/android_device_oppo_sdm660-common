@@ -203,6 +203,7 @@
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
+
 <!-- #ifndef VENDOR_EDIT -->
 <!-- Wuhan@swdp.MultiMediaService, 2016/06/24, Remove for not support 4K recording. -->
 <!--
@@ -762,9 +763,9 @@
 
     <EncoderProfile quality="high" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="20000000"
-             width="1920"
-             height="1080"
+             bitRate="42000000"
+             width="3840"
+             height="2160"
              frameRate="30" />
 
       <Audio codec="aac"
@@ -838,7 +839,6 @@
              channels="2" />
     </EncoderProfile>
 
-    <!-- QHD is not offered by the stock Aperture.
     <EncoderProfile quality="qhd" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="42000000"
@@ -851,7 +851,6 @@
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
-    -->
 
     <EncoderProfile quality="2k" fileFormat="mp4" duration="30">
       <Video codec="h264"
@@ -866,7 +865,6 @@
              channels="2" />
     </EncoderProfile>
 
-    <!-- 4K recording is not offered by this port.
     <EncoderProfile quality="4kdci" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -879,9 +877,7 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
-    -->
 
-    <!-- 4K recording is not offered by this port.
     <EncoderProfile quality="2160p" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -894,7 +890,6 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
-    -->
 
     <EncoderProfile quality="qcif" fileFormat="3gp" duration="30">
       <Video codec="h264"
@@ -938,9 +933,9 @@
 
     <EncoderProfile quality="timelapsehigh" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="20000000"
-             width="1920"
-             height="1080"
+             bitRate="42000000"
+             width="3840"
+             height="2160"
              frameRate="30" />
 
       <!-- audio setting is ignored -->
@@ -1049,7 +1044,6 @@
              channels="2" />
     </EncoderProfile>
 
-    <!-- QHD is not offered by the stock Aperture.
     <EncoderProfile quality="timelapseqhd" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="42000000"
@@ -1057,13 +1051,12 @@
              height="1440"
              frameRate="30" />
 
-      audio setting is ignored
+      <!-- audio setting is ignored -->
       <Audio codec="aac"
              bitRate="156000"
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
-    -->
 
     <EncoderProfile quality="timelapse2k" fileFormat="mp4" duration="30">
       <Video codec="h264"
@@ -1079,7 +1072,6 @@
              channels="2" />
     </EncoderProfile>
 
-    <!-- 4K recording is not offered by this port.
     <EncoderProfile quality="timelapse4kdci" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1092,9 +1084,7 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
-    -->
 
-    <!-- 4K recording is not offered by this port.
     <EncoderProfile quality="timelapse2160p" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1107,7 +1097,6 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
-    -->
 
         <ImageEncoding quality="95" />
         <ImageEncoding quality="80" />
@@ -1133,9 +1122,9 @@
 
     <EncoderProfile quality="high" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="20000000"
-             width="1920"
-             height="1080"
+             bitRate="42000000"
+             width="3840"
+             height="2160"
              frameRate="30" />
 
       <Audio codec="aac"
@@ -1209,7 +1198,6 @@
              channels="2" />
     </EncoderProfile>
 
-    <!-- QHD is not offered by the stock Aperture.
     <EncoderProfile quality="qhd" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="42000000"
@@ -1222,7 +1210,6 @@
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
-    -->
 
     <EncoderProfile quality="2k" fileFormat="mp4" duration="30">
       <Video codec="h264"
@@ -1237,7 +1224,6 @@
              channels="2" />
     </EncoderProfile>
 
-    <!-- 4K recording is not offered by this port.
     <EncoderProfile quality="4kdci" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1250,9 +1236,7 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
-    -->
 
-    <!-- 4K recording is not offered by this port.
     <EncoderProfile quality="2160p" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1265,7 +1249,6 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
-    -->
 
     <EncoderProfile quality="qcif" fileFormat="3gp" duration="30">
       <Video codec="h264"
@@ -1309,9 +1292,9 @@
 
     <EncoderProfile quality="timelapsehigh" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="20000000"
-             width="1920"
-             height="1080"
+             bitRate="42000000"
+             width="3840"
+             height="2160"
              frameRate="30" />
 
       <!-- audio setting is ignored -->
@@ -1420,7 +1403,6 @@
              channels="2" />
     </EncoderProfile>
 
-    <!-- QHD is not offered by the stock Aperture.
     <EncoderProfile quality="timelapseqhd" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="42000000"
@@ -1428,13 +1410,12 @@
              height="1440"
              frameRate="30" />
 
-      audio setting is ignored
+      <!-- audio setting is ignored -->
       <Audio codec="aac"
              bitRate="156000"
              sampleRate="48000"
              channels="2" />
     </EncoderProfile>
-    -->
 
     <EncoderProfile quality="timelapse2k" fileFormat="mp4" duration="30">
       <Video codec="h264"
@@ -1450,7 +1431,6 @@
              channels="2" />
     </EncoderProfile>
 
-    <!-- 4K recording is not offered by this port.
     <EncoderProfile quality="timelapse4kdci" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1463,9 +1443,7 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
-    -->
 
-    <!-- 4K recording is not offered by this port.
     <EncoderProfile quality="timelapse2160p" fileFormat="mp4" duration="30">
       <Video codec="h264"
             bitRate="42000000"
@@ -1478,7 +1456,6 @@
             sampleRate="48000"
             channels="2" />
     </EncoderProfile>
-    -->
 
         <ImageEncoding quality="95" />
         <ImageEncoding quality="80" />

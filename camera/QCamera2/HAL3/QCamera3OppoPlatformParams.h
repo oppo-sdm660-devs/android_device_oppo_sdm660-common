@@ -93,7 +93,10 @@ struct ParamOffsets {
 };
 
 struct FrameCtxOffsets {
-    /* Image slot 0 (p_buffer_construct_t, 0x40 bytes per slot). */
+    /* p_buffer_construct_t: image slots are 0x40 bytes each (RE task-62/67:
+     * setup_ocam_input_buffers stride 0x40, valid/primary byte at +0x38, count
+     * at +0x280). Slot 0 is also the legacy single-frame set. */
+    static constexpr size_t kImageSlotStride = 0x40;
     static constexpr size_t kImagePtr = 0x00;      /* void*: NV21 buffer */
     static constexpr size_t kWidth = 0x10;
     static constexpr size_t kHeight = 0x14;
@@ -148,7 +151,21 @@ struct BeautyParams {
     int32_t faceInfoMode = 0;        /* param+0x1F4 (D, Venus FD) */
 };
 
-/* One NV21 snapshot frame, as handed to the platform algorithm block. */
+constexpr int32_t kMaxFrameImages = 10;
+
+/* One NV21 input image (contiguous Y plane followed by UV is required by the
+ * original frame ctx; HAL3 bracket copies are contiguous). */
+struct Image {
+    const uint8_t *data = nullptr;
+    size_t length = 0;
+    int32_t width = 0;
+    int32_t height = 0;
+    int32_t stride = 0;
+    int32_t slice = 0;
+};
+
+/* One NV21 snapshot frame (multi-image engine inputs), as handed to the platform
+ * algorithm block. imageCount==0 keeps the legacy single-image fields. */
 struct Frame {
     const uint8_t *data = nullptr;
     size_t length = 0;
@@ -165,6 +182,10 @@ struct Frame {
     FaceInfo faceInfo;
     BeautyParams beauty;
     int32_t scesParam = 0;               /* param+0x10BC (SCES) */
+    /* P3 multi-frame inputs: current-capture bracket only (never ZSL history).
+     * imageCount==0 falls back to the legacy single-image fields above. */
+    int32_t imageCount = 0;
+    Image images[kMaxFrameImages];
 };
 
 /* Explicit org.lineageos stillMode -> original algorithm bit. A zero result means
@@ -174,11 +195,14 @@ uint64_t maskForStillMode(int32_t stillMode);
 /* True when every requested bit is one of the reversed single-frame algorithms. */
 bool supportedMask(uint64_t mask);
 
-/* Modes the HAL3 platform path is wired for (RE evidence):
- * SCES/AI scene (bit9), front beauty (bit8), rear beauty (bit5).
- * HDR/LLHDR/MFNR/SUPER/bokeh are intentionally excluded. */
+/* Modes the HAL3 platform path accepts (RE evidence):
+ * SCES/AI scene (bit9), front beauty (bit8), rear beauty (bit5), plus SUPER(bit1)
+ * as a property-gated single-frame probe. HDR/LLHDR/MFNR/bokeh stay excluded:
+ * the original platform bits are unreachable or need unproven multi-frame/bokeh
+ * input contracts (see OCam/docs/hal1-engine-wiring.md). */
 constexpr uint64_t kSupportedPlatformMask =
-        kAlgoVdSces | kAlgoArcFaceBeauty | kAlgoFaceBeauty | kAlgoFaceInfo;
+        kAlgoVdSces | kAlgoArcFaceBeauty | kAlgoFaceBeauty | kAlgoFaceInfo |
+        kAlgoSuperPhoto;
 bool isPlatformStillMode(int32_t stillMode);
 
 /* Stable name for a single algorithm bit, for diagnostics. */

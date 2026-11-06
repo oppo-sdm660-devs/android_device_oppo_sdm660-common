@@ -228,7 +228,8 @@ for text, note in (
         ("kFormatYuv420Nv21 = 2", "NV21 cam_format"),
         ("kScratchBytes = 0x1000", "scratch size")):
     need(params_h, text, note)
-need(params_cpp, "FrameCtxOffsets::kImageCount, 1", "ctx image count filled")
+need(params_cpp, "FrameCtxOffsets::kImageCount, uint32_t(count)",
+     "ctx image count filled")
 need(params_cpp, "FrameCtxOffsets::kScratchPtr", "ctx scratch ptr filled")
 need(platform_hwi, "ensureScratchLocked", "scratch allocation")
 need(platform_hwi, "posix_memalign(&scratch, kOppoHwiScratchAlign", "aligned scratch")
@@ -236,6 +237,19 @@ need(platform_hwi, "memfd_create(\"oppo_hwi_scratch\"", "scratch memfd")
 need(platform_hwi, "freeScratchLocked", "scratch release")
 need(platform_hwi, "refusing platform path", "no-scratch fail closed")
 need(platform_hwi, "oppo_platform::buildFrameCtx(mFrameCtx", "probe ctx uses full layout")
+# task-100 P3: multi-image (current-capture bracket) frame ctx slots.
+need(params_h, "kMaxFrameImages = 10", "multi-image limit")
+need(params_h, "struct Image", "multi-image input type")
+need(params_h, "kImageSlotStride = 0x40", "ctx image slot stride")
+need(params_cpp, "FrameCtxOffsets::kImageSlotStride", "ctx slot loop")
+need(platform_hwi_h, "kOppoPlatformMaxImages", "Hwi multi-image limit")
+need(platform_hwi, "params.imageCount = count", "Hwi forwards multi-image count")
+# task-100 P2: SUPER single-frame probe is property gated and dumpable.
+need(platform_hwi, "persist.vendor.camera.oppo.platform_hwi.super", "SUPER probe property")
+need(platform_hwi, "superProbeReady", "SUPER probe readiness")
+need(platform_hwi, "SUPER probe needs platform_hwi.update=1", "SUPER update prerequisite")
+need(platform_hwi, "\"super_pre\"", "SUPER pre dump")
+need(platform_hwi, "\"super_post\"", "SUPER post dump")
 need(platform_hwi_h, "mScratch = nullptr", "scratch members")
 need(tests / "platform_hwi_host_test.cpp", "FrameCtxOffsets::kScratchPtr",
      "platform host test scratch fields")
@@ -243,24 +257,33 @@ need(tests / "platform_hwi_host_test.cpp", "FrameCtxOffsets::kImagePtr",
      "platform host test image ptr")
 need(tests / "platform_hwi_host_test.cpp", "readU8(ctx, FrameCtxOffsets::kImageValid)",
      "platform host test valid flag")
-# task-63: only SCES(9)/front beauty(10)/rear beauty(5) are wired to platform.
-# HDR/LLHDR/MFNR/SUPER/bokeh must never enter it.
+# task-63/100: SCES(9)/front beauty(10)/rear beauty(5) are wired; SUPER(4) only
+# as the property-gated single-frame probe. HDR/LLHDR/MFNR/bokeh never enter.
 params_h_text = read(params_h)
 need(params_h, "kSupportedPlatformMask", "wired platform mask")
 need(params_h, "isPlatformStillMode", "platform mode whitelist")
 need(params_cpp, "isPlatformStillMode(int32_t stillMode)", "platform mode whitelist impl")
 need(platform_hwi, "oppo_platform::isPlatformStillMode(stillMode)", "whitelist enforced")
-need(platform_hwi, "return kSupportedPlatformMask;", "session registers wired bits only")
+need(platform_hwi, "kSupportedPlatformMask & ~kAlgoSuperPhoto",
+     "session mask excludes SUPER unless probe enabled")
+need(platform_hwi, "if (oppoHwiSuperProbeEnabled()) mask |= kAlgoSuperPhoto",
+     "session registers SUPER only for the probe")
 post_text = read(post)
 for mode in ("OPPO_NATIVE_HDR", "OPPO_NATIVE_LLHDR", "OPPO_NATIVE_MFNR",
-             "OPPO_NATIVE_SUPERPHOTO", "OPPO_NATIVE_DUAL_BOKEH"):
+             "OPPO_NATIVE_DUAL_BOKEH"):
     checks += 1
     if f"processStillFrame(\n                    {mode}" in post_text or \
             f"processStillFrame({mode}" in post_text:
         failures.append(f"QCamera3PostProc.cpp: {mode} must not enter the platform block")
-checks += 3
-if post_text.count("processStillFrame(") != 3:
-    failures.append("QCamera3PostProc.cpp: platform block must be SCENE+FRONT_BEAUTY+REAR_BEAUTY")
+checks += 4
+if post_text.count("processStillFrame(") != 4:
+    failures.append("QCamera3PostProc.cpp: platform block must be SCENE+FRONT_BEAUTY+REAR_BEAUTY+SUPER")
+if "OPPO_NATIVE_SUPERPHOTO, platformFrame" not in post_text:
+    failures.append("QCamera3PostProc.cpp: SUPER probe is not wired to platform")
+if "VDSuperPhotoPlatform" not in post_text:
+    failures.append("QCamera3PostProc.cpp: SUPER probe trace name missing")
+if "HAL3 SUPER platform probe" not in post_text:
+    failures.append("QCamera3PostProc.cpp: SUPER probe log missing")
 if "OPPO_NATIVE_REAR_BEAUTY, platformFrame" not in post_text:
     failures.append("QCamera3PostProc.cpp: rear beauty is not wired to platform")
 if '"FaceBeauty"' not in post_text:
@@ -273,7 +296,8 @@ if post_text.count("QCamera3StockBeauty::process") != 1:
     failures.append("QCamera3PostProc.cpp: stock beauty must run only in the fallback")
 # ZSL past frames must not enter any platform algorithm.
 checks += 1
-if post_text.count("!jpeg_settings->zsl_snapshot") != 3:
+if post_text.count("!jpeg_settings->zsl_snapshot") != 3 and \
+        post_text.count("!job->jpeg_settings->zsl_snapshot") != 1:
     failures.append("QCamera3PostProc.cpp: missing ZSL/platform mutual exclusion")
 
 # task-65 build risks: explicit errno include and no memset on ZslFrameState.
@@ -395,6 +419,17 @@ need(HAL3 / "QCamera3HWI.cpp", "persist.vendor.camera.oppo.platform_hwi.disable_
      "disable_halzsl A/B property")
 need(HAL3 / "QCamera3HWI.cpp", "forcing plain snapshot channel",
      "disable_halzsl forces plain snapshot channel")
+# task-99: standard ENABLE_ZSL on a pseudo-ZSL session must not take the
+# past-frame branch (no JPEG on current builds); stock error is kept for
+# pseudo drops so a missing delivery fails fast instead of hanging 5s.
+need(HAL3 / "QCamera3HWI.cpp", "oppoStandardZslPastFrameAllowed",
+     "standard_past_frame A/B property")
+need(HAL3 / "QCamera3HWI.cpp", "standard ENABLE_ZSL on pseudo-ZSL session",
+     "standard ENABLE_ZSL declines past-frame on pseudo-ZSL session")
+need(HAL3 / "QCamera3HWI.cpp", "isZSLCapture=%d halzsl=%d",
+     "drop diagnostics include request/channel state")
+need(HAL3 / "QCamera3Channel.cpp", "haveSnapshot && QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop",
+     "PicChannel suppresses a pseudo drop only when a snapshot is delivered")
 need(policy_cpp, "suppressHalZslPseudoFrameDrop", "pseudo drop classification impl")
 # 4K build-time fallback: persisted values from older ROMs may shadow vendor.prop.
 need(HAL3 / "QCamera3HWI.cpp", "ro.vendor.camera.oppo.video.allow_4k",
@@ -419,7 +454,7 @@ need(params_cpp, "case 5: return kAlgoFaceBeauty | kAlgoFaceInfo",
      "rear beauty mask includes faceInfo")
 need(params_cpp, "case 10: return kAlgoArcFaceBeauty | kAlgoFaceInfo",
      "front beauty mask includes faceInfo")
-need(params_h, "kAlgoFaceInfo;", "supported platform mask includes faceInfo")
+need(params_h, "kAlgoSuperPhoto;", "supported platform mask includes SUPER probe")
 need(platform_hwi, "beauty_model_front", "front beauty model property")
 need(hwi, "QCamera3OppoPlatformHwi::setFaceInfo", "HWI result feeds face cache")
 need(hwi, "CAM_INTF_META_FACE_DETECTION, metadata)", "HWI reads face detection")

@@ -68,16 +68,17 @@ void testParamsUnit() {
     CHECK(maskForStillMode(0) == 0);
     CHECK(maskForStillMode(6) == 0);
     CHECK(maskForStillMode(11) == 0);
-    // Only SCES(9)/front beauty(10)/rear beauty(5) are wired to platform.
+    // SCES(9)/front beauty(10)/rear beauty(5) are wired; SUPER(4) is accepted
+    // only as a property-gated single-frame probe.
     CHECK(kSupportedPlatformMask == (kAlgoVdSces | kAlgoArcFaceBeauty |
-            kAlgoFaceBeauty | kAlgoFaceInfo));
+            kAlgoFaceBeauty | kAlgoFaceInfo | kAlgoSuperPhoto));
     CHECK(isPlatformStillMode(5));
     CHECK(isPlatformStillMode(9));
     CHECK(isPlatformStillMode(10));
     CHECK(!isPlatformStillMode(1));
     CHECK(!isPlatformStillMode(2));
     CHECK(!isPlatformStillMode(3));
-    CHECK(!isPlatformStillMode(4));
+    CHECK(isPlatformStillMode(4));
     CHECK(!isPlatformStillMode(7));
     CHECK(!isPlatformStillMode(0));
     CHECK(supportedMask(kAlgoVdSces));
@@ -130,6 +131,31 @@ void testParamsUnit() {
     CHECK(readU32(ctx, FrameCtxOffsets::kScratchFd) == 7);
     CHECK(readPtr(ctx, FrameCtxOffsets::kScratchPtr) == scratch);
     CHECK(readU32(ctx, FrameCtxOffsets::kScratchSize) == sizeof(scratch));
+
+    // P3 multi-image frame ctx: 0x40-byte slots, +0x38 primary byte, +0x280 count.
+    uint8_t pixels1[100 * 50 * 3 / 2] = {};
+    uint8_t pixels2[100 * 50 * 3 / 2] = {};
+    Frame multi = frame;
+    multi.data = pixels1;
+    multi.length = sizeof(pixels1);
+    multi.imageCount = 2;
+    multi.images[0] = Image{pixels1, sizeof(pixels1), 100, 50, 100, 50};
+    multi.images[1] = Image{pixels2, sizeof(pixels2), 100, 50, 100, 50};
+    CHECK(buildFrameCtx(ctx, sizeof(ctx), multi));
+    const size_t slot1 = FrameCtxOffsets::kImageSlotStride;
+    CHECK(readU32(ctx, FrameCtxOffsets::kImageCount) == 2);
+    CHECK(readPtr(ctx, FrameCtxOffsets::kImagePtr) == pixels1);
+    CHECK(readPtr(ctx, slot1 + FrameCtxOffsets::kImagePtr) == pixels2);
+    CHECK(readU32(ctx, slot1 + FrameCtxOffsets::kWidth) == 100);
+    CHECK(readU32(ctx, slot1 + FrameCtxOffsets::kHeight) == 50);
+    CHECK(readU32(ctx, slot1 + FrameCtxOffsets::kStride) == 100);
+    CHECK(readU32(ctx, slot1 + FrameCtxOffsets::kImageFormat) == kFormatYuv420Nv21);
+    CHECK(readU8(ctx, slot1 + FrameCtxOffsets::kImageValid) == 1);
+    // Invalid or over-limit multi-frame input fails closed.
+    multi.images[1].data = nullptr;
+    CHECK(!buildFrameCtx(ctx, sizeof(ctx), multi));
+    multi.imageCount = kMaxFrameImages + 1;
+    CHECK(!buildFrameCtx(ctx, sizeof(ctx), multi));
 
     // Face block: inferred left/top/width/height arrays + count (descriptor 0).
     FaceInfo faces;
@@ -426,15 +452,33 @@ int main(int argc, char **argv) {
     host_prop_set("persist.vendor.camera.oppo.platform_hwi.beauty_model", "");
     host_fs_clear_all();
 
-    // 4. HDR/LLHDR/MFNR/SUPER/bokeh are not wired: fail closed before the library.
+    // 3f. SUPER(4) single-frame probe: property-gated, needs .update, registers
+    // the bit only for a new session (init mask decides what the core executes).
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.super", "1");
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.update", "1");
+    QCamera3OppoPlatformHwi::shutdownOnClose();
+    const int initBeforeSuper = stats->initCount;
+    QCamera3OppoPlatformHwi::get().onOpenCamera(0, false);
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(4, frame) == 0);
+    CHECK(stats->initCount == initBeforeSuper + 1);
+    CHECK((stats->initMask & ~kInProcessBackend) & kAlgoSuperPhoto);
+    CHECK((stats->processMask & ~kInProcessBackend) == kAlgoSuperPhoto);
+    CHECK(stats->updateCount == 1);
+    // Turning the property off fails closed before the library.
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.super", "0");
+    const int processBeforeSuperOff = stats->processCount;
+    CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(4, frame) == -EOPNOTSUPP);
+    CHECK(stats->processCount == processBeforeSuperOff);
+
+    // 4. HDR/LLHDR/MFNR/bokeh are not wired: fail closed before the library.
     const int processBeforeUnwired = stats->processCount;
-    CHECK(stats->updateCount == 0);
+    const int updateBeforeUnwired = stats->updateCount;
     host_prop_set("persist.vendor.camera.oppo.platform_hwi.update", "1");
     for (int mode : {1, 2, 3, 4, 7}) {
         CHECK(QCamera3OppoPlatformHwi::get().processStillFrame(mode, frame) == -EOPNOTSUPP);
     }
     CHECK(stats->processCount == processBeforeUnwired);
-    CHECK(stats->updateCount == 0);
+    CHECK(stats->updateCount == updateBeforeUnwired);
 
     // 5. Algorithm failure is reported, not hidden as success.
     harness.setProcessRc(-EIO);
@@ -467,9 +511,10 @@ int main(int argc, char **argv) {
     CHECK(!QCamera3OppoPlatformHwi::getFaceInfo(100 + 31, out) && out.count == 0);
     CHECK(!QCamera3OppoPlatformHwi::getFaceInfo(99, out));
 
-    // 9. Close uninitializes the platform block exactly once.
+    // 9. Close uninitializes the platform block exactly once for this session.
+    const int uninitBeforeClose = stats->uninitCount;
     QCamera3OppoPlatformHwi::shutdownOnClose();
-    CHECK(stats->uninitCount == 1);
+    CHECK(stats->uninitCount == uninitBeforeClose + 1);
 
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);

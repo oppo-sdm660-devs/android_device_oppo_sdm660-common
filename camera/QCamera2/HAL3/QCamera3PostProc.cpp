@@ -1877,13 +1877,77 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
         LOGE("HAL3 burst exposure bracket did not settle; returning base JPEG");
     } else if (getHdrImage(frame, destination, memory)) {
         if (state->still) {
+            bool platformSuperApplied = false;
             if (superPhoto) {
                 QCamera3HardwareInterface *hardware =
                         static_cast<QCamera3HardwareInterface *>(m_parent->mUserData);
-                const char *sensor = hardware ? hardware->getOppoSensorName() : nullptr;
-                rc = sensor ? QCamera3StockSuperPhoto::process(mHdrImages,
-                        state->count, destination, sensor,
-                        mHdrSensitivity[0], mHdrFrontCamera, &state->cancelled) : -EINVAL;
+                /* SUPER(4) original-engine probe: property-gated, single frame from
+                 * this capture's bracket (never a ZSL history frame), in-place on a
+                 * private copy so a failed probe cannot corrupt the stock fallback. */
+                if (hardware && QCamera3OppoPlatformHwi::configured() &&
+                        QCamera3OppoPlatformHwi::runEnabled() &&
+                        !job->jpeg_settings->zsl_snapshot &&
+                        QCamera3HdrAlgo::validImage(mHdrImages[0])) {
+                    const QCamera3HdrAlgo::Image &base = mHdrImages[0];
+                    const uint64_t ySize = uint64_t(base.width) * uint64_t(base.height);
+                    const uint64_t uvSize = ySize / 2;
+                    const bool contiguous = base.yOffset == 0 &&
+                            base.uvOffset == ySize && base.yStride == uint32_t(base.width) &&
+                            base.uvStride == uint32_t(base.width) &&
+                            base.yScanline == uint32_t(base.height) &&
+                            base.uvScanline == uint32_t(base.height / 2) &&
+                            ySize + uvSize <= SIZE_MAX;
+                    if (contiguous) {
+                        uint8_t *probe = static_cast<uint8_t *>(
+                                malloc(size_t(ySize + uvSize)));
+                        if (probe != nullptr) {
+                            memcpy(probe, base.data, size_t(ySize + uvSize));
+                            QCamera3OppoPlatformFrame platformFrame = {};
+                            platformFrame.data = probe;
+                            platformFrame.length = size_t(ySize + uvSize);
+                            platformFrame.width = int32_t(base.width);
+                            platformFrame.height = int32_t(base.height);
+                            platformFrame.stride = int32_t(base.width);
+                            platformFrame.slice = int32_t(base.height);
+                            platformFrame.imageCount = 1;
+                            platformFrame.images[0].data = probe;
+                            platformFrame.images[0].length = size_t(ySize + uvSize);
+                            platformFrame.images[0].width = int32_t(base.width);
+                            platformFrame.images[0].height = int32_t(base.height);
+                            platformFrame.images[0].stride = int32_t(base.width);
+                            platformFrame.images[0].slice = int32_t(base.height);
+                            const int32_t platformStatus =
+                                    QCamera3OppoPlatformHwi::get().processStillFrame(
+                                            OPPO_NATIVE_SUPERPHOTO, platformFrame);
+                            LOGI("HAL3 SUPER platform probe frame %u status %d",
+                                    job->frameNumber, platformStatus);
+                            if (platformStatus == NO_ERROR &&
+                                    destination.width == base.width &&
+                                    destination.height == base.height) {
+                                for (uint32_t row = 0; row < base.height; ++row)
+                                    memcpy(destination.data + destination.yOffset +
+                                            size_t(row) * destination.yStride,
+                                            probe + size_t(row) * base.width, base.width);
+                                for (uint32_t row = 0; row < base.height / 2; ++row)
+                                    memcpy(destination.data + destination.uvOffset +
+                                            size_t(row) * destination.uvStride,
+                                            probe + ySize + size_t(row) * base.width, base.width);
+                                rc = memory->cleanCache(frame->bufs[0]->buf_idx);
+                                if (rc == NO_ERROR) {
+                                    platformSuperApplied = true;
+                                    algorithm = "VDSuperPhotoPlatform";
+                                }
+                            }
+                            free(probe);
+                        }
+                    }
+                }
+                if (!platformSuperApplied) {
+                    const char *sensor = hardware ? hardware->getOppoSensorName() : nullptr;
+                    rc = sensor ? QCamera3StockSuperPhoto::process(mHdrImages,
+                            state->count, destination, sensor,
+                            mHdrSensitivity[0], mHdrFrontCamera, &state->cancelled) : -EINVAL;
+                }
             } else {
                 QCamera3StillAlgo::Options options;
                 options.referenceIndex = 0; // Framework metadata belongs to base.

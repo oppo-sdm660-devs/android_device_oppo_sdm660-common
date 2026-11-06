@@ -36,6 +36,8 @@ const char *const kOppoHwiDumpProp = "persist.vendor.camera.oppo.platform_hwi.du
 const char *const kOppoHwiCallbackProp = "persist.vendor.camera.oppo.platform_hwi.callback";
 const char *const kOppoHwiRunProp = "persist.vendor.camera.oppo.platform_hwi.run";
 const char *const kOppoHwiUpdateProp = "persist.vendor.camera.oppo.platform_hwi.update";
+/* SUPER(4) single-frame probe gate; requires .update=1 as well (RE task-98 P3). */
+const char *const kOppoHwiSuperProp = "persist.vendor.camera.oppo.platform_hwi.super";
 /* Beauty params (RE task-74). Model paths must exist; overrides are A/B.
  * Optional switches/thresholds are D-level and default to 0 (never invented). */
 const char *const kOppoHwiBeautyModelProp =
@@ -183,6 +185,32 @@ int32_t oppoHwiPropInt(const char *name, int32_t defaultValue)
     return atoi(prop);
 }
 
+bool oppoHwiSuperProbeEnabled()
+{
+    char prop[PROPERTY_VALUE_MAX] = {};
+    property_get(kOppoHwiSuperProp, prop, "0");
+    return atoi(prop) == 1;
+}
+
+/* Primary image of a frame: images[0] for the P3 multi-frame path, else legacy. */
+bool oppoHwiPrimaryImage(const QCamera3OppoPlatformFrame &frame,
+        QCamera3OppoPlatformImage &image)
+{
+    if (frame.imageCount > 0) {
+        if (frame.imageCount > kOppoPlatformMaxImages) return false;
+        image = frame.images[0];
+    } else {
+        image.data = frame.data;
+        image.length = frame.length;
+        image.width = frame.width;
+        image.height = frame.height;
+        image.stride = frame.stride;
+        image.slice = frame.slice;
+    }
+    return image.data != nullptr && image.length != 0 &&
+            image.width > 0 && image.height > 0;
+}
+
 /* Property override wins (existence still required); otherwise first candidate
  * that exists on this device. Empty result means "do not register beauty". */
 bool oppoHwiPathIsDirectory(const char *path)
@@ -239,10 +267,14 @@ bool QCamera3OppoPlatformHwi::runEnabled()
 
 uint64_t QCamera3OppoPlatformHwi::sessionAlgorithmMask()
 {
-    /* Only the modes wired for HAL3; HDR/LLHDR/MFNR/SUPER/bokeh stay out
-     * (RE negative evidence: HDR/LLHDR bits never reach platform on this ROM). */
+    /* Only the modes wired for HAL3; HDR/LLHDR/MFNR/bokeh stay out (RE negative
+     * evidence: HDR/LLHDR bits are unreachable, MFNR has no platform bit, bokeh
+     * needs the unproven dual-image/output contract). SUPER is registered only
+     * for the property-gated single-frame probe. */
     using namespace qcamera::oppo_platform;
-    return kSupportedPlatformMask;
+    uint64_t mask = kSupportedPlatformMask & ~kAlgoSuperPhoto;
+    if (oppoHwiSuperProbeEnabled()) mask |= kAlgoSuperPhoto;
+    return mask;
 }
 
 int32_t QCamera3OppoPlatformHwi::lastStatus() const
@@ -255,6 +287,11 @@ bool QCamera3OppoPlatformHwi::beautyParamsReady(int32_t stillMode) const
     if (stillMode == 5) return mBeautyModelRear[0] != '\0';
     if (stillMode == 10) return mBeautyModelFront[0] != '\0';
     return true;
+}
+
+bool QCamera3OppoPlatformHwi::superProbeReady() const
+{
+    return oppoHwiSuperProbeEnabled() && oppoHwiPropEnabled(kOppoHwiUpdateProp);
 }
 
 void QCamera3OppoPlatformHwi::resolveBeautyParamsLocked()
@@ -576,6 +613,18 @@ void QCamera3OppoPlatformHwi::buildFrameCtxLocked(
     params.scratchFd = mScratchFd;
     params.scratchPtr = mScratch;
     params.scratchSize = mScratchSize;
+    int32_t count = frame.imageCount;
+    if (count < 0) count = 0;
+    if (count > oppo_platform::kMaxFrameImages) count = oppo_platform::kMaxFrameImages;
+    params.imageCount = count;
+    for (int32_t i = 0; i < count; ++i) {
+        params.images[i].data = frame.images[i].data;
+        params.images[i].length = frame.images[i].length;
+        params.images[i].width = frame.images[i].width;
+        params.images[i].height = frame.images[i].height;
+        params.images[i].stride = frame.images[i].stride;
+        params.images[i].slice = frame.images[i].slice;
+    }
     oppo_platform::buildFrameCtx(mFrameCtx, mFrameCtxSize, params);
 }
 
@@ -590,9 +639,14 @@ void QCamera3OppoPlatformHwi::dumpFrameLocked(
         LOGE("oppo hwi dump %s failed: %s", path, strerror(errno));
         return;
     }
-    const size_t written = fwrite(frame.data, 1, frame.length, file);
+    QCamera3OppoPlatformImage primary;
+    if (!oppoHwiPrimaryImage(frame, primary)) {
+        fclose(file);
+        return;
+    }
+    const size_t written = fwrite(primary.data, 1, primary.length, file);
     fclose(file);
-    LOGI("oppo hwi dump %s bytes=%zu/%zu", path, written, frame.length);
+    LOGI("oppo hwi dump %s bytes=%zu/%zu", path, written, primary.length);
 }
 
 namespace {
@@ -617,6 +671,20 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
         LOGW("oppo hwi: beauty model path unavailable; stillMode %d not run", stillMode);
         return mLastStatus;
     }
+    /* SUPER(4) is a property-gated single-frame probe only: the original
+     * superphoto updateparameters/process contract is not fully reversed. */
+    if (stillMode == 4) {
+        if (!oppoHwiSuperProbeEnabled()) {
+            mLastStatus = -EOPNOTSUPP;
+            LOGW("oppo hwi: SUPER probe disabled (platform_hwi.super=0)");
+            return mLastStatus;
+        }
+        if (!oppoHwiPropEnabled(kOppoHwiUpdateProp)) {
+            mLastStatus = -EOPNOTSUPP;
+            LOGW("oppo hwi: SUPER probe needs platform_hwi.update=1");
+            return mLastStatus;
+        }
+    }
     const uint64_t modeMask = oppo_platform::maskForStillMode(stillMode);
     if (!oppo_platform::isPlatformStillMode(stillMode) ||
             !oppo_platform::supportedMask(modeMask)) {
@@ -625,8 +693,8 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
         mLastStatus = -EOPNOTSUPP;
         return mLastStatus;
     }
-    if (frame.data == nullptr || frame.length == 0 ||
-            frame.width <= 0 || frame.height <= 0) {
+    QCamera3OppoPlatformImage primary;
+    if (!oppoHwiPrimaryImage(frame, primary)) {
         mLastStatus = -EINVAL;
         return mLastStatus;
     }
@@ -645,12 +713,26 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
         return mLastStatus;
     }
     oppo_platform::Frame params;
-    params.data = frame.data;
-    params.length = frame.length;
-    params.width = frame.width;
-    params.height = frame.height;
-    params.stride = frame.stride > 0 ? frame.stride : frame.width;
-    params.slice = frame.slice > 0 ? frame.slice : frame.height;
+    params.data = primary.data;
+    params.length = primary.length;
+    params.width = primary.width;
+    params.height = primary.height;
+    params.stride = primary.stride > 0 ? primary.stride : primary.width;
+    params.slice = primary.slice > 0 ? primary.slice : primary.height;
+    int32_t imageCount = frame.imageCount;
+    if (imageCount < 0) imageCount = 0;
+    if (imageCount > oppo_platform::kMaxFrameImages) {
+        imageCount = oppo_platform::kMaxFrameImages;
+    }
+    params.imageCount = imageCount;
+    for (int32_t i = 0; i < imageCount; ++i) {
+        params.images[i].data = frame.images[i].data;
+        params.images[i].length = frame.images[i].length;
+        params.images[i].width = frame.images[i].width;
+        params.images[i].height = frame.images[i].height;
+        params.images[i].stride = frame.images[i].stride;
+        params.images[i].slice = frame.images[i].slice;
+    }
     params.isFront = mIsFront ? 1 : 0;
     params.jpegRotation = 0;
     params.scratchFd = mScratchFd;
@@ -719,6 +801,8 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
         }
     }
     ++mFrameCount;
+    const bool dump = oppoHwiPropEnabled(kOppoHwiDumpProp);
+    if (stillMode == 4 && dump) dumpFrameLocked(frame, "super_pre");
     struct timespec begin = {};
     struct timespec end = {};
     clock_gettime(CLOCK_MONOTONIC, &begin);
@@ -727,10 +811,11 @@ int32_t QCamera3OppoPlatformHwi::processStillFrame(int32_t stillMode,
     const int64_t elapsedUs = (int64_t(end.tv_sec) - int64_t(begin.tv_sec)) * 1000000 +
             (int64_t(end.tv_nsec) - int64_t(begin.tv_nsec)) / 1000;
     mLastStatus = rc == 0 ? 0 : (rc < 0 ? rc : -EIO);
+    if (stillMode == 4 && dump) dumpFrameLocked(frame, "super_post");
     LOGI("oppo hwi processStillFrame stillMode=%d algo=%s mask=0x%016" PRIx64
-            " cam=%d size=%dx%d rc=%d elapsed=%" PRId64 "us",
+            " cam=%d size=%dx%d images=%d rc=%d elapsed=%" PRId64 "us",
             stillMode, oppo_platform::algorithmName(modeMask & ~oppo_platform::kInProcessBackend),
-            callMask, mCameraId, frame.width, frame.height, rc, elapsedUs);
+            callMask, mCameraId, primary.width, primary.height, imageCount, rc, elapsedUs);
     pthread_mutex_unlock(&mLock);
     return mLastStatus;
 }
