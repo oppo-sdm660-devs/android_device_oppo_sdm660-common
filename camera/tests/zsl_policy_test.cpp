@@ -205,6 +205,15 @@ void testAgeClassification() {
     CHECK(selection.fallbackReason == QCamera3ZslPolicy::kFallbackNoFrame);
 }
 
+void testHalZslDropBypass() {
+    // HAL ZSL snapshot defers the JPEG stream: the daemon drop is expected and
+    // must not be reported as a fatal buffer error for the ZSL picture channel.
+    CHECK(QCamera3ZslPolicy::suppressHalZslBlobDrop(true, true, true));
+    CHECK(!QCamera3ZslPolicy::suppressHalZslBlobDrop(true, true, false));
+    CHECK(!QCamera3ZslPolicy::suppressHalZslBlobDrop(false, true, true));
+    CHECK(!QCamera3ZslPolicy::suppressHalZslBlobDrop(true, false, true));
+}
+
 void testReasonNames() {
     CHECK(strcmp(QCamera3ZslPolicy::reasonName(Reason::kOk), "ok") == 0);
     CHECK(strcmp(QCamera3ZslPolicy::reasonName(Reason::kNativeMode), "native-mode") == 0);
@@ -232,6 +241,7 @@ int main() {
     testStandardKeyRequired();
     testExclusions();
     testAgeClassification();
+    testHalZslDropBypass();
     testReasonNames();
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);

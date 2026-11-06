@@ -189,6 +189,13 @@ int32_t QCamera3ZslPolicy::fallbackReasonFor(Reason reason)
     return kFallbackUnsupported;
 }
 
+bool QCamera3ZslPolicy::suppressHalZslBlobDrop(bool isBlobStream,
+        bool isZslChannel, bool bypassEnabled)
+{
+    if (!bypassEnabled) return false;
+    return isBlobStream && isZslChannel;
+}
+
 const char *QCamera3ZslPolicy::reasonName(Reason reason)
 {
     switch (reason) {

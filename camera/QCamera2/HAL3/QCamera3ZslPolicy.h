@@ -112,6 +112,15 @@ public:
     static constexpr int32_t kMaxBuffers = 6;
 
     static Decision decide(const RequestFeatures &features, const Config &config);
+    /*
+     * HAL ZSL snapshot defers the JPEG output stream to the picture channel's
+     * reprocess path, so the daemon reports that stream in
+     * CAM_INTF_META_FRAME_DROPPED even though the capture is progressing. Treat
+     * that drop as expected instead of a fatal CAMERA3_MSG_ERROR_BUFFER; a real
+     * stall still fails through the pending-buffer timeout path.
+     */
+    static bool suppressHalZslBlobDrop(bool isBlobStream, bool isZslChannel,
+            bool bypassEnabled);
     /* Selection-side classification for a past frame of the given age. */
     static int32_t classifyAge(int64_t ageMs, int32_t maxAgeMs);
     static Selection classifySelection(int64_t ageMs, int32_t maxAgeMs);

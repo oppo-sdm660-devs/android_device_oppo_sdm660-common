@@ -289,6 +289,20 @@ static bool oppoZslMasterEnabled()
     return atoi(prop) == 1;
 }
 
+/*
+ * Stock HAL ZSL SNAPSHOT defers the JPEG output to the picture channel's reprocess
+ * path, so the daemon lists that stream in CAM_INTF_META_FRAME_DROPPED while the
+ * capture is still progressing. Reporting it as CAMERA3_MSG_ERROR_BUFFER races the
+ * late JPEG result and fails otherwise-good captures (App timeout). Default 1:
+ * treat this specific drop as expected; 0 restores the stock immediate-error path.
+ */
+static bool oppoHalZslDropBypassEnabled()
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get("persist.vendor.camera.oppo.zsl.halzsl_drop_bypass", prop, "1");
+    return atoi(prop) != 0;
+}
+
 static int32_t oppoZslPropertyInt(const char *name, int32_t defaultValue)
 {
     char prop[PROPERTY_VALUE_MAX];
@@ -6518,6 +6532,7 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
         // If dropped, then send the ERROR_BUFFER for the corresponding stream
         // OR check if instant AEC is enabled, then need to drop frames untill AEC is settled.
         bool dropFrame = false;
+        const bool halZslDropBypass = oppoHalZslDropBypassEnabled();
         if (p_cam_frame_drop ||
                 (mInstantAEC || i->frame_number < mInstantAECSettledFrameNumber)) {
             /* Clear notify_msg structure */
@@ -6540,6 +6555,20 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
                     // This is instant AEC case.
                     // For instant AEC drop the stream untill AEC is settled.
                     dropFrame = true;
+                }
+                /* HAL ZSL snapshot: the daemon-drop of the deferred JPEG stream is
+                 * expected, not a capture failure. Suppress only the daemon drop
+                 * case; instant-AEC drops keep their existing behaviour. */
+                const bool expectedHalZslDrop = p_cam_frame_drop && dropFrame &&
+                        (mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT) &&
+                        QCamera3ZslPolicy::suppressHalZslBlobDrop(
+                                j->stream->format == HAL_PIXEL_FORMAT_BLOB,
+                                channel->isZSLChannel(), halZslDropBypass);
+                if (expectedHalZslDrop) {
+                    LOGI("HAL ZSL expected JPEG drop suppressed frame#=%u,"
+                            "streamID=%u mCameraId: %d",
+                            i->frame_number, streamID, mCameraId);
+                    continue;
                 }
                 if (dropFrame && !j->isZSL) {
                     // Send Error notify to frameworks with CAMERA3_MSG_ERROR_BUFFER

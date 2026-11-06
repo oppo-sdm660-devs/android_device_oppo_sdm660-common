@@ -365,6 +365,16 @@ need(platform_hwi, "params.beauty.enabled = true", "beauty params constructed")
 need(platform_hwi, "params.beauty.strength = frame.beautyStrength",
      "beauty strength passed")
 need(platform_hwi, "params.scesParam", "SCES param written")
+# task-90: HAL ZSL snapshot defers the JPEG stream; its daemon drop must not be
+# reported as a fatal buffer error for BLOB buffers on the ZSL picture channel.
+need(policy_h, "suppressHalZslBlobDrop", "HAL ZSL drop classification helper")
+need(policy_cpp, "suppressHalZslBlobDrop", "HAL ZSL drop classification impl")
+need(hwi, "QCamera3ZslPolicy::suppressHalZslBlobDrop(",
+     "HWI uses HAL ZSL drop classification")
+need(hwi, "persist.vendor.camera.oppo.zsl.halzsl_drop_bypass",
+     "HAL ZSL drop bypass property")
+need(hwi, "HAL ZSL expected JPEG drop suppressed",
+     "HAL ZSL expected drop log")
 need(platform_hwi_h, "sceneStrength", "SCES strength input")
 need(platform_hwi, "oppo hwi sces strength=%d param=%u", "SCES strength log")
 need(platform_hwi, "mScesParamOverrideValid", "SCES property override")
