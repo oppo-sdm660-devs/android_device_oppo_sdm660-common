@@ -212,6 +212,11 @@ void testHalZslDropBypass() {
     CHECK(!QCamera3ZslPolicy::suppressHalZslBlobDrop(true, true, false));
     CHECK(!QCamera3ZslPolicy::suppressHalZslBlobDrop(false, true, true));
     CHECK(!QCamera3ZslPolicy::suppressHalZslBlobDrop(true, false, true));
+    // PicChannel pseudo-ZSL variant: frame-specific requests are expected drops;
+    // real past-frame ZSL captures keep the channel-error path.
+    CHECK(QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(false, true));
+    CHECK(!QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(true, true));
+    CHECK(!QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(false, false));
 }
 
 void testReasonNames() {

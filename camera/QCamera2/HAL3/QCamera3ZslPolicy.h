@@ -121,6 +121,13 @@ public:
      */
     static bool suppressHalZslBlobDrop(bool isBlobStream, bool isZslChannel,
             bool bypassEnabled);
+    /*
+     * PicChannel-side variant: a pseudo-ZSL (frame-specific, App did not ask for
+     * a past frame) request has its picture stream deferred to reprocess, so a
+     * daemon drop for that stream is expected. Real past-frame ZSL keeps the
+     * stock channel-error path.
+     */
+    static bool suppressHalZslPseudoFrameDrop(bool pastFrameRequest, bool bypassEnabled);
     /* Selection-side classification for a past frame of the given age. */
     static int32_t classifyAge(int64_t ageMs, int32_t maxAgeMs);
     static Selection classifySelection(int64_t ageMs, int32_t maxAgeMs);

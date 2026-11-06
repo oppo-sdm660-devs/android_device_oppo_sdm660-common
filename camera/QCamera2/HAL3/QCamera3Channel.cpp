@@ -7136,6 +7136,14 @@ int32_t QCamera3PicChannel::setBundleInfo(const cam_bundle_config_t &bundleInfo,
     return rc;
 }
 
+/* Same switch as QCamera3HardwareInterface's HAL-ZSL drop bypass; default 1. */
+static bool oppoHalZslChannelDropBypassEnabled()
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get("persist.vendor.camera.oppo.zsl.halzsl_drop_bypass", prop, "1");
+    return atoi(prop) != 0;
+}
+
 void QCamera3PicChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
 {
 
@@ -7208,6 +7216,15 @@ void QCamera3PicChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
                 for (uint32_t k = 0; k < p_cam_frame_drop->num_streams; k++) {
                     if (mStreams[0]->getMyServerID() ==
                             p_cam_frame_drop->stream_request[k].streamID) {
+                        /* Pseudo-ZSL (frame-specific capture): the daemon drop of
+                         * the deferred picture stream is expected; a real past-
+                         * frame ZSL drop keeps the stock channel-error path. */
+                        if (QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(
+                                past_frame, oppoHalZslChannelDropBypassEnabled())) {
+                            LOGI("HAL ZSL expected pseudo-frame drop suppressed"
+                                    " frame=%u", frameNum);
+                            break;
+                        }
                         if (hal_obj != NULL && hal_obj->isOppoZslFrame(frameNum))
                             hal_obj->noteZslError(frameNum,
                                     QCamera3ZslPolicy::kFallbackChannelError);

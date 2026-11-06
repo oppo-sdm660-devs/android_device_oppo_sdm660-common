@@ -252,11 +252,29 @@ static bool oppoVideoStabExtensionEnabled()
     return oppoEisExtensionEnabled() || oppoMmsVstabEnabled();
 }
 
-static bool oppoAllow4kPublished()
+/*
+ * persist.* values live in /data/property and are loaded before build.prop; a
+ * stale value from an earlier ROM/experiment therefore shadows the vendor.prop
+ * default (observed with allow_4k: build.prop=1, device getprop empty). The ro
+ * copy is the immutable build-time default used only while persist is empty;
+ * an explicit persist value still wins for A/B.
+ */
+static int32_t oppoPropIntPersistOrRo(const char *persistKey, const char *roKey,
+        int32_t defaultValue)
 {
     char prop[PROPERTY_VALUE_MAX];
-    property_get("persist.vendor.camera.oppo.video.allow_4k", prop, "0");
-    return atoi(prop) == 1;
+    property_get(persistKey, prop, "");
+    if (prop[0] != '\0') return atoi(prop);
+    property_get(roKey, prop, "");
+    if (prop[0] != '\0') return atoi(prop);
+    return defaultValue;
+}
+
+static bool oppoAllow4kPublished()
+{
+    return oppoPropIntPersistOrRo(
+            "persist.vendor.camera.oppo.video.allow_4k",
+            "ro.vendor.camera.oppo.video.allow_4k", 0) == 1;
 }
 
 static bool oppoIs4kVideoSize(const cam_dimension_t &dim)
@@ -1322,9 +1340,9 @@ const camera_metadata_t *gStaticMetadata[MM_CAMERA_MAX_NUM_SENSORS];
 
 static bool oppoVideoOverlapEnabled()
 {
-    char prop[PROPERTY_VALUE_MAX];
-    property_get("persist.vendor.camera.oppo.video.picture_overlap", prop, "0");
-    return atoi(prop) == 1;
+    return oppoPropIntPersistOrRo(
+            "persist.vendor.camera.oppo.video.picture_overlap",
+            "ro.vendor.camera.oppo.video.picture_overlap", 0) == 1;
 }
 
 /* Daemon video sizes minus picture_sizes_tbl; 0 when the gate is off. */

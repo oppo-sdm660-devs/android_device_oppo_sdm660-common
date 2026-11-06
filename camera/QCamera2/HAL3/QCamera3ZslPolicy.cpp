@@ -196,6 +196,12 @@ bool QCamera3ZslPolicy::suppressHalZslBlobDrop(bool isBlobStream,
     return isBlobStream && isZslChannel;
 }
 
+bool QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(bool pastFrameRequest,
+        bool bypassEnabled)
+{
+    return bypassEnabled && !pastFrameRequest;
+}
+
 const char *QCamera3ZslPolicy::reasonName(Reason reason)
 {
     switch (reason) {

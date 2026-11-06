@@ -113,10 +113,16 @@ vidc.enc.dcvs.extra-buff-count=2
 # keeps a single gate for announcing and accepting 4K processed video sizes.
 # Set allow_4k=0 to restore the disabled build behavior (4K hidden and refused).
 persist.vendor.camera.oppo.video.allow_4k=1
+# persist.* can be shadowed by a stale value kept in /data/property from an
+# earlier ROM/experiment (persist values load before build.prop). The ro copy is
+# the build-time default the HAL falls back to only while the persist value is
+# empty; an explicit persist 0/1 still wins for A/B.
+ro.vendor.camera.oppo.video.allow_4k=1
 # 4K lives in the daemon video size table; publish video-only sizes so Camera2
 # clients can discover it. Disable this if additional video-only sizes are
 # unwanted on a target (4K then only shows up when it is also a picture size).
 persist.vendor.camera.oppo.video.picture_overlap=1
+ro.vendor.camera.oppo.video.picture_overlap=1
 # Standard Camera2 video stabilization is removed from this port (ON is accepted
 # but executed and reported as OFF); only an explicit extension gate may re-enable
 # it. These two properties are device A/B / future-extension switches, not user
@@ -126,6 +132,11 @@ persist.vendor.camera.oppo.eis.extension=0
 # MMS (stock OPPO VStab, rear main sensor only): rewrites 720p/1080p geometry and
 # needs /vendor/etc/vstab_configs + BMI160. Never part of a standard session.
 persist.vendor.camera.oppo.vstab.mms=0
+# Front beauty (extension mode 10) is compiled but hidden until the ARC_BS ABI and
+# the face-hint record are validated on the device (HAL3 currently passes no face
+# hint). The library (libarcsoft_beautyshot.so) and vendor tags are already in the
+# build; to expose mode 10 for an A/B run, uncomment and rebuild/flash:
+#persist.vendor.camera.oppo.front_beauty.enable=1
 
 # Crypto
 ro.crypto.volume.filenames_mode=aes-256-cts

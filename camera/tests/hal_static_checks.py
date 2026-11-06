@@ -375,6 +375,20 @@ need(hwi, "persist.vendor.camera.oppo.zsl.halzsl_drop_bypass",
      "HAL ZSL drop bypass property")
 need(hwi, "HAL ZSL expected JPEG drop suppressed",
      "HAL ZSL expected drop log")
+# PicChannel pseudo-ZSL drop path (same failure can arrive via the channel).
+need(HAL3 / "QCamera3Channel.cpp", "suppressHalZslPseudoFrameDrop",
+     "PicChannel pseudo-ZSL drop suppression")
+need(HAL3 / "QCamera3Channel.cpp", "HAL ZSL expected pseudo-frame drop suppressed",
+     "PicChannel expected drop log")
+need(policy_cpp, "suppressHalZslPseudoFrameDrop", "pseudo drop classification impl")
+# 4K build-time fallback: persisted values from older ROMs may shadow vendor.prop.
+need(HAL3 / "QCamera3HWI.cpp", "ro.vendor.camera.oppo.video.allow_4k",
+     "4K ro fallback key")
+need(HAL3 / "QCamera3HWI.cpp", "oppoPropIntPersistOrRo", "persist/ro property fallback")
+need(CAMERA.parent / "vendor.prop", "ro.vendor.camera.oppo.video.allow_4k=1",
+     "4K ro default in vendor.prop")
+need(CAMERA.parent / "vendor.prop", "ro.vendor.camera.oppo.video.picture_overlap=1",
+     "video overlap ro default in vendor.prop")
 need(platform_hwi_h, "sceneStrength", "SCES strength input")
 need(platform_hwi, "oppo hwi sces strength=%d param=%u", "SCES strength log")
 need(platform_hwi, "mScesParamOverrideValid", "SCES property override")
