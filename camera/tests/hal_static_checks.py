@@ -380,6 +380,21 @@ need(HAL3 / "QCamera3Channel.cpp", "suppressHalZslPseudoFrameDrop",
      "PicChannel pseudo-ZSL drop suppression")
 need(HAL3 / "QCamera3Channel.cpp", "HAL ZSL expected pseudo-frame drop suppressed",
      "PicChannel expected drop log")
+# Native stillMode capture on the ZSL channel: no past frame -> the mismatch
+# branch must also be suppressed, otherwise the JPEG is dropped and the App
+# times out (5s) for HDR/LLHDR/MFNR/SUPER/beauty/bokeh.
+need(HAL3 / "QCamera3Channel.cpp", "HAL ZSL expected pseudo-frame mismatch suppressed",
+     "PicChannel pseudo-ZSL frame mismatch suppression")
+# RE task-98 P1: native stillMode must not set zsl_snapshot (otherwise the JPEG
+# waits for a reprocess trigger that never comes and the platform branch is skipped).
+need(HAL3 / "QCamera3Channel.cpp",
+     "m_bZSL && hal_obj->getNativeStillMode() == OPPO_NATIVE_OFF",
+     "zsl_snapshot excluded for native stillMode")
+# RE task-98 P2 fallback: plain snapshot channel for the session.
+need(HAL3 / "QCamera3HWI.cpp", "persist.vendor.camera.oppo.platform_hwi.disable_halzsl",
+     "disable_halzsl A/B property")
+need(HAL3 / "QCamera3HWI.cpp", "forcing plain snapshot channel",
+     "disable_halzsl forces plain snapshot channel")
 need(policy_cpp, "suppressHalZslPseudoFrameDrop", "pseudo drop classification impl")
 # 4K build-time fallback: persisted values from older ROMs may shadow vendor.prop.
 need(HAL3 / "QCamera3HWI.cpp", "ro.vendor.camera.oppo.video.allow_4k",

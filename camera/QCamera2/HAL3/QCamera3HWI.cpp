@@ -307,6 +307,16 @@ static bool oppoZslMasterEnabled()
     return atoi(prop) == 1;
 }
 
+/* RE task-98 P2 fallback: native stillMode requests are excluded from the vendor
+ * ZSL queue but the session-level pseudo-ZSL picture channel still defers JPEG
+ * delivery. Force the plain snapshot channel for A/B when P1 alone is not enough. */
+static bool oppoHalZslDisabledForNative()
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get("persist.vendor.camera.oppo.platform_hwi.disable_halzsl", prop, "0");
+    return atoi(prop) == 1;
+}
+
 /*
  * Stock HAL ZSL SNAPSHOT defers the JPEG output to the picture channel's reprocess
  * path, so the daemon lists that stream in CAM_INTF_META_FRAME_DROPPED while the
@@ -5129,6 +5139,15 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                              * only the trigger and the ring depth are ours. */
                             mHALZSL = CAM_HAL3_ZSL_TYPE_SNAPSHOT;
                             maxZSLBuffers = mOppoZslRingBuffers;
+                        }
+                        if (oppoHalZslDisabledForNative()) {
+                            /* A/B safety valve (RE P2): native still requests are not
+                             * part of the pseudo-ZSL contract; use the plain snapshot
+                             * channel so their JPEG cannot wait for a reprocess trigger. */
+                            if (mHALZSL != CAM_HAL3_ZSL_TYPE_NONE) {
+                                LOGI("disable_halzsl=1: forcing plain snapshot channel");
+                            }
+                            mHALZSL = CAM_HAL3_ZSL_TYPE_NONE;
                         }
                         LOGI("%s HAL ZSL : ",
                             (mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT) ? "Enabling":"Disabling");

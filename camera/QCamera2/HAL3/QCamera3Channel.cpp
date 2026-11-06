@@ -6838,7 +6838,13 @@ int32_t QCamera3PicChannel::queueJpegSetting(uint32_t index, uint32_t frame_numb
         }
     }
 
-    if (m_bZSL && !hal_obj->m_bQuadraCfaRequest && !m_bSkipConfig) {
+    /* RE task-98 P1: pseudo-ZSL delays the JPEG through the reprocess path, but a
+     * native stillMode request never enters the vendor ZSL queue. Keeping
+     * zsl_snapshot=true for it makes PostProc free the source frame and skip the
+     * platform engines (and the JPEG can time out). Native still requests are
+     * treated as ordinary still deliveries; plain still requests are unchanged. */
+    if (m_bZSL && hal_obj->getNativeStillMode() == OPPO_NATIVE_OFF &&
+            !hal_obj->m_bQuadraCfaRequest && !m_bSkipConfig) {
         settings->zsl_snapshot = true;
     }
     if (hal_obj->m_bMultiRawRequest) {
@@ -7186,13 +7192,23 @@ void QCamera3PicChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
                 //lets check for unordered sequence, if found send error for missed buffers.
                 if(frameNum != received_frame_num)
                 {
-                    LOGD("frame dropped %d, sending error",frameNum);
-                    if (hal_obj != NULL && hal_obj->isOppoZslFrame(frameNum))
-                        hal_obj->noteZslError(frameNum,
-                                QCamera3ZslPolicy::kFallbackChannelError);
-                    m_postprocessor.eraseJpegSetting(frameNum);
-                    returnBufferError(frameNum);
-                    continue;
+                    /* Pseudo-ZSL (frame-specific capture): the daemon's snapshot
+                     * frame reports its own sensor frame number, so a mismatch is
+                     * expected. The picture buffer still belongs to this request;
+                     * deliver it instead of dropping the JPEG (5s App timeout). */
+                    if (QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(
+                            past_frame, oppoHalZslChannelDropBypassEnabled())) {
+                        LOGI("HAL ZSL expected pseudo-frame mismatch suppressed"
+                                " request=%u daemon=%u", frameNum, received_frame_num);
+                    } else {
+                        LOGD("frame dropped %d, sending error",frameNum);
+                        if (hal_obj != NULL && hal_obj->isOppoZslFrame(frameNum))
+                            hal_obj->noteZslError(frameNum,
+                                    QCamera3ZslPolicy::kFallbackChannelError);
+                        m_postprocessor.eraseJpegSetting(frameNum);
+                        returnBufferError(frameNum);
+                        continue;
+                    }
                 }
             }
             if (internal_req) metaNeedPP = false;
