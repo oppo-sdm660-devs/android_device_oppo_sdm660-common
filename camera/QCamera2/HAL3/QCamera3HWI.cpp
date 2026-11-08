@@ -321,15 +321,16 @@ static bool oppoStandardZslPastFrameAllowed()
 }
 
 /* Explicit native stillMode (REAR_BEAUTY/DUAL_BOKEH/HDR...) captures are not part
- * of the vendor ZSL contract, but the frame-specific pseudo-ZSL request races the
- * daemon: its picture stream comes back as CAM_INTF_META_FRAME_DROPPED and the
- * JPEG is never delivered (App 5s timeout, device 2026-11-08). Route them through
- * the same past-frame delivery as a standard ZSL capture; property 0 keeps the
- * frame-specific path for A/B. */
+ * of the vendor ZSL contract. Device evidence (R11s, 2026-11-08): the past-frame
+ * route never delivers their JPEG (only drop suppression, then the 3s deferred
+ * timeout and App 5s timeout), while the frame-specific pseudo-ZSL route - now
+ * that b6da5e7 suppresses its expected deferred drop/buffer error - delivers the
+ * JPEG in <1s. Default is frame-specific; property 1 restores the stock
+ * past-frame route for A/B only. */
 static bool oppoNativePastFrameZslEnabled()
 {
     char prop[PROPERTY_VALUE_MAX];
-    property_get("persist.vendor.camera.oppo.zsl.native_past_frame", prop, "1");
+    property_get("persist.vendor.camera.oppo.zsl.native_past_frame", prop, "0");
     return atoi(prop) != 0;
 }
 

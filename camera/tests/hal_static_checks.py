@@ -430,15 +430,18 @@ need(HAL3 / "QCamera3HWI.cpp", "standard ENABLE_ZSL on pseudo-ZSL session",
      "standard ENABLE_ZSL declines past-frame on pseudo-ZSL session")
 need(HAL3 / "QCamera3HWI.cpp", "isZSLCapture=%d halzsl=%d",
      "drop diagnostics include request/channel state")
-# Native stillMode (REAR_BEAUTY/DUAL_BOKEH): the frame-specific pseudo-ZSL
-# request loses the picture stream on the daemon (device 2026-11-08: JPEG never
-# delivered, platform never called). Route explicit native BLOB captures through
-# the past-frame ZSL delivery that standard captures use; property 0 is A/B.
+# Native stillMode (REAR_BEAUTY/DUAL_BOKEH): device 2026-11-08 proved the
+# default past-frame route never delivers their JPEG (only drop suppression then
+# 3s deferred timeout); the frame-specific pseudo-ZSL route delivers once
+# b6da5e7 suppresses its expected drop/buffer error. Default frame-specific;
+# property 1 keeps the stock past-frame route for A/B only.
 need(HAL3 / "QCamera3HWI.cpp", "persist.vendor.camera.oppo.zsl.native_past_frame",
-     "native past-frame ZSL A/B property")
+     "native frame-specific/past-frame A/B property")
 need(HAL3 / "QCamera3HWI.cpp",
-     'property_get("persist.vendor.camera.oppo.zsl.native_past_frame", prop, "1")',
-     "native past-frame default enabled")
+     'property_get("persist.vendor.camera.oppo.zsl.native_past_frame", prop, "0")',
+     "native frame-specific default")
+need(HAL3 / "QCamera3HWI.cpp", "never delivers their JPEG",
+     "native default comment records the device evidence")
 need(HAL3 / "QCamera3HWI.cpp", "native stillMode=%d uses past-frame ZSL delivery",
      "native stillMode past-frame delivery log")
 need(HAL3 / "QCamera3Channel.cpp",
@@ -468,11 +471,12 @@ channel_h = HAL3 / "QCamera3Channel.h"
 need(channel_h, "virtual bool isSnapshotJpegChannel()", "JPEG channel marker on base")
 need(hwi, "ch->isSnapshotJpegChannel() && ch->isZSLChannel()",
      "buffer-error suppression narrowed to JPEG channel")
-# 272d031 native past-frame delivery must stay intact (no regression).
+# 272d031 native past-frame code path stays available as A/B (property 1), but is
+# no longer the default (task-107 device evidence).
 need(hwi, "persist.vendor.camera.oppo.zsl.native_past_frame",
-     "native past-frame property preserved")
+     "native past-frame A/B property preserved")
 need(hwi, "native stillMode=%d uses past-frame ZSL delivery",
-     "native past-frame routing preserved")
+     "native past-frame A/B routing preserved")
 need(HAL3 / "QCamera3Channel.cpp", "zslPastFrame", "native zsl_snapshot flag preserved")
 # 4K build-time fallback: persisted values from older ROMs may shadow vendor.prop.
 need(HAL3 / "QCamera3HWI.cpp", "ro.vendor.camera.oppo.video.allow_4k",
