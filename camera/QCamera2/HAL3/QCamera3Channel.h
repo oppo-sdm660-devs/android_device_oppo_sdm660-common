@@ -889,7 +889,8 @@ public:
 private:
     int32_t queueJpegSetting(uint32_t out_buf_index, uint32_t frame_number,
                                   metadata_buffer_t *metadata,
-                                  cam_hal3_JPEG_type_t imagetype = CAM_HAL3_JPEG_TYPE_MAIN);
+                                  cam_hal3_JPEG_type_t imagetype = CAM_HAL3_JPEG_TYPE_MAIN,
+                                  bool zslPastFrame = false);
     void configureMpo();
     void releaseSuperBuf(mm_camera_super_buf_t *recvd_frame);
 

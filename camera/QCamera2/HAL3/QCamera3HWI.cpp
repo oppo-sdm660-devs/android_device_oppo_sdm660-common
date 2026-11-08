@@ -320,6 +320,19 @@ static bool oppoStandardZslPastFrameAllowed()
     return atoi(prop) == 1;
 }
 
+/* Explicit native stillMode (REAR_BEAUTY/DUAL_BOKEH/HDR...) captures are not part
+ * of the vendor ZSL contract, but the frame-specific pseudo-ZSL request races the
+ * daemon: its picture stream comes back as CAM_INTF_META_FRAME_DROPPED and the
+ * JPEG is never delivered (App 5s timeout, device 2026-11-08). Route them through
+ * the same past-frame delivery as a standard ZSL capture; property 0 keeps the
+ * frame-specific path for A/B. */
+static bool oppoNativePastFrameZslEnabled()
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get("persist.vendor.camera.oppo.zsl.native_past_frame", prop, "1");
+    return atoi(prop) != 0;
+}
+
 /* RE task-98 P2 fallback: native stillMode requests are excluded from the vendor
  * ZSL queue but the session-level pseudo-ZSL picture channel still defers JPEG
  * delivery. Force the plain snapshot channel for A/B when P1 alone is not enough. */
@@ -20561,6 +20574,18 @@ bool QCamera3HardwareInterface::needZSLCapture(const camera3_capture_request_t *
     if (frame_settings.exists(ANDROID_CONTROL_CAPTURE_INTENT)) {
         captureIntent = frame_settings.find(ANDROID_CONTROL_CAPTURE_INTENT).data.u8[0];
     }
+    /* Native stillMode requests carry an explicit capture request and no vendor
+     * ZSL trigger. Their frame-specific pseudo-ZSL delivery races the daemon and
+     * loses the picture stream, so take the past-frame path instead. */
+    const int32_t nativeMode = oppoNativeMode(frame_settings);
+    if (nativeMode != OPPO_NATIVE_OFF && blobRequest &&
+            mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT && !mOppoZslEnabled &&
+            oppoNativePastFrameZslEnabled()) {
+        LOGI("native stillMode=%d uses past-frame ZSL delivery (frame=%u)",
+                nativeMode, frameNumber);
+        return true;
+    }
+
     if (bZSLSetting && (captureIntent == ANDROID_CONTROL_CAPTURE_INTENT_STILL_CAPTURE)) {
         needZSL = true;
     } else {

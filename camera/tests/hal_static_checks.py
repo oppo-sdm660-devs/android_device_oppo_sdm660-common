@@ -409,11 +409,13 @@ need(HAL3 / "QCamera3Channel.cpp", "HAL ZSL expected pseudo-frame drop suppresse
 # times out (5s) for HDR/LLHDR/MFNR/SUPER/beauty/bokeh.
 need(HAL3 / "QCamera3Channel.cpp", "HAL ZSL expected pseudo-frame mismatch suppressed",
      "PicChannel pseudo-ZSL frame mismatch suppression")
-# RE task-98 P1: native stillMode must not set zsl_snapshot (otherwise the JPEG
-# waits for a reprocess trigger that never comes and the platform branch is skipped).
+# task-104: native stillMode JPEG delivery. Standard stills always keep
+# zsl_snapshot; native stills set it only when HWI routed the capture through the
+# past-frame path (frame-specific pseudo-ZSL delivery loses the picture stream on
+# the daemon, observed on device 2026-11-08).
 need(HAL3 / "QCamera3Channel.cpp",
-     "m_bZSL && hal_obj->getNativeStillMode() == OPPO_NATIVE_OFF",
-     "zsl_snapshot excluded for native stillMode")
+     "zslPastFrame || hal_obj->getNativeStillMode() == OPPO_NATIVE_OFF",
+     "zsl_snapshot covers past-frame and standard still delivery")
 # RE task-98 P2 fallback: plain snapshot channel for the session.
 need(HAL3 / "QCamera3HWI.cpp", "persist.vendor.camera.oppo.platform_hwi.disable_halzsl",
      "disable_halzsl A/B property")
@@ -428,6 +430,22 @@ need(HAL3 / "QCamera3HWI.cpp", "standard ENABLE_ZSL on pseudo-ZSL session",
      "standard ENABLE_ZSL declines past-frame on pseudo-ZSL session")
 need(HAL3 / "QCamera3HWI.cpp", "isZSLCapture=%d halzsl=%d",
      "drop diagnostics include request/channel state")
+# Native stillMode (REAR_BEAUTY/DUAL_BOKEH): the frame-specific pseudo-ZSL
+# request loses the picture stream on the daemon (device 2026-11-08: JPEG never
+# delivered, platform never called). Route explicit native BLOB captures through
+# the past-frame ZSL delivery that standard captures use; property 0 is A/B.
+need(HAL3 / "QCamera3HWI.cpp", "persist.vendor.camera.oppo.zsl.native_past_frame",
+     "native past-frame ZSL A/B property")
+need(HAL3 / "QCamera3HWI.cpp",
+     'property_get("persist.vendor.camera.oppo.zsl.native_past_frame", prop, "1")',
+     "native past-frame default enabled")
+need(HAL3 / "QCamera3HWI.cpp", "native stillMode=%d uses past-frame ZSL delivery",
+     "native stillMode past-frame delivery log")
+need(HAL3 / "QCamera3Channel.cpp",
+     "zslPastFrame || hal_obj->getNativeStillMode() == OPPO_NATIVE_OFF",
+     "zsl_snapshot marks past-frame or standard still delivery")
+need(HAL3 / "QCamera3Channel.cpp", "CAM_HAL3_JPEG_TYPE_DEPTH, isZSL",
+     "PicChannel passes isZSL to every jpeg setting")
 need(HAL3 / "QCamera3Channel.cpp", "haveSnapshot && QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop",
      "PicChannel suppresses a pseudo drop only when a snapshot is delivered")
 need(policy_cpp, "suppressHalZslPseudoFrameDrop", "pseudo drop classification impl")

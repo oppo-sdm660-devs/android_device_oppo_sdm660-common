@@ -6156,10 +6156,10 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
                     // Queue jpeg settings
                     if (bIsMaster) {
                         rc = queueJpegSetting((uint32_t)index, frameNumber, metadata, (i==0)?
-                                        CAM_HAL3_JPEG_TYPE_MAIN : CAM_HAL3_JPEG_TYPE_BOKEH);
+                                        CAM_HAL3_JPEG_TYPE_MAIN : CAM_HAL3_JPEG_TYPE_BOKEH, isZSL);
                     } else {
                         rc = queueJpegSetting((uint32_t)index, frameNumber, metadata,
-                                CAM_HAL3_JPEG_TYPE_DEPTH);
+                                CAM_HAL3_JPEG_TYPE_DEPTH, isZSL);
                     }
                 }
                 if(bIsMaster)
@@ -6215,18 +6215,18 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
                 // Queue jpeg settings
                 if (dualPair) {
                     rc = queueJpegSetting((uint32_t)index, frameNumber, metadata,
-                            CAM_HAL3_JPEG_TYPE_MAIN);
+                            CAM_HAL3_JPEG_TYPE_MAIN, isZSL);
                 } else if(hal_obj->getHalPPType() == CAM_HAL_PP_TYPE_DUAL_FOV)
                 {
                      rc = queueJpegSetting((uint32_t)index, frameNumber, metadata, bIsMaster ?
-                                            CAM_HAL3_JPEG_TYPE_FUSION : CAM_HAL3_JPEG_TYPE_AUX);
+                                            CAM_HAL3_JPEG_TYPE_FUSION : CAM_HAL3_JPEG_TYPE_AUX, isZSL);
                 } else if ((hal_obj->getHalPPType() == CAM_HAL_PP_TYPE_BOKEH)
                                              && bIsMaster && hal_obj->needHALPP()){
                     rc = queueJpegSetting((uint32_t)index, frameNumber, metadata,
-                            CAM_HAL3_JPEG_TYPE_BOKEH);
+                            CAM_HAL3_JPEG_TYPE_BOKEH, isZSL);
                 } else {
                     rc = queueJpegSetting((uint32_t)index, frameNumber, metadata, bIsMaster ?
-                                            CAM_HAL3_JPEG_TYPE_MAIN : CAM_HAL3_JPEG_TYPE_AUX);
+                                            CAM_HAL3_JPEG_TYPE_MAIN : CAM_HAL3_JPEG_TYPE_AUX, isZSL);
                 }
             }
         } else {
@@ -6707,7 +6707,8 @@ void QCamera3PicChannel::putStreamBufs()
 
 int32_t QCamera3PicChannel::queueJpegSetting(uint32_t index, uint32_t frame_number,
                                                   metadata_buffer_t *metadata,
-                                                  cam_hal3_JPEG_type_t imagetype)
+                                                  cam_hal3_JPEG_type_t imagetype,
+                                                  bool zslPastFrame)
 {
     QCamera3HardwareInterface* hal_obj = (QCamera3HardwareInterface*)mUserData;
     jpeg_settings_t *settings =
@@ -6838,12 +6839,12 @@ int32_t QCamera3PicChannel::queueJpegSetting(uint32_t index, uint32_t frame_numb
         }
     }
 
-    /* RE task-98 P1: pseudo-ZSL delays the JPEG through the reprocess path, but a
-     * native stillMode request never enters the vendor ZSL queue. Keeping
-     * zsl_snapshot=true for it makes PostProc free the source frame and skip the
-     * platform engines (and the JPEG can time out). Native still requests are
-     * treated as ordinary still deliveries; plain still requests are unchanged. */
-    if (m_bZSL && hal_obj->getNativeStillMode() == OPPO_NATIVE_OFF &&
+    /* zsl_snapshot marks the reprocess-backed JPEG delivery. A standard still
+     * request always uses it; a native stillMode request uses it whenever HWI
+     * routed the capture through the past-frame path (native past-frame delivery
+     * is what actually returns a JPEG on this daemon). The legacy native
+     * frame-specific path keeps the normal delivery so it can still be A/B'd. */
+    if (m_bZSL && (zslPastFrame || hal_obj->getNativeStillMode() == OPPO_NATIVE_OFF) &&
             !hal_obj->m_bQuadraCfaRequest && !m_bSkipConfig) {
         settings->zsl_snapshot = true;
     }
