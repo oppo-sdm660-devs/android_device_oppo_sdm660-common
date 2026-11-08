@@ -128,6 +128,17 @@ public:
      * stock channel-error path.
      */
     static bool suppressHalZslPseudoFrameDrop(bool pastFrameRequest, bool bypassEnabled);
+    /*
+     * Pseudo-ZSL session (HAL snapshot channel, vendor ring off) defers the JPEG
+     * output stream to the picture channel reprocess path. The daemon then marks
+     * that deferred stream dropped/error even on a successful capture. Suppress
+     * only that expected transition, and only for BLOB on the ZSL picture
+     * channel: real JPEG failures still come through jpegEvtHandle() and the
+     * pending-buffer timeout path reports a real timeout.
+     */
+    static bool suppressPseudoZslJpegTransition(bool halZslSnapshot,
+            bool vendorZslRingEnabled, bool isBlobStream, bool isZslChannel,
+            bool bypassEnabled);
     /* Selection-side classification for a past frame of the given age. */
     static int32_t classifyAge(int64_t ageMs, int32_t maxAgeMs);
     static Selection classifySelection(int64_t ageMs, int32_t maxAgeMs);

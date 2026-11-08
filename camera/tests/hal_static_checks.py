@@ -449,6 +449,31 @@ need(HAL3 / "QCamera3Channel.cpp", "CAM_HAL3_JPEG_TYPE_DEPTH, isZSL",
 need(HAL3 / "QCamera3Channel.cpp", "haveSnapshot && QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop",
      "PicChannel suppresses a pseudo drop only when a snapshot is delivered")
 need(policy_cpp, "suppressHalZslPseudoFrameDrop", "pseudo drop classification impl")
+# task-104: pseudo-ZSL deferred JPEG drop/error must not surface as buffer lost;
+# real PostProc failures still report through jpegEvtHandle and a real timeout is
+# reported explicitly by the pending-buffer timeout path.
+need(policy_h, "suppressPseudoZslJpegTransition", "pseudo-ZSL JPEG transition helper")
+need(policy_cpp, "suppressPseudoZslJpegTransition", "pseudo-ZSL JPEG transition impl")
+need(hwi, "(j->isZSL || pseudoZslJpegTransition)",
+     "metadata drop covers frame-specific pseudo-ZSL")
+need(hwi, "HAL ZSL expected pseudo-ZSL JPEG buffer error suppressed",
+     "expected snapshot buffer error suppressed")
+need(hwi, "HAL ZSL deferred JPEG timeout reported",
+     "real deferred JPEG timeout still reported")
+need(hwi, "persist.vendor.camera.oppo.zsl.halzsl_drop_bypass",
+     "pseudo-ZSL transition bypass property")
+need(hwi, "QCamera3ZslPolicy::suppressPseudoZslJpegTransition(",
+     "HWI uses pseudo-ZSL transition helper")
+channel_h = HAL3 / "QCamera3Channel.h"
+need(channel_h, "virtual bool isSnapshotJpegChannel()", "JPEG channel marker on base")
+need(hwi, "ch->isSnapshotJpegChannel() && ch->isZSLChannel()",
+     "buffer-error suppression narrowed to JPEG channel")
+# 272d031 native past-frame delivery must stay intact (no regression).
+need(hwi, "persist.vendor.camera.oppo.zsl.native_past_frame",
+     "native past-frame property preserved")
+need(hwi, "native stillMode=%d uses past-frame ZSL delivery",
+     "native past-frame routing preserved")
+need(HAL3 / "QCamera3Channel.cpp", "zslPastFrame", "native zsl_snapshot flag preserved")
 # 4K build-time fallback: persisted values from older ROMs may shadow vendor.prop.
 need(HAL3 / "QCamera3HWI.cpp", "ro.vendor.camera.oppo.video.allow_4k",
      "4K ro fallback key")

@@ -6512,6 +6512,27 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
                         "stream type = %d, stream format = %d",
                         req.frame_number, missed.buffer,
                         ch->mStreams[0]->getMyType(), missed.stream->format);
+                    /* The expected pseudo-ZSL buffer-error marking is suppressed
+                     * above, so a genuine timeout must be reported explicitly
+                     * here instead of relying on the channel error callback. */
+                    if (missed.stream->format == HAL_PIXEL_FORMAT_BLOB &&
+                            QCamera3ZslPolicy::suppressPseudoZslJpegTransition(
+                                    mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT,
+                                    mOppoZslEnabled, true,
+                                    ch->isZSLChannel(),
+                                    oppoHalZslDropBypassEnabled()) &&
+                            ch->isSnapshotJpegChannel()) {
+                        camera3_notify_msg_t timeout_msg;
+                        memset(&timeout_msg, 0, sizeof(timeout_msg));
+                        timeout_msg.type = CAMERA3_MSG_ERROR;
+                        timeout_msg.message.error.frame_number = req.frame_number;
+                        timeout_msg.message.error.error_code =
+                                CAMERA3_MSG_ERROR_BUFFER;
+                        timeout_msg.message.error.error_stream = missed.stream;
+                        orchestrateNotify(&timeout_msg);
+                        LOGI("HAL ZSL deferred JPEG timeout reported frame#=%u"
+                                " mCameraId: %d", req.frame_number, mCameraId);
+                    }
                     overdueBuffers.add(std::make_pair(ch, req.frame_number));
                 }
             }
@@ -6648,14 +6669,22 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
                     // For instant AEC drop the stream untill AEC is settled.
                     dropFrame = true;
                 }
-                /* HAL ZSL snapshot: a past-frame ZSL request (isZSLCapture) has
-                 * its JPEG delivered by the ZSL channel callback, so the daemon
-                 * drop of the deferred JPEG stream is expected. Pseudo-ZSL
-                 * requests are not part of that contract: suppressing their drop
-                 * hides the only failure signal and the App waits until its own
-                 * timeout, so keep the stock error for them. */
+                /* HAL ZSL snapshot defers the JPEG output to the picture
+                 * channel: the daemon lists that stream in FRAME_DROPPED even
+                 * when the capture succeeds. That is expected both for
+                 * past-frame ZSL and for frame-specific pseudo-ZSL requests
+                 * (isZSLCapture=0) on a session without the vendor ring. Real
+                 * failures are still reported by jpegEvtHandle() and by the
+                 * pending-buffer timeout below. */
+                const bool pseudoZslJpegTransition =
+                        QCamera3ZslPolicy::suppressPseudoZslJpegTransition(
+                                mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT,
+                                mOppoZslEnabled,
+                                j->stream->format == HAL_PIXEL_FORMAT_BLOB,
+                                channel->isZSLChannel(), halZslDropBypass);
                 const bool expectedHalZslDrop = p_cam_frame_drop && dropFrame &&
-                        (mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT) && j->isZSL &&
+                        (mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT) &&
+                        (j->isZSL || pseudoZslJpegTransition) &&
                         QCamera3ZslPolicy::suppressHalZslBlobDrop(
                                 j->stream->format == HAL_PIXEL_FORMAT_BLOB,
                                 channel->isZSLChannel(), halZslDropBypass);
@@ -18217,6 +18246,21 @@ void QCamera3HardwareInterface::setBufferErrorStatus(QCamera3Channel* ch,
         uint32_t frameNumber, camera3_buffer_status_t err)
 {
     pthread_mutex_lock(&mMutex);
+
+    /* Expected pseudo-ZSL transition: the daemon error-flags the deferred
+     * snapshot buffer, but PostProc still produces the JPEG (jpegEvtHandle
+     * status=0). Marking the framework BLOB buffer ERROR here makes
+     * handleBufferWithLock report STATUS_ERROR and loses a good image. Real
+     * encode failures arrive through jpegEvtHandle(result.status=ERROR); real
+     * stalls are reported by the pending-buffer timeout below. */
+    if (mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT && !mOppoZslEnabled &&
+            oppoHalZslDropBypassEnabled() && ch != nullptr &&
+            ch->isSnapshotJpegChannel() && ch->isZSLChannel()) {
+        LOGI("HAL ZSL expected pseudo-ZSL JPEG buffer error suppressed"
+                " frame#=%u mCameraId: %d", frameNumber, mCameraId);
+        pthread_mutex_unlock(&mMutex);
+        return;
+    }
 
     for (auto& req : mPendingBuffersMap.mPendingBuffersInRequest) {
         if (req.frame_number != frameNumber)

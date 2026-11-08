@@ -202,6 +202,14 @@ bool QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(bool pastFrameRequest,
     return bypassEnabled && !pastFrameRequest;
 }
 
+bool QCamera3ZslPolicy::suppressPseudoZslJpegTransition(bool halZslSnapshot,
+        bool vendorZslRingEnabled, bool isBlobStream, bool isZslChannel,
+        bool bypassEnabled)
+{
+    return bypassEnabled && halZslSnapshot && !vendorZslRingEnabled &&
+            isBlobStream && isZslChannel;
+}
+
 const char *QCamera3ZslPolicy::reasonName(Reason reason)
 {
     switch (reason) {

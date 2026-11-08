@@ -173,6 +173,9 @@ public:
             const metadata_buffer_t * /*metadata*/) {}
     virtual void setDualChannelMode(bool bMode) {m_bDualChannel = bMode;}
     virtual bool isZSLChannel() {return false;};
+    // JPEG output channel marker (true only in QCamera3PicChannel); lets the HWI
+    // narrow expected deferred-JPEG error handling without RTTI.
+    virtual bool isSnapshotJpegChannel() { return false; }
 
     void *mUserData;
     cam_padding_info_t mPaddingInfo;

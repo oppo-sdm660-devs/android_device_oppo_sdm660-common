@@ -217,6 +217,15 @@ void testHalZslDropBypass() {
     CHECK(QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(false, true));
     CHECK(!QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(true, true));
     CHECK(!QCamera3ZslPolicy::suppressHalZslPseudoFrameDrop(false, false));
+    // Pseudo-ZSL deferred JPEG transition: expected daemon drop/error only on a
+    // HAL-ZSL snapshot session without the vendor ring, and only for JPEG on the
+    // ZSL picture channel; everything else keeps its error reporting.
+    CHECK(QCamera3ZslPolicy::suppressPseudoZslJpegTransition(true, false, true, true, true));
+    CHECK(!QCamera3ZslPolicy::suppressPseudoZslJpegTransition(false, false, true, true, true));
+    CHECK(!QCamera3ZslPolicy::suppressPseudoZslJpegTransition(true, true, true, true, true));
+    CHECK(!QCamera3ZslPolicy::suppressPseudoZslJpegTransition(true, false, false, true, true));
+    CHECK(!QCamera3ZslPolicy::suppressPseudoZslJpegTransition(true, false, true, false, true));
+    CHECK(!QCamera3ZslPolicy::suppressPseudoZslJpegTransition(true, false, true, true, false));
 }
 
 void testReasonNames() {
