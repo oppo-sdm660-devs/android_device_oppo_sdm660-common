@@ -1361,6 +1361,30 @@ const camera_metadata_t *gStaticMetadata[MM_CAMERA_MAX_NUM_SENSORS];
 
 #define OPPO_VIDEO_OVERLAP_MAX 8
 
+/* Stock OPPO video-only sizes record at 30 fps on this platform (device evidence
+ * 2026-11-08: 2160x1080 HEVC ~29.5fps, 4096x2160 requested 30fps). The generic
+ * picture-table derivation below matches the 4096 width against a slow 12/16MP
+ * still entry and advertises ~15fps, which makes clients record 4096x2160 at
+ * ~17fps. Clamp the stock sizes explicitly; property 0 restores the old
+ * derivation for A/B. */
+#define OPPO_STOCK_VIDEO_30FPS_NS 33333333LL
+
+static bool oppoStockVideoSizesEnabled()
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get("persist.vendor.camera.oppo.video.stock_sizes", prop, "1");
+    return atoi(prop) != 0;
+}
+
+static bool oppoIsStockVideo30FpsSize(const cam_dimension_t &dim)
+{
+    const int32_t w = dim.width;
+    const int32_t h = dim.height;
+    return (w == 2160 && h == 1080) || (w == 1080 && h == 2160) ||
+            (w == 3840 && h == 2160) || (w == 2160 && h == 3840) ||
+            (w == 4096 && h == 2160) || (w == 2160 && h == 4096);
+}
+
 static bool oppoVideoOverlapEnabled()
 {
     return oppoPropIntPersistOrRo(
@@ -1402,11 +1426,16 @@ static size_t oppoExtraVideoSizes(const cam_capability_t *capability,
     return found;
 }
 
-/* Value is the minimum frame interval; fall back to the fastest non-zero. */
+/* Value is the minimum frame interval; fall back to the fastest non-zero.
+ * Stock video-only sizes are pinned to 30 fps so their published duration does
+ * not inherit a slow picture-table entry (4096x2160 -> ~15fps otherwise). */
 static int64_t oppoMinDurationFor(const cam_capability_t *capability,
         const cam_dimension_t &dim)
 {
     if (capability == NULL) return 0;
+    if (oppoStockVideoSizesEnabled() && oppoIsStockVideo30FpsSize(dim)) {
+        return OPPO_STOCK_VIDEO_30FPS_NS;
+    }
     const size_t pictureCount = MIN(capability->picture_sizes_tbl_cnt, MAX_SIZES_CNT);
     int64_t best = 0;
     int64_t bestArea = 0;

@@ -439,6 +439,29 @@ need(CAMERA.parent / "vendor.prop", "ro.vendor.camera.oppo.video.allow_4k=1",
      "4K ro default in vendor.prop")
 need(CAMERA.parent / "vendor.prop", "ro.vendor.camera.oppo.video.picture_overlap=1",
      "video overlap ro default in vendor.prop")
+# Stock video-only sizes publish an explicit 30fps min duration. Without it the
+# picture-table derivation matches 4096x2160 against a slow 12/16MP still entry
+# and advertises ~15fps (device recorded 4096x2160 at ~17fps on 2026-11-08).
+need(HAL3 / "QCamera3HWI.cpp", "persist.vendor.camera.oppo.video.stock_sizes",
+     "stock video sizes A/B property")
+need(HAL3 / "QCamera3HWI.cpp",
+     'property_get("persist.vendor.camera.oppo.video.stock_sizes", prop, "1")',
+     "stock video sizes default enabled")
+need(HAL3 / "QCamera3HWI.cpp", "OPPO_STOCK_VIDEO_30FPS_NS 33333333LL",
+     "stock video 30fps duration constant")
+for dim in ("w == 2160 && h == 1080", "w == 3840 && h == 2160",
+            "w == 4096 && h == 2160"):
+    need(HAL3 / "QCamera3HWI.cpp", dim, f"stock video size whitelist: {dim}")
+hwi_src = read(HAL3 / "QCamera3HWI.cpp")
+checks += 2
+stock_fn = hwi_src[hwi_src.index("static int64_t oppoMinDurationFor"):]
+stock_fn = stock_fn[:stock_fn.index(
+    "const char *QCamera3HardwareInterface::getOppoSensorName")]
+if "oppoStockVideoSizesEnabled() && oppoIsStockVideo30FpsSize(dim)" not in stock_fn:
+    failures.append("QCamera3HWI.cpp: stock video sizes must bypass picture derivation")
+elif stock_fn.index("oppoStockVideoSizesEnabled() && oppoIsStockVideo30FpsSize(dim)") > \
+        stock_fn.index("const size_t pictureCount"):
+    failures.append("QCamera3HWI.cpp: stock video check must precede picture derivation")
 need(platform_hwi_h, "sceneStrength", "SCES strength input")
 need(platform_hwi, "oppo hwi sces strength=%d param=%u", "SCES strength log")
 need(platform_hwi, "mScesParamOverrideValid", "SCES property override")
