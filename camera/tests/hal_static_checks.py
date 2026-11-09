@@ -719,6 +719,35 @@ need(tests / "panorama_jpeg_encoder_test.cpp", "testValidOrientations", "panoram
 need(tests / "run_panorama_jpeg_tests.py", "def main", "panorama JPEG host runner")
 absent(hwi, "QCamera3PanoramaJpeg", "150a must not wire the HWI caller yet")
 
+# task-156: front Visidon selfie-panorama backend (not HWI-wired until task-157).
+visi_h = HAL3 / "QCamera3OppoVisidonPanorama.h"
+visi_cpp = HAL3 / "QCamera3OppoVisidonPanorama.cpp"
+visi_jni_h = HAL3 / "visidon_jnienv.h"
+visi_jni_cpp = HAL3 / "visidon_jnienv.cpp"
+need(visi_h, "class QCamera3OppoVisidonPanorama", "Visidon backend API")
+need(visi_h, "halFailureReason", "HAL panorama failure mapping")
+need(visi_h, "testEngine", "host-test engine injection")
+need(visi_h, "/vendor/lib/libVDSelfiePanorama.so", "absolute vendor library path")
+absent(visi_cpp, "camera.sdm660", "must not load the stock HAL module")
+absent(visi_cpp, "FindClass", "no JNI VM/class dependency")
+absent(visi_cpp, "AttachCurrentThread", "no JNI VM dependency")
+absent(visi_h, "#include <android/", "backend header must stay host-testable")
+need(visi_jni_h, "class VisidonJniEnv", "fake JNIEnv table")
+need(visi_jni_h, "slotError", "fail-closed unexpected-slot handling")
+need(visi_jni_cpp, "kGetByteArrayElements", "implemented JNI slot")
+need(visi_jni_cpp, "unsupportedSlot", "unimplemented JNI slots fail closed")
+need(tests / "visidon_panorama_backend_test.cpp", "captureJpeg", "Visidon backend host test")
+need(tests / "run_visidon_backend_tests.py", "def main", "Visidon backend host runner")
+stub_bp = tests / "visidon_compat" / "Android.bp"
+stub_src = tests / "visidon_compat" / "libjnigraphics_stub.cpp"
+need(stub_bp, 'stem: "libjnigraphics"', "vendor libjnigraphics stub stem")
+need(stub_bp, "-soname,libjnigraphics.so", "vendor libjnigraphics stub SONAME")
+need(stub_bp, 'compile_multilib: "32"', "vendor libjnigraphics stub is 32-bit")
+need(stub_bp, "vendor: true", "vendor libjnigraphics stub is vendor-only")
+need(stub_src, "AndroidBitmap_getInfo", "stub symbol")
+need(stub_src, "AndroidBitmap_lockPixels", "stub symbol")
+need(stub_src, "AndroidBitmap_unlockPixels", "stub symbol")
+
 if failures:
     print("static checks FAILED:")
     for item in failures:

@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// task-156: vendor 32-bit stub for libjnigraphics.so.
+//
+// The stock Visidon engine (libVDSelfiePanorama.so, 32-bit) has a DT_NEEDED
+// dependency on libjnigraphics.so, but the vendor namespace cannot resolve the
+// system library (not LLNDK/VNDK; see docs/visidon-panorama-backend-spec.md
+// section 2). This vendor stub installs as /vendor/lib/libjnigraphics.so via
+// stem + SONAME and satisfies the dynamic linker; the backend never calls the
+// AndroidBitmap_* entry points (Bitmap paths are not used).
+//
+// Integration (hal-dev, task-157): add this module to the camera HAL's
+// `required` list (camera/Android.bp), e.g. required: [..., "libjnigraphics_visidon_stub"].
+// Do NOT add it to shared_libs: libVDSelfiePanorama is dlopen'ed at runtime.
+cc_library_shared {
+    name: "libjnigraphics_visidon_stub",
+    vendor: true,
+    compile_multilib: "32",
+    srcs: ["libjnigraphics_stub.cpp"],
+    stem: "libjnigraphics",
+    ldflags: ["-Wl,-soname,libjnigraphics.so"],
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+}
