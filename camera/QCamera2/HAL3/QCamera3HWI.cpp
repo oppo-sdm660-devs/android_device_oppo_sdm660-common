@@ -57,6 +57,7 @@
 #include "util/QCameraFlash.h"
 #include "QCameraPerfTranslator.h"
 #include "QCamera3HWI.h"
+#include "QCamera3FakeStreamRules.h"
 #include "QCamera3HdrAlgo.h"
 #include "QCamera3LowLightHdrAlgo.h"
 #include "QCamera3HdrPlan.h"
@@ -4050,6 +4051,90 @@ int QCamera3HardwareInterface::validateStreamsPhyIds(
 
 
 /*===========================================================================
+ * FUNCTION   : acceptFakeStreamOnlyLocked
+ *
+ * DESCRIPTION: Accept Android 16's Camera3FakeStream-only configuration as an
+ *              empty session transition: stop and release all real channels,
+ *              but never create a 320x240 daemon stream.  The framework closes
+ *              the device/session immediately afterwards.
+ *
+ * RETURN     : NO_ERROR
+ *==========================================================================*/
+int QCamera3HardwareInterface::acceptFakeStreamOnlyLocked(
+        camera3_stream_configuration_t *streamList)
+{
+    pthread_mutex_lock(&mMutex);
+
+    resetOppoZslState();
+    mOppoZslEnabled = false;
+    mOppoZslMemOk = false;
+    mHALZSL = CAM_HAL3_ZSL_TYPE_NONE;
+
+    for (List<stream_info_t *>::iterator it = mStreamInfo.begin();
+            it != mStreamInfo.end(); it++) {
+        QCamera3ProcessingChannel *channel = (*it)->channel;
+        if (channel) channel->stop();
+    }
+    if (mRawDumpChannel) mRawDumpChannel->stop();
+    if (mQCFACaptureChannel) mQCFACaptureChannel->stop();
+    if (mMultiRawChannel) mMultiRawChannel->stop();
+    if (mSupportChannel) mSupportChannel->stop();
+    if (mAnalysisChannel) mAnalysisChannel->stop();
+    if (mMetadataChannel) mMetadataChannel->stop();
+    if (mPictureChannel && m_bIsVideo && !m_bIs4KVideo) {
+        mPictureChannel->stopChannel();
+    }
+    destroyZslRingYuvChannel();
+    stopZslSnapshotMode();
+    if (mChannelHandle) {
+        mCameraHandle->ops->stop_channel(mCameraHandle->camera_handle,
+                mChannelHandle);
+    }
+
+    for (List<stream_info_t *>::iterator it = mStreamInfo.begin();
+            it != mStreamInfo.end(); it++) {
+        QCamera3ProcessingChannel *channel = (*it)->channel;
+        if (channel) delete channel;
+        free(*it);
+    }
+    mStreamInfo.clear();
+    mRawChannel = NULL;
+    mPictureChannel = NULL;
+    mZSLChannel = NULL;
+    m_bStopPicChannel = false;
+
+    if (mSupportChannel) { delete mSupportChannel; mSupportChannel = NULL; }
+    if (mAnalysisChannel) { delete mAnalysisChannel; mAnalysisChannel = NULL; }
+    if (mRawDumpChannel) { delete mRawDumpChannel; mRawDumpChannel = NULL; }
+    if (mQCFACaptureChannel) { delete mQCFACaptureChannel; mQCFACaptureChannel = NULL; }
+    if (mMultiRawChannel) { delete mMultiRawChannel; mMultiRawChannel = NULL; }
+    if (mMetadataChannel) { delete mMetadataChannel; mMetadataChannel = NULL; }
+
+    // Drop any cached framework stream copy; it may reference the fake stream
+    // or a session that is already gone.  Never free framework-owned memory if
+    // the cached configuration is the caller's streamList.
+    if (mStreamList.streamList.streams == streamList->streams) {
+        mStreamList.streamList.num_streams = 0;
+    } else {
+        if (mStreamList.streamList.streams) {
+            free(mStreamList.streamList.streams);
+            mStreamList.streamList.streams = NULL;
+        }
+        if (mStreamList.usage) {
+            free(mStreamList.usage);
+            mStreamList.usage = NULL;
+        }
+        memset(&mStreamList, 0, sizeof(stream_configuration_t));
+    }
+
+    memset(&mInputStreamInfo, 0, sizeof(mInputStreamInfo));
+    mFirstConfiguration = false;
+    mState = CONFIGURED;
+    pthread_mutex_unlock(&mMutex);
+    return NO_ERROR;
+}
+
+/*===========================================================================
  * FUNCTION   : configureStreamsPerfLocked
  *
  * DESCRIPTION: configureStreams while perfLock is held.
@@ -4087,6 +4172,23 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
         LOGE("Maximum number of streams %d exceeded: %d",
                 MAX_NUM_STREAMS, streamList->num_streams);
         return BAD_VALUE;
+    }
+
+    // Android 16 Camera3Device injects a fake 320x240 IMPLEMENTATION_DEFINED
+    // output when a session is closed with no real streams. Accept that as an
+    // empty transition; never pass it to the daemon as a preview stream.
+    if (streamList->num_streams == 1 && streamList->streams[0] != NULL &&
+            QCamera3FakeStreamRules::isFakeStreamOnly(
+                streamList->num_streams,
+                streamList->streams[0]->stream_type,
+                streamList->streams[0]->format,
+                streamList->streams[0]->width,
+                streamList->streams[0]->height,
+                streamList->streams[0]->rotation,
+                streamList->streams[0]->usage,
+                streamList->streams[0]->data_space)) {
+        LOGI("Android 16 fake-stream-only configure; accepting empty session");
+        return acceptFakeStreamOnlyLocked(streamList);
     }
 
     if (streamList->operation_mode == CAMERA3_STREAM_CONFIGURATION_CONSTRAINED_HIGH_SPEED_MODE) {

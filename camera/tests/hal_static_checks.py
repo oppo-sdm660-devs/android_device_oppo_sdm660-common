@@ -748,6 +748,20 @@ need(stub_src, "AndroidBitmap_getInfo", "stub symbol")
 need(stub_src, "AndroidBitmap_lockPixels", "stub symbol")
 need(stub_src, "AndroidBitmap_unlockPixels", "stub symbol")
 
+# task-180: Android 16 Camera3FakeStream-only compatibility.
+fake_header = HAL3 / "QCamera3FakeStreamRules.h"
+need(fake_header, "FAKE_WIDTH = 320", "fake stream width constant")
+need(fake_header, "FAKE_HEIGHT = 240", "fake stream height constant")
+need(fake_header, "FAKE_FORMAT = 0x22", "fake stream IMPLEMENTATION_DEFINED")
+need(fake_header, "FAKE_USAGE = 0x800", "fake stream HW_COMPOSER usage")
+need(fake_header, "numStreams == 1", "fake stream single-stream guard")
+need(hwi, '#include "QCamera3FakeStreamRules.h"', "fake stream rules included by HWI")
+need(hwi, "QCamera3FakeStreamRules::isFakeStreamOnly(", "fake stream detection in configure")
+need(hwi, "return acceptFakeStreamOnlyLocked(streamList);", "fake-only config accepted without daemon stream")
+need(hwi, "acceptFakeStreamOnlyLocked(", "fake-only cleanup helper")
+need(tests / "fake_stream_rules_test.cpp", "AOSP Camera3FakeStream-only configuration", "fake stream host test")
+need(tests / "run_fake_stream_rules_tests.py", "def main", "fake stream host runner")
+
 if failures:
     print("static checks FAILED:")
     for item in failures:
