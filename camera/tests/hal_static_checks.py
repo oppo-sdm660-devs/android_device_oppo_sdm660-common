@@ -670,6 +670,29 @@ for path in sorted(tests.glob("*.py")):
     except SyntaxError as exc:
         failures.append(f"{path.name}: python syntax error: {exc}")
 
+# task-142: OSS DocPanorama backend prototype (no stock module, no vendor blob).
+pano_h = HAL3 / "QCamera3OppoPanorama.h"
+pano_cpp = HAL3 / "QCamera3OppoPanorama.cpp"
+need(pano_h, "class QCamera3OppoPanorama", "OSS panorama backend header")
+need(pano_h, "stockDirectionCode", "stock direction mapping")
+need(pano_h, "addFrame", "frame input API")
+need(pano_h, "stitch", "stitch output API")
+for banned in ("#include <cutils/", "#include <utils/", "#include <dlfcn.h>",
+               "#include <hardware/", "QCamera2HardwareInterface"):
+    absent(pano_h, banned, "Android/stock dependency in pure-logic header")
+absent(pano_cpp, "dlopen", "must not load the stock HAL module")
+absent(pano_cpp, "camera.sdm660", "must not reference the stock HAL module")
+need(pano_cpp, "QCamera3OppoPanorama::addFrame", "frame blend implementation")
+need(pano_cpp, "QCamera3OppoPanorama::stitch", "stitch implementation")
+need(pano_cpp, "stockDirectionCode", "direction code implementation")
+need(tests / "oppo_panorama_backend_test.cpp", "testHorizontalPan", "panorama host test")
+need(tests / "run_oppo_panorama_tests.py", "def main", "panorama host test runner")
+# The Android build entry is owned by the integration task; the backend must
+# stay compilable on the host without it.
+checks += 1
+if "QCamera3OppoPanorama.cpp" in read(CAMERA / "Android.bp"):
+    failures.append("Android.bp: integration not expected in the prototype task")
+
 if failures:
     print("static checks FAILED:")
     for item in failures:
