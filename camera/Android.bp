@@ -106,6 +106,7 @@ cc_library_shared {
         "QCamera2/HAL3/QCamera3OppoPlatformHwi.cpp",
         "QCamera2/HAL3/QCamera3OppoPlatformParams.cpp",
         "QCamera2/HAL3/QCamera3ZslPolicy.cpp",
+        "QCamera2/HAL3/QCamera3ZslRingPolicy.cpp",
         "QCamera2/HAL3/QCamera3Stream.cpp",
         "QCamera2/HAL3/QCamera3StreamMem.cpp",
         "QCamera2/HAL3/QCamera3VendorTags.cpp",

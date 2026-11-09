@@ -424,6 +424,27 @@ public:
     uint32_t getSensorMountAngle();
     const cam_related_system_calibration_data_t *getRelatedCalibrationData();
     int getCameraId() {return mCameraId;}
+    /* M1/M2 ring: allocate an internal frame number for keep-alive ring
+     * requests; the number is only a daemon frame index (no framework map). */
+    uint32_t allocZslRingFrameNumber();
+    /* M2: map a ring-selected source frame to the request so result metadata
+     * can report the source SENSOR_TIMESTAMP/shutter timestamp. */
+    void noteZslRingSelection(uint32_t requestFrame, uint32_t sourceFrame,
+            int64_t timestampNs);
+    void clearZslRingSelection(uint32_t requestFrame);
+    bool takeZslRingSelection(uint32_t requestFrame, uint32_t &sourceFrame,
+            int64_t &timestampNs);
+    void markZslRingRequest(uint32_t requestFrame);
+    void clearZslRingRequest(uint32_t requestFrame);
+    bool isZslRingRequest(uint32_t requestFrame);
+    int32_t createZslRingYuvChannel();
+    void destroyZslRingYuvChannel();
+    int32_t startZslRingChannel();
+    int32_t startZslSnapshotMode();
+    void stopZslSnapshotMode();
+    void markPreviewJpegRequest(uint32_t requestFrame);
+    void clearPreviewJpegRequest(uint32_t requestFrame);
+    bool isPreviewJpegRequest(uint32_t requestFrame);
     bool isQuadCfaSensor() {return m_bQuadraCfaSensor;}
     int32_t deleteQCFACaptureChannel();
     cam_dimension_t getQCFAComapitbleDim(const uint32_t& width,
@@ -806,6 +827,10 @@ public:
     bool mbIsSWMFNRCapture;
     bool isSecureMode() {return m_bIsSecureMode;}
     QCamera3ProcessingChannel *mZSLChannel; //Interface ptr for actual ZSL channel.
+    QCamera3ZslRingChannel *mZslRingYuvChannel;
+    camera3_stream_t *mZslRingYuvStream;
+    uint32_t mZslRingChannelHandle;
+    bool mZslSnapshotModeStarted;
     QCamera3MultiRawChannel *mMultiRawChannel;
     bool m_bMultiRawRequest;
 private:
@@ -976,6 +1001,10 @@ private:
     int32_t mOppoZslFallback = 1;
     int32_t mOppoZslRingBuffers = 4;
     uint32_t mOppoZslFailFrame = UINT32_MAX;
+    Mutex mZslRingSelectionLock;
+    std::map<uint32_t, std::pair<uint32_t, int64_t>> mZslRingSelections;
+    std::map<uint32_t, uint8_t> mZslRingRequestFrames;
+    std::map<uint32_t, uint8_t> mPreviewJpegRequestFrames;
     struct ZslFrameState {
         uint32_t frame = 0;
         bool valid = false;

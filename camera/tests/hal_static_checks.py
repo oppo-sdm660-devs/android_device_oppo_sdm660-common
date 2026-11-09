@@ -47,6 +47,35 @@ header = HAL3 / "QCamera3HALHeader.h"
 hwih = HAL3 / "QCamera3HWI.h"
 bp = CAMERA / "Android.bp"
 
+# task-124: no fake reprocessing capabilities; CameraX must not select
+# YUV-reprocessing ZSL. Pseudo-ZSL HAL path is off unless explicitly enabled.
+absent(hwi, "ANDROID_REQUEST_AVAILABLE_CAPABILITIES_PRIVATE_REPROCESSING",
+       "private reprocessing capability advertisement")
+absent(hwi, "ANDROID_REQUEST_AVAILABLE_CAPABILITIES_YUV_REPROCESSING",
+       "YUV reprocessing capability advertisement")
+absent(hwi, "ANDROID_REPROCESS_MAX_CAPTURE_STALL, &max_stall_duration",
+       "reprocess stall metadata")
+absent(hwi, "io_format_map", "reprocess input/output format map")
+absent(hwi, "max_input_streams = 1", "input stream count 1")
+need(hwi, "const bool reprocess = false;", "reprocess metadata policy disabled")
+need(hwi, "ZSL fill request failed rc=%d frame=%u",
+     "ZSL super-buffer keepalive request")
+need(channel, "ZSL request cam=%x rawCh=%x frame=%u num=%u",
+     "ZSL request handles/frame log")
+need(channel, "ZSL cb buf[%u] type=%d idx=%d frame_idx=%d flags=%x",
+     "ZSL callback buffer details")
+need(channel, "oppoPreviewFrameCachePut", "preview YUV frame cache")
+need(channel, "oppoPreviewFrameCacheGet", "preview YUV frame lookup")
+need(hwi, "return true;", "standard past-frame route enabled")
+need(hwi, "camera %u capability is NULL; refusing to init HAL object",
+     "constructor capability null guard")
+need(channel, "plain snapshot request frame=%u rc=%d",
+     "plain snapshot asks daemon for the frame")
+need(channel, "snapshot buffer invalid: errFlag=%d zeroSource=%d",
+     "zero/error snapshot source is rejected before JPEG")
+need(hwi, 'property_get("persist.vendor.camera.halzsl.enable", prop, "1")',
+     "pseudo-ZSL transitional default on")
+
 # A. 4K property wiring and the final video-stabilization removal.
 for prop in ("persist.vendor.camera.oppo.video.allow_4k=1",
              "persist.vendor.camera.oppo.video.picture_overlap=1",
@@ -457,10 +486,12 @@ need(policy_cpp, "suppressHalZslPseudoFrameDrop", "pseudo drop classification im
 # reported explicitly by the pending-buffer timeout path.
 need(policy_h, "suppressPseudoZslJpegTransition", "pseudo-ZSL JPEG transition helper")
 need(policy_cpp, "suppressPseudoZslJpegTransition", "pseudo-ZSL JPEG transition impl")
-need(hwi, "(j->isZSL || pseudoZslJpegTransition)",
+need(hwi, "(j->isZSL || pseudoZslJpegTransition ||",
      "metadata drop covers frame-specific pseudo-ZSL")
-need(hwi, "HAL ZSL expected pseudo-ZSL JPEG buffer error suppressed",
-     "expected snapshot buffer error suppressed")
+need(hwi, "snapshot JPEG buffer error deferred to jpeg result",
+     "snapshot buffer error deferred to jpeg result")
+need(hwi, "HAL plain snapshot JPEG drop suppressed",
+     "plain snapshot metadata drop suppressed")
 need(hwi, "HAL ZSL deferred JPEG timeout reported",
      "real deferred JPEG timeout still reported")
 need(hwi, "persist.vendor.camera.oppo.zsl.halzsl_drop_bypass",
@@ -469,8 +500,86 @@ need(hwi, "QCamera3ZslPolicy::suppressPseudoZslJpegTransition(",
      "HWI uses pseudo-ZSL transition helper")
 channel_h = HAL3 / "QCamera3Channel.h"
 need(channel_h, "virtual bool isSnapshotJpegChannel()", "JPEG channel marker on base")
-need(hwi, "ch->isSnapshotJpegChannel() && ch->isZSLChannel()",
-     "buffer-error suppression narrowed to JPEG channel")
+# task-113 M1: standard-ZSL ring PoC must be opt-in and not alter delivery.
+ring_policy = HAL3 / "QCamera3ZslRingPolicy.cpp"
+need(HAL3 / "QCamera3ZslRingPolicy.h", "select(", "ring selection policy")
+need(ring_policy, "averageFpsX100", "ring stats fps")
+need(CAMERA / "Android.bp", "QCamera3ZslRingPolicy.cpp", "ring policy built")
+need(hwi, "persist.vendor.camera.oppo.zsl.ring", "ring property name")
+need(hwi, 'property_get("persist.vendor.camera.oppo.zsl.ring", prop, "0")',
+     "ring property default off")
+need(hwi, "ZSLRING gate: enabled=%d picture=%p isZSL=%d state=%d streamOnPending=%d",
+     "ring gate log on the normal stream-on path")
+need(hwi, "ZSLRING configure: HALZSL=%d picture=%p zslChannel=%p isZSL=%d",
+     "ring configure-state log")
+need(hwi, "mPictureChannel->startZslRing();", "ring started on normal path")
+need(hwi, "allocZslRingFrameNumber", "ring frame number allocation")
+need(channel, "handleZslRingSuperBuf", "ring super-buffer handler")
+need(channel, "requestZslRingFrameLocked", "ring keep-alive request")
+need(channel, "ZSLRING stats", "ring periodic stats log")
+need(channel, "stopZslRing(\"channel_stop\")", "ring stops on channel stop")
+need(channel_h, "mZslRingActive", "ring state in PicChannel")
+need(CAMERA / "tests" / "zsl_ring_policy_test.cpp", "testSelection",
+     "ring policy host test")
+need(CAMERA / "tests" / "run_zsl_ring_tests.py", "zsl_ring_policy_test",
+     "ring policy host runner")
+need(CAMERA / "tests" / "check_jpeg_content.py", "JPEG content checker",
+     "uniform/green JPEG rejection")
+# task-118 M2: standard-ZSL delivery from a selected ring frame, normal result.
+need(hwi, "prepareRingZslRequest", "HWI marks ring-selected still requests")
+need(hwi, "ZSLRING dispatch request=%u (still BLOB, zslHint=%d, pseudo bypassed)",
+     "ring dispatch log")
+need(hwi, "takeZslRingSelection", "HWI takes selected source timestamp")
+need(hwi, "ZSLRING result frame=%u source=%u ts=%lld", "ring result timestamp log")
+need(channel, "persist.vendor.camera.oppo.zsl.ring.max_age_ms", "ring maxAge property")
+need(channel, "oppoZslRingMaxAgeMs", "ring maxAge helper")
+need(channel, "deliverRingZslFrame", "ring past-frame delivery")
+need(channel, "ZSLRING select request=%u source=%u ts=%lld", "ring select log")
+need(channel, "ZSLRING fallback live capture", "ring select fallback log")
+need(channel, "releaseRingZslBuffer", "ring buffer returned after JPEG")
+need(channel, "mRingZslDispatch", "ring request suppresses pseudo deferral")
+need(channel, "!mRingZslDispatch", "zsl_snapshot is not set for ring requests")
+# task-119 ring4: ring path bypasses pseudo ZSL accounting and fallback keeps ring.
+need(hwi, "pseudo bypassed", "ring dispatch happens before needZSLCapture")
+need(hwi, "ZSLRING skip (ring empty warmup)", "HWI ring warmup skip")
+need(channel, "isPendingCaptureFrame",
+     "ring super buffers routed away from pending capture frames")
+need(channel, "checkZslRingStall", "ring stall watchdog")
+need(hwi, "checkZslRingStall", "HWI drives ring stall watchdog")
+need(channel, "cancel_super_buf_request", "daemon super-buffer cancel")
+need(channel, "ZSLRING drain held=%u inFlight=%u", "ring drain buffer counts")
+need(channel, "ZSLRING cancel request rc=%d count=%u", "ring cancel log")
+need(channel, "ZSLRING stall: inFlight=%u held=%zu no cb for %lldms",
+     "ring stall recovery log")
+need(channel, "resumeZslRingAfterLive", "ring restart after live jpeg")
+need(channel, "ZSLRING restart after live capture request=%u", "ring restart log")
+need(hwi, "shouldStartZslRing", "HWI lazily starts ring when stopped")
+need(hwi, "ZSLRING lazy start request=%u", "hwi lazy start log")
+need(channel, "ZSLRING warmup live request=%u", "warmup live stop/restart log")
+need(channel, "ZSLRING cb frame=%u await=%u pendingCapture=%d -> %s",
+     "ring/capture callback routing log")
+need(channel, "ZSLRING request frame=%u inFlight=%u", "ring request log")
+need(channel, "ZSLRING cb bufs=%u imageIdx=%d type=%d len=%zu ts=%lld", "ring callback log")
+need(channel, "ZSLRING entry frame=%u ts=%lld entries=%zu", "ring entry log")
+need(hwi, "markZslRingRequest", "ring request marker")
+need(hwi, "isZslRingRequest", "ring request marker lookup")
+need(hwi, "ZSLRING metadata requested request=%u", "ring metadata requested")
+need(hwi, "ZSLRING metadata queued request=%u", "ring metadata queued")
+need(channel, "consumeRingZslFallback", "ring fallback marker")
+need(channel, "ZSLRING stopped for non-ring capture request=%u",
+     "non-ring capture stops/cancels ring")
+need(channel, "ZSLRING fallback live capture request=%u failures=%u (ring kept)",
+     "fallback keeps ring")
+need(channel, "ZSLRING fallback live request=%u (ring restart after jpeg)",
+     "fallback restarts ring after live JPEG")
+need(channel, "ZSLRING disabled after %u consecutive fallbacks",
+     "repeated fallback disables ring")
+need(channel, "ZSLRING fallback live capture request=%u failures=%u",
+     "fallback keeps ring / failure counter log")
+need(channel, "ZSLRING select-times requestSensor=%lld now=%lld",
+     "ring selection raw time-base log")
+need(hwi, "ch->isSnapshotJpegChannel()) ||",
+     "buffer-error suppression covers all snapshot JPEG channels")
 # 272d031 native past-frame code path stays available as A/B (property 1), but is
 # no longer the default (task-107 device evidence).
 need(hwi, "persist.vendor.camera.oppo.zsl.native_past_frame",

@@ -36,6 +36,8 @@
 // System dependencies
 #include <fcntl.h>
 #include <stdio.h>
+#include <unistd.h>
+#include <vector>
 #include <stdlib.h>
 #include "hardware/gralloc.h"
 #include <utils/Timers.h>
@@ -59,10 +61,108 @@ extern "C" {
         ((size + (typeof(size))(padding - 1)) & \
         (typeof(size))(~(padding - 1)))
 
+namespace {
+// M2 standard-ZSL ring selection window. M1 measured ~8.9fps full-size
+// snapshot supply, so the available past frame is ~112ms old; 300ms default
+// leaves one-frame tolerance. Property is A/B only and clamped.
+int32_t oppoZslRingMaxAgeMs()
+{
+    char prop[PROPERTY_VALUE_MAX] = {};
+    property_get("persist.vendor.camera.oppo.zsl.ring.max_age_ms", prop, "300");
+    int32_t value = atoi(prop);
+    if (value < 50) value = 50;
+    if (value > 5000) value = 5000;
+    return value;
+}
+
+/* One ring frame presented to PostProc. super must stay the first member so
+ * PostProc's free(src_frame) releases the whole block. */
+/* A zero-filled snapshot buffer (all Y/U/V bytes 0) is what the daemon returns
+ * when it never filled the still stream; encoding it produces a uniform green
+ * JPEG. Sample three regions so a genuinely dark but valid frame is not
+ * misclassified, and never let the encoder turn this into a success result. */
+static bool snapshotSampleIsZero(const mm_camera_buf_def_t *def)
+{
+    if (def == NULL || def->buffer == NULL || def->frame_len < 1024) return false;
+    const uint8_t *base = (const uint8_t *)def->buffer;
+    const size_t len = def->frame_len;
+    const size_t offsets[3] = {0, len / 2, len > 512 ? len - 256 : len - 1};
+    for (size_t i = 0; i < 3; ++i) {
+        const size_t off = offsets[i];
+        const size_t avail = len - off;
+        const size_t count = avail < 128 ? avail : 128;
+        bool allZero = true;
+        for (size_t j = 0; j < count; ++j) {
+            if (base[off + j] != 0) { allZero = false; break; }
+        }
+        if (!allZero) return false;
+    }
+    return true;
+}
+
+struct ZslRingFrameBlock {
+    mm_camera_super_buf_t super;
+    mm_camera_buf_def_t bufDef;
+};
+}  // namespace
+
 using namespace android;
 
 namespace qcamera {
 #define IS_BUFFER_ERROR(x) (((x) & V4L2_BUF_FLAG_ERROR) == V4L2_BUF_FLAG_ERROR)
+
+namespace {
+Mutex gPreviewCacheLock;
+uint8_t *gPreviewCacheData = NULL;
+size_t gPreviewCacheLength = 0;
+int32_t gPreviewCacheWidth = 0;
+int32_t gPreviewCacheHeight = 0;
+int64_t gPreviewCacheTimestampNs = 0;
+}
+
+void oppoPreviewFrameCachePut(const mm_camera_buf_def_t *def,
+        const cam_dimension_t &dim, int64_t timestampNs)
+{
+    if (def == NULL || def->buffer == NULL || def->frame_len == 0 ||
+            dim.width <= 0 || dim.height <= 0) return;
+    Mutex::Autolock lock(gPreviewCacheLock);
+    if (gPreviewCacheLength != def->frame_len) {
+        free(gPreviewCacheData);
+        gPreviewCacheData = (uint8_t *)malloc(def->frame_len);
+        gPreviewCacheLength = gPreviewCacheData != NULL ? def->frame_len : 0;
+    }
+    if (gPreviewCacheData == NULL) return;
+    memcpy(gPreviewCacheData, def->buffer, def->frame_len);
+    gPreviewCacheWidth = dim.width;
+    gPreviewCacheHeight = dim.height;
+    gPreviewCacheTimestampNs = timestampNs;
+}
+
+bool oppoPreviewFrameCacheGet(int32_t &width, int32_t &height, int64_t &timestampNs,
+        uint8_t *&data, size_t &length)
+{
+    Mutex::Autolock lock(gPreviewCacheLock);
+    if (gPreviewCacheData == NULL || gPreviewCacheWidth <= 0 ||
+            gPreviewCacheHeight <= 0) {
+        return false;
+    }
+    width = gPreviewCacheWidth;
+    height = gPreviewCacheHeight;
+    timestampNs = gPreviewCacheTimestampNs;
+    length = gPreviewCacheLength;
+    data = (uint8_t *)malloc(gPreviewCacheLength);
+    if (data == NULL) return false;
+    memcpy(data, gPreviewCacheData, gPreviewCacheLength);
+    return true;
+}
+
+bool oppoPreviewFrameCacheSize(int32_t &width, int32_t &height)
+{
+    Mutex::Autolock lock(gPreviewCacheLock);
+    width = gPreviewCacheWidth;
+    height = gPreviewCacheHeight;
+    return width > 0 && height > 0;
+}
 
 // The framework locates the BLOB footer using the requested, unaligned width.
 static ssize_t getJpegBufferCapacity(buffer_handle_t *buffer, ssize_t allocationSize)
@@ -1129,7 +1229,8 @@ int32_t QCamera3ProcessingChannel::requestZSLBuf(uint32_t cam_handle,
                                    uint32_t channel_handle, uint32_t frameNumber,
                                    uint32_t numBuf)
 {
-    LOGH("requestZSLBuf with frameNumber %d",frameNumber);
+    LOGI("ZSL request cam=%x rawCh=%x frame=%u num=%u",
+            cam_handle, channel_handle, frameNumber, numBuf);
     mm_camera_req_buf_t buf;
     memset(&buf, 0x0, sizeof(buf));
     buf.type = MM_CAMERA_REQ_SUPER_BUF;
@@ -5408,6 +5509,10 @@ void QCamera3PicChannel::jpegEvtHandle(jpeg_job_status_t status,
                 }
             }
 
+            // M2: a ring-selected frame owns its snapshot buffer until encoding
+            // completes; return it to the daemon after the result callback.
+            obj->releaseRingZslBuffer((uint32_t)resultFrameNumber);
+            obj->resumeZslRingAfterLive((uint32_t)resultFrameNumber);
             obj->m_postprocessor.releaseJpegJobData(job);
             free(job);
             if(isHDR || isMFCapture || isMFCRaw) {
@@ -5459,7 +5564,27 @@ QCamera3PicChannel::QCamera3PicChannel(uint32_t cam_handle,
                         mFrameLen(0),
                         mAuxPicChannel(NULL),
                         mNeedPPUpscale(false),
-                        m_bMpoEnabled(true)
+                        m_bMpoEnabled(true),
+                        mZslRingActive(false),
+                        mZslRingDraining(false),
+                        mZslRingInFlight(0),
+                        mZslRingNextFrame(0),
+                        mZslRingAwaitFrame(0),
+                        mZslRingLastRequestNs(0),
+                        mZslRingCancelCount(0),
+                        mRingZslResumeAfterLive(false),
+                        mRingZslResumeFrame(0),
+                        mZslRingDepth(QCamera3ZslRingPolicy::kDefaultDepth),
+                        mRingYuvChannel(NULL),
+                        mRingZslPending(false),
+                        mPreviewJpegPending(false),
+                        mPreviewJpegDispatch(false),
+                        mRingZslDispatch(false),
+                        mRingZslFallbackPending(false),
+                        mRingZslSkipPending(false),
+                        mZslRingDisabled(false),
+                        mRingZslFallbackFrame(0),
+                        mRingZslSelectFailures(0)
 {
     QCamera3HardwareInterface* hal_obj = (QCamera3HardwareInterface*)mUserData;
     m_max_pic_dim = hal_obj->calcMaxJpegDim();
@@ -5494,6 +5619,588 @@ QCamera3PicChannel::QCamera3PicChannel(uint32_t cam_handle,
     }
     mAllocDone = false;
     mAllocThread = 0;
+}
+
+/*===========================================================================
+ * FUNCTION   : startZslRing
+ *
+ * DESCRIPTION: M1 standard-ZSL ring PoC. Keep full-size snapshot YUV buffers
+ *              filled by continuously issuing frame-specific super-buffer
+ *              requests and log timing statistics. JPEG delivery is untouched.
+ *
+ * RETURN     : NO_ERROR when the ring request loop was started.
+ *==========================================================================*/
+int32_t QCamera3PicChannel::startZslRing()
+{
+    if (!m_bZSL || (mRingYuvChannel == NULL && mYuvMemory == NULL) ||
+            mAuxPicChannel != NULL) {
+        LOGI("ZSLRING: not started (bZSL=%d ringYuv=%p mem=%p aux=%d)",
+                m_bZSL, mRingYuvChannel, mYuvMemory, mAuxPicChannel != NULL);
+        return -EOPNOTSUPP;
+    }
+    if (mRingYuvChannel == NULL) {
+        // Buffers are allocated asynchronously; the request_super_buf loop needs
+        // at least one queued snapshot buffer.
+        for (int i = 0; i < 500 && !mAllocDone; ++i) {
+            usleep(1000);
+        }
+        if (!mAllocDone) {
+            LOGW("ZSLRING: buffers not allocated, ring not started");
+            return -ETIMEDOUT;
+        }
+    }
+    QCamera3HardwareInterface *hal_obj = (QCamera3HardwareInterface *)mUserData;
+    Mutex::Autolock lock(mZslRingLock);
+    if (mZslRingActive) return NO_ERROR;
+    mZslRingActive = true;
+    mZslRingDraining = false;
+    mZslRingInFlight = 0;
+    mZslRingEntries.clear();
+    mZslRingStats = QCamera3ZslRingPolicy::Stats();
+    mRingZslFallbackPending = false;
+    mRingZslSkipPending = false;
+    mRingZslResumeAfterLive = false;
+    mRingZslResumeFrame = 0;
+    mZslRingDisabled = false;
+    mRingZslFallbackFrame = 0;
+    mZslRingNextFrame = hal_obj != NULL ? hal_obj->allocZslRingFrameNumber() : 0;
+    mZslRingLastRequestNs = 0;
+    mZslRingCancelCount = 0;
+    LOGI("ZSLRING start cam=0x%x channel=0x%x stream=0x%x streamID=0x%x "
+            "ringYuv=%p ringStream=0x%x ringServerId=0x%x "
+            "depth=%u bufCount=%u frameLen=%u firstFrame=%u "
+            "streamActive=%d m_bZSL=%d memKB=%lld",
+            m_camHandle, m_handle,
+            (m_numStreams > 0 && mStreams[0] != NULL) ? mStreams[0]->getMyHandle() : 0,
+            (m_numStreams > 0 && mStreams[0] != NULL) ?
+                getStreamID(1U << mStreams[0]->getMyType()) : 0,
+            mRingYuvChannel,
+            mRingYuvChannel != NULL ? mRingYuvChannel->getRingStreamHandle() : 0,
+            mRingYuvChannel != NULL ? mRingYuvChannel->getRingServerStreamId() : 0,
+            mZslRingDepth, mNumSnapshotBufs, mFrameLen,
+            mZslRingNextFrame,
+            m_bIsActive ? 1 : 0, m_bZSL ? 1 : 0,
+            (long long)(QCamera3ZslRingPolicy::estimateRingBytes(
+                    int32_t(mYuvWidth), int32_t(mYuvHeight), int32_t(mZslRingDepth)) / 1024));
+    if (mRingYuvChannel == NULL) {
+        requestZslRingFrameLocked();
+    } else {
+        LOGI("ZSLRING continuous YUV source active ringStream=0x%x serverId=0x%x",
+                mRingYuvChannel->getRingStreamHandle(),
+                mRingYuvChannel->getRingServerStreamId());
+    }
+    return NO_ERROR;
+}
+
+int32_t QCamera3PicChannel::queueZslSnapshotBuffer(uint32_t frameNumber)
+{
+    if (mYuvMemory == NULL || m_numStreams == 0 || mStreams[0] == NULL) {
+        return -1;
+    }
+    const int32_t idx = mYuvMemory->allocateOne(mFrameLen);
+    if (idx < 0) {
+        LOGW("ZSLSNAP allocate failed frame=%u", frameNumber);
+        return -1;
+    }
+    mYuvMemory->markFrameNumber(uint32_t(idx), frameNumber);
+    mStreams[0]->bufDone(uint32_t(idx));
+    LOGI("ZSLSNAP qbuf frame=%u idx=%d", frameNumber, idx);
+    return idx;
+}
+
+void QCamera3PicChannel::requestZslRingFrameLocked()
+{
+    if (mRingYuvChannel != NULL) return;
+    if (!mZslRingActive || mZslRingDraining || mZslRingDisabled ||
+            mZslRingInFlight > 0) return;
+    mZslRingInFlight = 1;
+    mZslRingAwaitFrame = mZslRingNextFrame;
+    mZslRingLastRequestNs = systemTime(SYSTEM_TIME_BOOTTIME);
+    LOGI("ZSLRING request frame=%u inFlight=%u cam=0x%x channel=0x%x stream=0x%x",
+            mZslRingAwaitFrame, mZslRingInFlight, m_camHandle, m_handle,
+            (m_numStreams > 0 && mStreams[0] != NULL) ? mStreams[0]->getMyHandle() : 0);
+    queueZslSnapshotBuffer(mZslRingAwaitFrame);
+    const int32_t rc = requestZSLBuf(m_camHandle, m_handle, mZslRingAwaitFrame);
+    if (rc != NO_ERROR) {
+        --mZslRingInFlight;
+        mZslRingAwaitFrame = 0;
+        mZslRingLastRequestNs = 0;
+        LOGW("ZSLRING request frame=%u failed rc=%d", mZslRingNextFrame, rc);
+    }
+}
+
+void QCamera3PicChannel::logZslRingStatsLocked(bool final)
+{
+    const QCamera3ZslRingPolicy::Stats &st = mZslRingStats;
+    const uint64_t frameBytes = QCamera3ZslRingPolicy::estimateRingBytes(
+            int32_t(mYuvWidth), int32_t(mYuvHeight), 1);
+    LOGI("ZSLRING stats%s frames=%u dropped=%u overwritten=%u fps=%u.%02u "
+            "tsMin=%lld tsMax=%lld tsAvg=%lld maxGapMs=%u inUse=%u depth=%u "
+            "heldKB=%lld ringKB=%lld",
+            final ? " final" : "", st.received, st.dropped, st.overwritten,
+            st.averageFpsX100() / 100, st.averageFpsX100() % 100,
+            (long long)(st.tsMin / 1000000LL), (long long)(st.tsMax / 1000000LL),
+            (long long)(st.averageTimestamp() / 1000000LL), st.maxGapMsValue(),
+            (unsigned)mZslRingEntries.size(), mZslRingDepth,
+            (long long)(frameBytes * mZslRingEntries.size() / 1024),
+            (long long)(frameBytes * mZslRingDepth / 1024));
+}
+
+static void dumpRingSnapshot(const mm_camera_buf_def_t *def, uint32_t frame,
+        int32_t width, int32_t height)
+{
+    if (def == NULL || def->buffer == NULL || def->frame_len == 0) return;
+    char prop[PROPERTY_VALUE_MAX];
+    property_get("persist.vendor.camera.dumpimg", prop, "0");
+    const uint32_t dump = (uint32_t)atoi(prop);
+    if (!(dump & QCAMERA_DUMP_FRM_RING)) return;
+    char path[128];
+    snprintf(path, sizeof(path), "/data/vendor/camera/ring_%u_%dx%d.yuv",
+            frame, width, height);
+    FILE *fp = fopen(path, "wb");
+    if (fp == NULL) {
+        LOGW("ZSLRING dump open failed %s", path);
+        return;
+    }
+    const size_t written = fwrite(def->buffer, 1, def->frame_len, fp);
+    fclose(fp);
+    LOGI("ZSLRING dump frame=%u bytes=%zu path=%s", frame, written, path);
+}
+
+void QCamera3PicChannel::handleZslRingSuperBuf(mm_camera_super_buf_t *recvd_frame)
+{
+    const int64_t receivedNs = systemTime(SYSTEM_TIME_BOOTTIME);
+    metadata_buffer_t *metadata = NULL;
+    int metaIdx = -1;
+    int imageIdx = -1;
+    mm_camera_buf_def_t *imageBuf = NULL;
+    uint32_t daemonFrame = 0;
+    int64_t timestampNs = 0;
+    for (uint32_t i = 0; i < recvd_frame->num_bufs; ++i) {
+        if (recvd_frame->bufs[i] == NULL) continue;
+        mm_camera_buf_def_t *buf = recvd_frame->bufs[i];
+        LOGI("ZSLRING cb buf[%u] type=%d idx=%d frame_idx=%d flags=%x "
+                "len=%zu stream_id=0x%x",
+                i, buf->stream_type, buf->buf_idx, buf->frame_idx, buf->flags,
+                buf->frame_len, buf->stream_id);
+        if (buf->stream_type == CAM_STREAM_TYPE_METADATA) {
+            metadata = (metadata_buffer_t *)buf->buffer;
+            metaIdx = int(i);
+            if (metadata != NULL) {
+                IF_META_AVAILABLE(uint32_t, pFrame, CAM_INTF_META_FRAME_NUMBER, metadata) {
+                    daemonFrame = *pFrame;
+                }
+                IF_META_AVAILABLE(int64_t, pTs, CAM_INTF_META_SENSOR_TIMESTAMP, metadata) {
+                    timestampNs = *pTs;
+                }
+            }
+            continue;
+        }
+        /* The daemon bundle can carry several image streams: the snapshot stream
+         * may be an error placeholder while the ring's actual YUV stream is a
+         * different type. Prefer a real snapshot, otherwise any non-error buffer
+         * whose frame_len matches the configured ring frame. */
+        if (IS_BUFFER_ERROR(buf->flags)) continue;
+        if (buf->frame_len < mFrameLen) continue;
+        if (imageBuf == NULL || buf->stream_type == CAM_STREAM_TYPE_SNAPSHOT) {
+            imageBuf = buf;
+            imageIdx = int(buf->buf_idx);
+        }
+    }
+
+    if (imageBuf != NULL && timestampNs == 0) {
+        timestampNs = int64_t(imageBuf->ts.tv_sec) * 1000000000LL +
+                int64_t(imageBuf->ts.tv_nsec);
+        if (daemonFrame == 0) {
+            daemonFrame = imageBuf->frame_idx;
+        }
+    }
+    LOGI("ZSLRING cb bufs=%u imageIdx=%d type=%d len=%zu ts=%lld active=%d disabled=%d",
+            recvd_frame->num_bufs, imageIdx,
+            imageBuf != NULL ? imageBuf->stream_type : -1,
+            imageBuf != NULL ? imageBuf->frame_len : 0,
+            (long long)timestampNs,
+            mZslRingActive ? 1 : 0, mZslRingDisabled ? 1 : 0);
+    bool retained = false;
+    {
+        Mutex::Autolock lock(mZslRingLock);
+        if (imageIdx < 0) {
+            mZslRingStats.noteDropped();
+        } else {
+            mZslRingStats.noteFrame(timestampNs);
+        }
+        if (daemonFrame != 0) {
+            mZslRingNextFrame = daemonFrame + 1;
+        }
+        if (mZslRingActive && !mZslRingDraining && !mZslRingDisabled &&
+                imageIdx >= 0) {
+            while (mZslRingEntries.size() >= size_t(mZslRingDepth)) {
+                ZslRingEntry oldest = *mZslRingEntries.begin();
+                mZslRingEntries.erase(mZslRingEntries.begin());
+                mZslRingStats.noteOverwritten();
+                if (mRingYuvChannel != NULL) {
+                    mRingYuvChannel->bufDone(oldest.bufIndex);
+                } else {
+                    for (uint32_t si = 0; si < m_numStreams; ++si) {
+                        if (mStreams[si] != NULL &&
+                                mStreams[si]->getMyServerID() == oldest.bufDef.stream_id) {
+                            mStreams[si]->bufDone(oldest.bufIndex);
+                            break;
+                        }
+                    }
+                }
+            }
+            ZslRingEntry entry;
+            memset(&entry.bufDef, 0, sizeof(entry.bufDef));
+            entry.frameNumber = daemonFrame;
+            entry.timestampNs = timestampNs;
+            entry.receivedNs = receivedNs;
+            entry.bufIndex = uint8_t(imageIdx);
+            if (imageBuf != NULL) entry.bufDef = *imageBuf;
+            mZslRingEntries.push_back(entry);
+            retained = true;
+            const uint8_t *ringData = (const uint8_t *)entry.bufDef.buffer;
+            const size_t ringLen = entry.bufDef.frame_len;
+            if (ringData != NULL && ringLen > 4096) {
+                LOGI("ZSLRING sample frame=%u bufIdx=%u flags=%x "
+                        "Y0=%u Ymid=%u Yend=%u U0=%u V0=%u",
+                        daemonFrame, entry.bufIndex, entry.bufDef.flags,
+                        ringData[0], ringData[ringLen / 2],
+                        ringData[ringLen - 1],
+                        ringData[(ringLen * 2) / 3], ringData[(ringLen * 2) / 3 + 1]);
+            }
+            dumpRingSnapshot(&entry.bufDef, daemonFrame,
+                    int32_t(mYuvWidth), int32_t(mYuvHeight));
+            LOGI("ZSLRING entry frame=%u ts=%lld entries=%zu",
+                    daemonFrame, (long long)timestampNs, mZslRingEntries.size());
+            if (mRingYuvChannel == NULL) {
+                requestZslRingFrameLocked();
+            }
+        } else if (mZslRingActive && !mZslRingDraining && !mZslRingDisabled) {
+            if (mRingYuvChannel == NULL) {
+                requestZslRingFrameLocked();
+            }
+        }
+        if ((mZslRingStats.received % 30) == 0 && mZslRingStats.received != 0) {
+            logZslRingStatsLocked(false);
+        }
+    }
+
+    if (!retained && imageBuf != NULL) {
+        if (mRingYuvChannel != NULL) {
+            mRingYuvChannel->bufDone(imageIdx);
+        } else {
+            for (uint32_t si = 0; si < m_numStreams; ++si) {
+                if (mStreams[si] != NULL &&
+                        mStreams[si]->getMyServerID() == imageBuf->stream_id) {
+                    mStreams[si]->bufDone(imageIdx);
+                    break;
+                }
+            }
+        }
+    }
+    if (metaIdx >= 0 && m_pMetaChannel != NULL) {
+        mm_camera_super_buf_t metaBuf = {};
+        metaBuf.num_bufs = 1;
+        metaBuf.bufs[0] = recvd_frame->bufs[metaIdx];
+        metaBuf.ch_id = m_pMetaChannel->getMyHandle();
+        m_pMetaChannel->bufDone(&metaBuf);
+    }
+}
+
+/*===========================================================================
+ * FUNCTION   : stopZslRing
+ *
+ * DESCRIPTION: Drain the M1 ring PoC and log final statistics. Called on the
+ *              first still request (ordinary capture must not regress) and on
+ *              channel stop/flush.
+ *==========================================================================*/
+void QCamera3PicChannel::stopZslRing(const char *reason)
+{
+    bool started = false;
+    uint32_t held = 0;
+    uint32_t inFlight = 0;
+    {
+        Mutex::Autolock lock(mZslRingLock);
+        if (!mZslRingActive && !mZslRingDraining) return;
+        started = true;
+        mZslRingActive = false;
+        mZslRingDraining = true;
+        held = uint32_t(mZslRingEntries.size());
+        inFlight = mZslRingInFlight;
+        mZslRingInFlight = 0;
+        mZslRingAwaitFrame = 0;
+        mZslRingLastRequestNs = 0;
+        for (List<ZslRingEntry>::iterator it = mZslRingEntries.begin();
+                it != mZslRingEntries.end(); ++it) {
+            if (mStreams[0] != NULL) mStreams[0]->bufDone(it->bufIndex);
+        }
+        mZslRingEntries.clear();
+        LOGI("ZSLRING drain held=%u inFlight=%u entries=%zu reason=%s",
+                held, inFlight, mZslRingEntries.size(),
+                reason != NULL ? reason : "unknown");
+        logZslRingStatsLocked(false);
+    }
+    if (started) {
+        /* There is no HAL-side cancel for request_super_buf, but the daemon
+         * interface has one; without it a stalled ring request survives a
+         * session reconfigure and blocks the next session's snapshot stream. */
+        const int32_t cancelRc = m_camOps->cancel_super_buf_request(
+                m_camHandle, m_handle);
+        ++mZslRingCancelCount;
+        LOGI("ZSLRING cancel request rc=%d count=%u held=%u inFlight=%u",
+                cancelRc, mZslRingCancelCount, held, inFlight);
+        mZslRingDraining = false;
+        logZslRingStatsLocked(true);
+        LOGI("ZSLRING stopped reason=%s", reason != NULL ? reason : "unknown");
+    }
+}
+
+bool QCamera3PicChannel::isZslRingActive()
+{
+    Mutex::Autolock lock(mZslRingLock);
+    return mZslRingActive && !mZslRingDisabled;
+}
+
+bool QCamera3PicChannel::shouldStartZslRing()
+{
+    Mutex::Autolock lock(mZslRingLock);
+    return !mZslRingActive && !mZslRingDraining && !mZslRingDisabled;
+}
+
+void QCamera3PicChannel::resumeZslRingAfterLive(uint32_t frameNumber)
+{
+    bool resume = false;
+    {
+        Mutex::Autolock lock(mZslRingLock);
+        if (mRingZslResumeAfterLive && mRingZslResumeFrame == frameNumber) {
+            resume = true;
+            mRingZslResumeAfterLive = false;
+            mRingZslResumeFrame = 0;
+        }
+    }
+    if (!resume) return;
+    LOGI("ZSLRING restart after live capture request=%u", frameNumber);
+    startZslRing();
+}
+
+bool QCamera3PicChannel::hasZslRingFrame()
+{
+    Mutex::Autolock lock(mZslRingLock);
+    return mZslRingActive && !mZslRingDisabled && !mZslRingEntries.empty();
+}
+
+/*===========================================================================
+ * FUNCTION   : deliverRingZslFrame
+ *
+ * DESCRIPTION: M2 standard-ZSL delivery. Pick the newest complete ring frame
+ *              with sensor timestamp <= the request time and queue it into the
+ *              existing JPEG postprocessor for the request frame number. The
+ *              pseudo-ZSL deferred request is skipped; result metadata timestamp
+ *              is overridden by HWI from noteZslRingSelection().
+ *
+ * RETURN     : true when a ring frame was queued (JPEG will be delivered by the
+ *              normal jpegEvtHandle path); false to fall back to live capture.
+ *==========================================================================*/
+bool QCamera3PicChannel::deliverRingZslFrame(uint32_t frameNumber)
+{
+    ZslRingEntry selected;
+    memset(&selected, 0, sizeof(selected));
+    bool found = false;
+    const int32_t maxAgeMs = oppoZslRingMaxAgeMs();
+    const int64_t nowNs = systemTime(SYSTEM_TIME_BOOTTIME);
+    size_t ringSize = 0;
+    {
+        Mutex::Autolock lock(mZslRingLock);
+        if (!mZslRingActive) {
+            LOGI("ZSLRING select request=%u skipped: ring inactive", frameNumber);
+            return false;
+        }
+        std::vector<QCamera3ZslRingPolicy::Frame> frames;
+        frames.reserve(mZslRingEntries.size());
+        int64_t latestSensorNs = 0;
+        int64_t latestReceivedNs = 0;
+        for (List<ZslRingEntry>::iterator it = mZslRingEntries.begin();
+                it != mZslRingEntries.end(); ++it) {
+            QCamera3ZslRingPolicy::Frame frame;
+            frame.frameNumber = it->frameNumber;
+            frame.timestampNs = it->timestampNs;
+            frame.receivedNs = it->receivedNs;
+            frame.bufIndex = it->bufIndex;
+            frame.inUse = false;
+            frames.push_back(frame);
+            if (it->receivedNs >= latestReceivedNs) {
+                latestReceivedNs = it->receivedNs;
+                latestSensorNs = it->timestampNs;
+            }
+        }
+        ringSize = frames.size();
+        /* Map the HAL clock "now" into the sensor timestamp domain through the
+         * most recent ring frame. Sensor timestamps and HAL clocks can have a
+         * different time base (observed after session restart: every frame was
+         * judged too_old by comparing raw values). Selection age itself uses
+         * receivedNs, which is always in the HAL clock domain. */
+        int64_t requestSensorNs = nowNs;
+        if (latestReceivedNs > 0) {
+            requestSensorNs = latestSensorNs + (nowNs - latestReceivedNs);
+        }
+        LOGI("ZSLRING select-times requestSensor=%lld now=%lld"
+                " ringLatestSensor=%lld ringLatestReceived=%lld ring=%zu",
+                (long long)requestSensorNs, (long long)nowNs,
+                (long long)latestSensorNs, (long long)latestReceivedNs, ringSize);
+        const QCamera3ZslRingPolicy::Selection selection =
+                QCamera3ZslRingPolicy::select(frames, requestSensorNs, nowNs, maxAgeMs);
+        if (!selection.selected) {
+            LOGI("ZSLRING select request=%u failed reason=%s ring=%zu maxAge=%d",
+                    frameNumber, QCamera3ZslRingPolicy::reasonName(selection.reason),
+                    ringSize, maxAgeMs);
+            return false;
+        }
+        for (List<ZslRingEntry>::iterator it = mZslRingEntries.begin();
+                it != mZslRingEntries.end(); ++it) {
+            if (it->frameNumber == selection.frame.frameNumber &&
+                    it->timestampNs == selection.frame.timestampNs &&
+                    it->bufIndex == selection.frame.bufIndex) {
+                selected = *it;
+                mZslRingEntries.erase(it);
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+        ZslRingBorrowed borrowed;
+        borrowed.frameNumber = frameNumber;
+        borrowed.bufIndex = selected.bufIndex;
+        mRingZslBorrowed.push_back(borrowed);
+    }
+
+    if (snapshotSampleIsZero(&selected.bufDef)) {
+        LOGE("ZSLRING select zero source request=%u source=%u",
+                frameNumber, selected.frameNumber);
+        releaseRingZslBuffer(frameNumber);
+        return false;
+    }
+    ZslRingFrameBlock *block = (ZslRingFrameBlock *)calloc(1, sizeof(*block));
+    if (block == NULL) {
+        releaseRingZslBuffer(frameNumber);
+        return false;
+    }
+    block->bufDef = selected.bufDef;
+    block->super.num_bufs = 1;
+    block->super.bufs[0] = &block->bufDef;
+    block->super.ch_id = 0;  // not a reprocess channel; PostProc frees the block
+
+    QCamera3HardwareInterface *hal_obj = (QCamera3HardwareInterface *)mUserData;
+    const int64_t ageMs = (nowNs - selected.timestampNs) / 1000000LL;
+    LOGI("ZSLRING select request=%u source=%u ts=%lld ageMs=%lld maxAge=%d ring=%zu",
+            frameNumber, selected.frameNumber, (long long)selected.timestampNs,
+            (long long)ageMs, maxAgeMs, ringSize);
+    if (hal_obj != NULL) {
+        hal_obj->noteZslRingSelection(frameNumber, selected.frameNumber,
+                selected.timestampNs);
+    }
+    const int32_t rc = m_postprocessor.processData(&block->super, NULL, frameNumber);
+    if (rc == NO_ERROR) {
+        LOGI("ZSLRING deliver queued request=%u source=%u", frameNumber,
+                selected.frameNumber);
+    }
+    if (rc != NO_ERROR) {
+        LOGW("ZSLRING processData failed request=%u rc=%d", frameNumber, rc);
+        if (hal_obj != NULL) hal_obj->clearZslRingSelection(frameNumber);
+        releaseRingZslBuffer(frameNumber);
+        free(block);
+        return false;
+    }
+    return true;
+}
+
+void QCamera3PicChannel::handleRingYuvBuf(mm_camera_buf_def_t *buf)
+{
+    if (buf == NULL) return;
+    mm_camera_super_buf_t super = {};
+    super.num_bufs = 1;
+    super.bufs[0] = buf;
+    super.ch_id = 0;
+    handleZslRingSuperBuf(&super);
+}
+
+void QCamera3PicChannel::releaseRingZslBuffer(uint32_t frameNumber)
+{
+    Mutex::Autolock lock(mZslRingLock);
+    for (List<ZslRingBorrowed>::iterator it = mRingZslBorrowed.begin();
+            it != mRingZslBorrowed.end(); ++it) {
+        if (it->frameNumber == frameNumber) {
+            if (mRingYuvChannel != NULL) {
+                mRingYuvChannel->bufDone(it->bufIndex);
+            } else if (mStreams[0] != NULL) {
+                mStreams[0]->bufDone(it->bufIndex);
+            }
+            LOGI("ZSLRING buffer returned request=%u bufIdx=%u", frameNumber,
+                    (unsigned)it->bufIndex);
+            mRingZslBorrowed.erase(it);
+            return;
+        }
+    }
+}
+
+bool QCamera3PicChannel::consumeRingZslFallback()
+{
+    bool fallback = mRingZslFallbackPending;
+    mRingZslFallbackPending = false;
+    return fallback;
+}
+
+
+bool QCamera3PicChannel::deliverPreviewJpegFrame(uint32_t frameNumber)
+{
+    int32_t srcW = 0;
+    int32_t srcH = 0;
+    int64_t srcTs = 0;
+    uint8_t *srcData = NULL;
+    size_t srcLen = 0;
+    if (!oppoPreviewFrameCacheGet(srcW, srcH, srcTs, srcData, srcLen)) {
+        LOGE("ZSLPREVIEW no cached preview frame request=%u", frameNumber);
+        return false;
+    }
+    if (srcW <= 0 || srcH <= 0 || srcLen == 0) {
+        free(srcData);
+        return false;
+    }
+    /* Preview YUV is the only daemon-filled still source on this target; encode
+     * it at native resolution and mark the result as explicitly downgraded. */
+    ZslRingFrameBlock *block = (ZslRingFrameBlock *)calloc(1,
+            sizeof(ZslRingFrameBlock) + srcLen);
+    if (block == NULL) {
+        free(srcData);
+        return false;
+    }
+    uint8_t *ownedData = (uint8_t *)(block + 1);
+    memcpy(ownedData, srcData, srcLen);
+    free(srcData);
+    memset(&block->bufDef, 0, sizeof(block->bufDef));
+    block->bufDef.buffer = ownedData;
+    block->bufDef.frame_len = srcLen;
+    block->bufDef.frame_idx = frameNumber;
+    block->bufDef.buf_idx = CAM_FREERUN_IDX;
+    block->bufDef.stream_type = CAM_STREAM_TYPE_SNAPSHOT;
+    block->super.num_bufs = 1;
+    block->super.bufs[0] = &block->bufDef;
+    block->super.ch_id = 0;
+    const int32_t rc = m_postprocessor.processData(&block->super, NULL, frameNumber);
+    if (rc != NO_ERROR) {
+        free(srcData);
+        free(block);
+        LOGE("ZSLPREVIEW processData failed request=%u rc=%d", frameNumber, rc);
+        return false;
+    }
+    QCamera3HardwareInterface *hal_obj = (QCamera3HardwareInterface *)mUserData;
+    if (hal_obj != NULL) {
+        hal_obj->noteZslRingSelection(frameNumber, 0, srcTs);
+    }
+    LOGI("ZSLPREVIEW queued request=%u src=%dx%d len=%zu ts=%lld",
+            frameNumber, srcW, srcH, srcLen, (long long)srcTs);
+    LOGI("ZSLPREVIEW processData rc=%d request=%u", rc, frameNumber);
+    return true;
 }
 
 /*===========================================================================
@@ -5630,6 +6337,7 @@ int32_t QCamera3PicChannel::start()
 
 int32_t QCamera3PicChannel::stop()
 {
+    stopZslRing("channel_stop");
     m_postprocessor.abortHdrCapture();
     int32_t rc = NO_ERROR;
 
@@ -6028,6 +6736,34 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
     int32_t rc = NO_ERROR;
     QCamera3HardwareInterface* hal_obj = (QCamera3HardwareInterface*)mUserData;
 
+    /* M2: a ring-selected standard-ZSL request keeps the ring alive and skips
+     * the pseudo-ZSL deferred request. Any other request first drains/stops the
+     * ring so the existing capture paths keep their buffers (regression-safe). */
+    const bool ringZslRequest = mRingZslPending;
+    const bool previewJpegRequest = mPreviewJpegPending;
+    const bool ringZslSkip = mRingZslSkipPending;
+    mRingZslPending = false;
+    mPreviewJpegPending = false;
+    mRingZslSkipPending = false;
+    mRingZslDispatch = ringZslRequest || previewJpegRequest;
+    mPreviewJpegDispatch = previewJpegRequest;
+    if (ringZslSkip && (mZslRingActive || mZslRingDraining)) {
+        /* Warmup live capture must not share the snapshot stream with an
+         * outstanding ring request: cancel/drain the ring, deliver live, then
+         * restart the ring after the JPEG callback. */
+        stopZslRing("ring_warmup_skip");
+        mRingZslResumeAfterLive = true;
+        mRingZslResumeFrame = frameNumber;
+        LOGI("ZSLRING warmup live request=%u (ring paused, restart after jpeg)",
+                frameNumber);
+    } else if (!ringZslRequest && !ringZslSkip &&
+            (mZslRingActive || mZslRingDraining)) {
+        /* Non-ring capture: cancel/drain the ring so the live owner has the
+         * snapshot stream; the next standard still lazily starts it again. */
+        stopZslRing("non_ring_capture");
+        LOGI("ZSLRING stopped for non-ring capture request=%u", frameNumber);
+    }
+
     reprocess_config_t reproc_cfg;
     cam_dimension_t dim;
     memset(&reproc_cfg, 0, sizeof(reprocess_config_t));
@@ -6035,6 +6771,14 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
     //and recalculate the plane info
     dim.width = (int32_t)mYuvWidth;
     dim.height = (int32_t)mYuvHeight;
+    if (previewJpegRequest) {
+        int32_t previewW = 0, previewH = 0;
+        if (oppoPreviewFrameCacheSize(previewW, previewH)) {
+            dim.width = previewW;
+            dim.height = previewH;
+            LOGI("ZSLPREVIEW reproc dim=%dx%d (preview source)", dim.width, dim.height);
+        }
+    }
 
     if (hal_obj->m_bInSensorQCFA && hal_obj->m_bQuadraCfaRequest) {
         dim = hal_obj->getQuadraCfaDim();
@@ -6232,6 +6976,7 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
         } else {
             LOGD("Internal request @ Picchannel");
         }
+        mRingZslDispatch = false;
 
         if (hal_obj->m_bMultiRawRequest) {
             LOGH("nothing needed here for multi raw capture");
@@ -6265,6 +7010,33 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
             memcpy(super_buf, &(pChannel->capture_frame), sizeof(mm_camera_super_buf_t));
             m_postprocessor.processData(super_buf, NULL, frameNumber);
         } else if ((pInputBuffer == NULL) && m_bZSL) {
+            if (ringZslRequest) {
+                if (deliverRingZslFrame(frameNumber)) {
+                    mRingZslSelectFailures = 0;
+                    indexUsed = CAM_FREERUN_IDX;
+                    return rc;
+                }
+                ++mRingZslSelectFailures;
+                LOGI("ZSLRING fallback live capture request=%u failures=%u (ring kept)",
+                        frameNumber, mRingZslSelectFailures);
+                if (mRingZslSelectFailures >= 3) {
+                    Mutex::Autolock lock(mZslRingLock);
+                    mZslRingDisabled = true;
+                    LOGI("ZSLRING disabled after %u consecutive fallbacks",
+                            mRingZslSelectFailures);
+                } else {
+                    stopZslRing("ring_select_fallback");
+                    mRingZslResumeAfterLive = true;
+                    mRingZslResumeFrame = frameNumber;
+                    LOGI("ZSLRING fallback live request=%u (ring restart after jpeg)",
+                            frameNumber);
+                }
+                mRingZslFallbackPending = true;
+                mRingZslFallbackFrame = frameNumber;
+                if (hal_obj != NULL) {
+                    hal_obj->clearZslRingRequest(frameNumber);
+                }
+            }
             QCamera3ProcessingChannel *zslChannel = (QCamera3ProcessingChannel *)this;
             uint32_t handle = zslChannel->getMyHandle();
             if(IS_VALID_PTR(mSourceZSLChannel))
@@ -6283,6 +7055,9 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
                 zslChannel->mReqFrameNumList.push_back(req);
             }
 
+            /* HAL1-style: make sure a snapshot buffer with this frame number is
+             * queued before asking the daemon for the matching super buffer. */
+            queueZslSnapshotBuffer(frameNumber);
             if (isZSL) {
                 zslChannel->requestZSLBuf(m_camHandle, handle);
             } else {
@@ -6311,6 +7086,11 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
                 mYuvMemory->markFrameNumber(bufIdx, frameNumber);
             }
             mStreams[0]->bufDone(bufIdx);
+            LOGI("ZSLSNAP plain qbuf frame=%u idx=%u", frameNumber, bufIdx);
+            /* HAL1 order: snapshot buffer queued first, then request_super_buf on
+             * the same (preview+snapshot) daemon channel. */
+            const int32_t plainRc = requestZSLBuf(m_camHandle, m_handle, frameNumber);
+            LOGI("plain snapshot request frame=%u rc=%d", frameNumber, plainRc);
             indexUsed = bufIdx;
         } else {
             qcamera_fwk_input_pp_data_t *src_frame = NULL;
@@ -6389,6 +7169,8 @@ int32_t QCamera3PicChannel::requestZSLBuf(uint32_t camera_handle,
         }
     }
 
+    LOGI("ZSL request cam=%x rawCh=%x frame=%u num=%u",
+            cam_handle, channel_handle, frameNumber, numBuf);
     mm_camera_req_buf_t buf;
     memset(&buf, 0x0, sizeof(buf));
     buf.type = MM_CAMERA_REQ_SUPER_BUF;
@@ -6466,6 +7248,12 @@ int32_t QCamera3PicChannel::waitForSnapshotBuffer()
 
 void QCamera3PicChannel::freeBufferForFrame(mm_camera_super_buf_t *frame)
 {
+    if (frame != NULL && frame->bufs[0] != NULL &&
+            frame->bufs[0]->buf_idx == CAM_FREERUN_IDX) {
+        /* Preview YUV fallback owns a heap block released by PostProc; there is
+         * no daemon stream buffer to return. */
+        return;
+    }
     Mutex::Autolock lock(mFreeBuffersLock);
     LOGD(" Freeing the Buffer %d", frame->bufs[0]->buf_idx);
     if (m_bZSL) {
@@ -6571,9 +7359,16 @@ void QCamera3PicChannel::streamCbRoutine(mm_camera_super_buf_t *super_frame,
     stream->getFrameOffset(offset);
     dumpYUV(frame->bufs[0], dim, offset, QCAMERA_DUMP_FRM_INPUT_REPROCESS);
 
-    if (IS_BUFFER_ERROR(super_frame->bufs[0]->flags)) {
+    const bool zeroSource = snapshotSampleIsZero(super_frame->bufs[0]);
+    if (IS_BUFFER_ERROR(super_frame->bufs[0]->flags) || zeroSource) {
+        LOGE("snapshot buffer invalid: errFlag=%d zeroSource=%d frame=%d",
+                IS_BUFFER_ERROR(super_frame->bufs[0]->flags) ? 1 : 0,
+                zeroSource ? 1 : 0, mYuvMemory->getFrameNumber(frameIndex));
         mChannelCbBufErr(this, mYuvMemory->getFrameNumber(frameIndex),
                 CAMERA3_BUFFER_STATUS_ERROR, mUserData);
+        freeBufferForFrame(super_frame);
+        free(super_frame);
+        return;
     }
     int32_t frameNum = ((IS_VALID_PTR(mSourceZSLChannel))?
                              mSourceZSLChannel->getFrameNumber(frameIndex):
@@ -6774,12 +7569,23 @@ int32_t QCamera3PicChannel::queueJpegSetting(uint32_t index, uint32_t frame_numb
     }
 
     settings->is_dim_valid = false;
-    if((hal_obj->isVerifiedPairedSession() || hal_obj->getHalPPType() == CAM_HAL_PP_TYPE_BOKEH) &&
+    if (!mPreviewJpegDispatch &&
+            (hal_obj->isVerifiedPairedSession() || hal_obj->getHalPPType() == CAM_HAL_PP_TYPE_BOKEH) &&
                         (imagetype != CAM_HAL3_JPEG_TYPE_DEPTH))
     {
         settings->output_dim.width = mCamera3Stream->width;
         settings->output_dim.height = mCamera3Stream->height;
         settings->is_dim_valid = true;
+    }
+    if (mPreviewJpegDispatch) {
+        int32_t previewW = 0, previewH = 0;
+        if (oppoPreviewFrameCacheSize(previewW, previewH)) {
+            settings->output_dim.width = previewW;
+            settings->output_dim.height = previewH;
+            settings->is_dim_valid = true;
+        }
+        LOGI("ZSLPREVIEW jpeg_settings frame=%u out_dim=%dx%d",
+                frame_number, settings->output_dim.width, settings->output_dim.height);
     }
     if (hal_obj->isVerifiedPairedSession()) {
         // Crop in unrotated main-source coordinates; all four edges stay chroma-aligned.
@@ -6845,7 +7651,7 @@ int32_t QCamera3PicChannel::queueJpegSetting(uint32_t index, uint32_t frame_numb
      * is what actually returns a JPEG on this daemon). The legacy native
      * frame-specific path keeps the normal delivery so it can still be A/B'd. */
     if (m_bZSL && (zslPastFrame || hal_obj->getNativeStillMode() == OPPO_NATIVE_OFF) &&
-            !hal_obj->m_bQuadraCfaRequest && !m_bSkipConfig) {
+            !mRingZslDispatch && !hal_obj->m_bQuadraCfaRequest && !m_bSkipConfig) {
         settings->zsl_snapshot = true;
     }
     if (hal_obj->m_bMultiRawRequest) {
@@ -7151,8 +7957,107 @@ static bool oppoHalZslChannelDropBypassEnabled()
     return atoi(prop) != 0;
 }
 
+void QCamera3PicChannel::checkZslRingStall(int64_t nowNs)
+{
+    bool cancel = false;
+    uint32_t inFlight = 0;
+    size_t held = 0;
+    int64_t stalledMs = 0;
+    {
+        Mutex::Autolock lock(mZslRingLock);
+        if (mZslRingActive && !mZslRingDisabled && mZslRingInFlight > 0 &&
+                mZslRingLastRequestNs > 0 &&
+                nowNs > mZslRingLastRequestNs + 500000000LL) {
+            cancel = true;
+            inFlight = mZslRingInFlight;
+            held = mZslRingEntries.size();
+            stalledMs = (nowNs - mZslRingLastRequestNs) / 1000000LL;
+            mZslRingInFlight = 0;
+            mZslRingAwaitFrame = 0;
+            mZslRingLastRequestNs = 0;
+        }
+    }
+    if (!cancel) return;
+    ++mZslRingCancelCount;
+    LOGW("ZSLRING stall: inFlight=%u held=%zu no cb for %lldms, cancel+retry count=%u "
+            "streamHandle=%u streamActive=%d",
+            inFlight, held, (long long)stalledMs, mZslRingCancelCount,
+            (m_numStreams > 0 && mStreams[0] != NULL) ? mStreams[0]->getMyHandle() : 0,
+            m_bIsActive ? 1 : 0);
+    const int32_t rc = m_camOps->cancel_super_buf_request(m_camHandle, m_handle);
+    LOGI("ZSLRING stall cancel rc=%d", rc);
+    Mutex::Autolock lock(mZslRingLock);
+    if (mZslRingActive && !mZslRingDisabled) {
+        requestZslRingFrameLocked();
+    }
+}
+
+bool QCamera3PicChannel::isPendingCaptureFrame(uint32_t frameNumber)
+{
+    Mutex::Autolock lock(mReqFrameListLock);
+    for (List<zsl_req_t>::iterator it = mReqFrameNumList.begin();
+            it != mReqFrameNumList.end(); ++it) {
+        if (it->frameNum == frameNumber) return true;
+    }
+    return false;
+}
+
 void QCamera3PicChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
 {
+    for (uint32_t d = 0; d < recvd_frame->num_bufs; ++d) {
+        if (recvd_frame->bufs[d] != NULL) {
+            LOGI("ZSL cb buf[%u] type=%d idx=%d frame_idx=%d flags=%x "
+                    "len=%zu stream_id=0x%x",
+                    d, recvd_frame->bufs[d]->stream_type,
+                    recvd_frame->bufs[d]->buf_idx,
+                    recvd_frame->bufs[d]->frame_idx,
+                    recvd_frame->bufs[d]->flags,
+                    recvd_frame->bufs[d]->frame_len,
+                    recvd_frame->bufs[d]->stream_id);
+        }
+    }
+    /* M1 ring PoC: consume the ring's own super buffers before the capture
+     * request FIFO so the existing pseudo-ZSL delivery path is untouched. */
+    {
+        /* The ring and a pseudo-ZSL capture can both have a super-buffer request
+         * outstanding on the same snapshot stream. Route by the metadata frame
+         * number: only the frame the ring actually requested is ring data; a
+         * concurrent capture frame must go to the capture FIFO below. */
+        uint32_t cbFrameNumber = UINT32_MAX;
+        for (uint32_t i = 0; i < recvd_frame->num_bufs; ++i) {
+            if (recvd_frame->bufs[i] != NULL &&
+                    recvd_frame->bufs[i]->stream_type == CAM_STREAM_TYPE_METADATA) {
+                metadata_buffer_t *metadata =
+                        (metadata_buffer_t *)recvd_frame->bufs[i]->buffer;
+                if (metadata != NULL) {
+                    IF_META_AVAILABLE(uint32_t, pFrame, CAM_INTF_META_FRAME_NUMBER, metadata) {
+                        cbFrameNumber = *pFrame;
+                    }
+                }
+            }
+        }
+        bool consumeRing = false;
+        const bool pendingCapture = (cbFrameNumber != UINT32_MAX) &&
+                isPendingCaptureFrame(cbFrameNumber);
+        {
+            Mutex::Autolock lock(mZslRingLock);
+            if (mZslRingInFlight > 0 && (mZslRingActive || mZslRingDraining) &&
+                    (cbFrameNumber == UINT32_MAX || !pendingCapture)) {
+                --mZslRingInFlight;
+                mZslRingAwaitFrame = 0;
+                consumeRing = true;
+            }
+        }
+        if (cbFrameNumber != UINT32_MAX) {
+            LOGI("ZSLRING cb frame=%u await=%u pendingCapture=%d -> %s",
+                    cbFrameNumber, mZslRingAwaitFrame, pendingCapture ? 1 : 0,
+                    consumeRing ? "ring" : "capture");
+        }
+        if (consumeRing) {
+            handleZslRingSuperBuf(recvd_frame);
+            return;
+        }
+    }
 
     if(mAuxPicChannel) {
         if (recvd_frame->ch_id == mAuxPicChannel->getMyHandle()) {
@@ -7344,6 +8249,103 @@ void QCamera3PicChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
  *
  * RETURN     : none
  *==========================================================================*/
+QCamera3ZslRingChannel::QCamera3ZslRingChannel(uint32_t cam_handle,
+        uint32_t channel_handle,
+        mm_camera_ops_t *cam_ops,
+        void *userData,
+        camera3_stream_t *stream,
+        cam_stream_type_t stream_type,
+        cam_padding_info_t *paddingInfo,
+        uint32_t numBuffers,
+        QCamera3PicChannel *ringOwner) :
+            QCamera3Channel(cam_handle, channel_handle, cam_ops, NULL, NULL,
+                    paddingInfo, CAM_QCOM_FEATURE_NONE, userData, numBuffers),
+            mRingMemory(NULL),
+            mRingNumBuffers(numBuffers),
+            mRingOwner(ringOwner),
+            mRingStreamType(stream_type),
+            mRingFormat(CAM_FORMAT_YUV_420_NV12),
+            mRingCamera3Stream(stream)
+{
+}
+
+QCamera3ZslRingChannel::~QCamera3ZslRingChannel()
+{
+    if (mRingMemory != NULL) {
+        delete mRingMemory;
+        mRingMemory = NULL;
+    }
+}
+
+int32_t QCamera3ZslRingChannel::initialize(cam_is_type_t isType)
+{
+    if (m_numStreams >= 1) {
+        return NO_ERROR;
+    }
+    if (mRingCamera3Stream == NULL) {
+        LOGE("ring YUV stream is not set");
+        return -EINVAL;
+    }
+    mRingStreamType = CAM_STREAM_TYPE_CALLBACK;
+    mRingFormat = CAM_FORMAT_YUV_420_NV21;
+    const cam_dimension_t dim = {int32_t(mRingCamera3Stream->width),
+            int32_t(mRingCamera3Stream->height)};
+    return addStream(mRingStreamType, mRingFormat, dim, ROTATE_0,
+            uint8_t(mRingNumBuffers), CAM_QCOM_FEATURE_NONE, isType, true, false);
+}
+
+QCamera3StreamMem *QCamera3ZslRingChannel::getStreamBufs(uint32_t len)
+{
+    if (mRingMemory != NULL) {
+        return mRingMemory;
+    }
+    mRingMemory = new QCamera3StreamMem(mRingNumBuffers, true, isSecureMode());
+    if (mRingMemory == NULL) {
+        return NULL;
+    }
+    if (mRingMemory->allocateAll((size_t)len) != NO_ERROR) {
+        delete mRingMemory;
+        mRingMemory = NULL;
+        return NULL;
+    }
+    return mRingMemory;
+}
+
+void QCamera3ZslRingChannel::putStreamBufs()
+{
+    if (mRingMemory != NULL) {
+        delete mRingMemory;
+        mRingMemory = NULL;
+    }
+}
+
+void QCamera3ZslRingChannel::streamCbRoutine(mm_camera_super_buf_t *super_frame,
+        QCamera3Stream *stream)
+{
+    if (super_frame == NULL || super_frame->num_bufs == 0 ||
+            super_frame->bufs[0] == NULL || stream == NULL) {
+        return;
+    }
+    mm_camera_buf_def_t *buf = super_frame->bufs[0];
+    if (IS_BUFFER_ERROR(buf->flags) || buf->frame_len == 0) {
+        stream->bufDone(buf->buf_idx);
+        return;
+    }
+    if (mRingOwner != NULL) {
+        mRingOwner->handleRingYuvBuf(buf);
+    } else {
+        stream->bufDone(buf->buf_idx);
+    }
+}
+
+int32_t QCamera3ZslRingChannel::bufDone(uint32_t bufferIndex)
+{
+    if (m_numStreams > 0 && mStreams[0] != NULL) {
+        return mStreams[0]->bufDone(bufferIndex);
+    }
+    return -EINVAL;
+}
+
 QCamera3ReprocessChannel::QCamera3ReprocessChannel(uint32_t cam_handle,
                                                  uint32_t channel_handle,
                                                  mm_camera_ops_t *cam_ops,

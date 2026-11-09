@@ -315,9 +315,11 @@ static bool oppoZslMasterEnabled()
  * the stock past-frame request for A/B. */
 static bool oppoStandardZslPastFrameAllowed()
 {
-    char prop[PROPERTY_VALUE_MAX];
-    property_get("persist.vendor.camera.oppo.zsl.standard_past_frame", prop, "0");
-    return atoi(prop) == 1;
+    /* Stock HAL1 ZSL semantics: the ZSL snapshot stream is kept alive with
+     * request_super_buf() and standard still captures take the latest retained
+     * past frame. The frame-specific request path does not align with this
+     * daemon's snapshot super-buffer matching and yields zero-filled sources. */
+    return true;
 }
 
 /* Explicit native stillMode (REAR_BEAUTY/DUAL_BOKEH/HDR...) captures are not part
@@ -356,6 +358,15 @@ static bool oppoHalZslDropBypassEnabled()
     char prop[PROPERTY_VALUE_MAX];
     property_get("persist.vendor.camera.oppo.zsl.halzsl_drop_bypass", prop, "1");
     return atoi(prop) != 0;
+}
+
+/* M1 ring PoC probe: fill a HAL-side full-size snapshot ring for statistics.
+ * Default 0 keeps every existing delivery path byte-for-byte. */
+static bool oppoZslRingEnabled()
+{
+    char prop[PROPERTY_VALUE_MAX];
+    property_get("persist.vendor.camera.oppo.zsl.ring", prop, "0");
+    return atoi(prop) == 1;
 }
 
 static int32_t oppoZslPropertyInt(const char *name, int32_t defaultValue)
@@ -1112,7 +1123,11 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
     // RAW also requires the Complete-RAW decision; erase-only.
     const bool raw = oppoRaw16Admitted(cameraId);
     const QCamera3RawCapability::Decision *rawDecision = oppoRawCapabilityDecision(cameraId);
-    const bool reprocess = oppoReprocessSupported(sensorCapability);
+    /* This daemon has no working standard reprocessing path: advertising
+     * PRIVATE/YUV_REPROCESSING makes CameraX switch to YUV-reprocessing ZSL,
+     * which this HAL cannot deliver (snapshot buffer errors, no JPEG). Keep the
+     * capabilities honest and let clients use normal JPEG capture. */
+    const bool reprocess = false;
     Vector<uint8_t> capabilities;
     capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE);
     if (manualSensor) capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR);
@@ -1120,10 +1135,6 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
     if (rawDecision != NULL && raw && rawDecision->completeRawCapability == 1)
         capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_RAW);
     if (logical) capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA);
-    if (reprocess) {
-        capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_PRIVATE_REPROCESSING);
-        capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_YUV_REPROCESSING);
-    }
     const uint8_t off = 0;
     Vector<uint8_t> controlModes;
     controlModes.add(ANDROID_CONTROL_MODE_AUTO);
@@ -2285,7 +2296,17 @@ QCamera3HardwareInterface::QCamera3HardwareInterface(uint32_t cameraId,
 {
     getLogLevel();
     m_halPPType = CAM_HAL_PP_TYPE_NONE;
-    mCommon.init(gCamCapability[cameraId]);
+    mZslRingYuvChannel = NULL;
+    mZslRingYuvStream = NULL;
+    mZslRingChannelHandle = 0;
+    mZslSnapshotModeStarted = false;
+    if (gCamCapability[cameraId] != NULL) {
+        mCommon.init(gCamCapability[cameraId]);
+        gCamCapability[cameraId]->version = CAM_HAL_V3;
+        gCamCapability[cameraId]->min_num_pp_bufs = 3;
+    } else {
+        LOGE("camera %u capability is NULL; refusing to init HAL object", cameraId);
+    }
     mCameraDevice.common.tag = HARDWARE_DEVICE_TAG;
 #ifdef USE_HAL_3_5
     mCameraDevice.common.version = CAMERA_DEVICE_API_VERSION_3_5;
@@ -2297,11 +2318,7 @@ QCamera3HardwareInterface::QCamera3HardwareInterface(uint32_t cameraId,
     mCameraDevice.common.close = close_camera_device;
     mCameraDevice.ops = &mCameraOps;
     mCameraDevice.priv = this;
-    gCamCapability[cameraId]->version = CAM_HAL_V3;
     mZSLChannel = NULL;
-    // TODO: hardcode for now until mctl add support for min_num_pp_bufs
-    //TBD - To see if this hardcoding is needed. Check by printing if this is filled by mctl to 3
-    gCamCapability[cameraId]->min_num_pp_bufs = 3;
     pthread_condattr_t mCondAttr;
 
     pthread_condattr_init(&mCondAttr);
@@ -2520,6 +2537,8 @@ QCamera3HardwareInterface::~QCamera3HardwareInterface()
         mPictureChannel->stopChannel();
     }
 
+    destroyZslRingYuvChannel();
+    stopZslSnapshotMode();
     if (mChannelHandle) {
         mCameraHandle->ops->stop_channel(mCameraHandle->camera_handle,
                 mChannelHandle);
@@ -3092,6 +3111,10 @@ int QCamera3HardwareInterface::initialize(
 
     LOGI("E :mCameraId = %d mState = %d", mCameraId, mState);
     pthread_mutex_lock(&mMutex);
+
+    if (mPictureChannel != NULL && oppoZslRingEnabled()) {
+        mPictureChannel->checkZslRingStall(systemTime(SYSTEM_TIME_BOOTTIME));
+    }
 
     // Validate current state
     switch (mState) {
@@ -5177,7 +5200,10 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                        {
                            char prop[PROPERTY_VALUE_MAX];
                            memset(prop, 0, sizeof(prop));
-                           property_get("persist.vendor.camera.halzsl.enable", prop, "");
+                           /* Transitional default: the plain snapshot channel does not deliver JPEG
+ * on this daemon yet (verified halzsl=0 failure); keep the working
+ * pseudo-ZSL channel until ring8 fixes plain delivery. 0=A/B/plain. */
+                           property_get("persist.vendor.camera.halzsl.enable", prop, "1");
                            if (strlen(prop) > 0) {
                                mHALZSL = (atoi(prop) == 1)?
                                               CAM_HAL3_ZSL_TYPE_SNAPSHOT:
@@ -5272,7 +5298,17 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                 {
                     mPictureChannel->setZSLMode(true);
                     mZSLChannel = mPictureChannel;
+                    if (oppoZslRingEnabled() &&
+                            mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT &&
+                            mZslRingYuvChannel == NULL) {
+                        const int32_t ringCreateRc = createZslRingYuvChannel();
+                        LOGI("ZSLRING YUV create(in configure loop) rc=%d channel=%p",
+                                ringCreateRc, mZslRingYuvChannel);
+                    }
                 }
+                LOGI("ZSLRING configure: HALZSL=%d picture=%p zslChannel=%p isZSL=%d",
+                        mHALZSL, mPictureChannel, mZSLChannel,
+                        mPictureChannel != NULL ? mPictureChannel->isZSLChannel() : -1);
             } else if (newStream->stream_type == CAMERA3_STREAM_INPUT) {
                 // One input lease stays acquired until every output completes.
                 newStream->max_buffers = 1;
@@ -5633,6 +5669,13 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
     mCurJpegMeta.clear();
     //Get min frame duration for this streams configuration
     deriveMinFrameDuration();
+
+    if (oppoZslRingEnabled() && mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT) {
+        int32_t ringRc = createZslRingYuvChannel();
+        if (ringRc != NO_ERROR) {
+            LOGW("ZSLRING YUV channel creation failed rc=%d", ringRc);
+        }
+    }
 
     if ((rc == NO_ERROR) && isDualCamera()) {
         bool syncCams = true;
@@ -6517,6 +6560,7 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
                      * above, so a genuine timeout must be reported explicitly
                      * here instead of relying on the channel error callback. */
                     if (missed.stream->format == HAL_PIXEL_FORMAT_BLOB &&
+                            !isZslRingRequest(req.frame_number) &&
                             QCamera3ZslPolicy::suppressPseudoZslJpegTransition(
                                     mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT,
                                     mOppoZslEnabled, true,
@@ -6647,6 +6691,7 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
         // OR check if instant AEC is enabled, then need to drop frames untill AEC is settled.
         bool dropFrame = false;
         const bool halZslDropBypass = oppoHalZslDropBypassEnabled();
+        const bool previewJpegFrame = isPreviewJpegRequest(i->frame_number);
         if (p_cam_frame_drop ||
                 (mInstantAEC || i->frame_number < mInstantAECSettledFrameNumber)) {
             /* Clear notify_msg structure */
@@ -6683,16 +6728,33 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
                                 mOppoZslEnabled,
                                 j->stream->format == HAL_PIXEL_FORMAT_BLOB,
                                 channel->isZSLChannel(), halZslDropBypass);
-                const bool expectedHalZslDrop = p_cam_frame_drop && dropFrame &&
-                        (mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT) &&
-                        (j->isZSL || pseudoZslJpegTransition) &&
-                        QCamera3ZslPolicy::suppressHalZslBlobDrop(
-                                j->stream->format == HAL_PIXEL_FORMAT_BLOB,
-                                channel->isZSLChannel(), halZslDropBypass);
+                const bool plainSnapshotJpeg =
+                        j->stream->format == HAL_PIXEL_FORMAT_BLOB &&
+                        !channel->isZSLChannel() &&
+                        channel->isSnapshotJpegChannel();
+                if (previewJpegFrame) {
+                    dropFrame = false;
+                }
+                const bool expectedHalZslDrop = !previewJpegFrame && p_cam_frame_drop && dropFrame &&
+                        halZslDropBypass &&
+                        (plainSnapshotJpeg ||
+                         ((mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT) &&
+                          (j->isZSL || pseudoZslJpegTransition ||
+                           isZslRingRequest(i->frame_number)) &&
+                          QCamera3ZslPolicy::suppressHalZslBlobDrop(
+                                  j->stream->format == HAL_PIXEL_FORMAT_BLOB,
+                                  channel->isZSLChannel(), halZslDropBypass)));
                 if (expectedHalZslDrop) {
-                    LOGI("HAL ZSL expected JPEG drop suppressed frame#=%u,"
-                            "streamID=%u isZSLCapture=%d halzsl=%d mCameraId: %d",
-                            i->frame_number, streamID, j->isZSL, mHALZSL, mCameraId);
+                    if (plainSnapshotJpeg) {
+                        LOGI("HAL plain snapshot JPEG drop suppressed"
+                                " frame#=%u streamID=%u isZSLCapture=%d"
+                                " halzsl=%d mCameraId: %d",
+                                i->frame_number, streamID, j->isZSL, mHALZSL, mCameraId);
+                    } else {
+                        LOGI("HAL ZSL expected JPEG drop suppressed frame#=%u,"
+                                "streamID=%u isZSLCapture=%d halzsl=%d mCameraId: %d",
+                                i->frame_number, streamID, j->isZSL, mHALZSL, mCameraId);
+                    }
                     continue;
                 }
                 if (dropFrame && !j->isZSL) {
@@ -6782,6 +6844,17 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
                 mPendingLiveRequest--;
             }
 
+            /* M2: result/shutter timestamp must be the selected ring source
+             * frame's actual exposure time, not the request's live frame. */
+            uint32_t ringSourceFrame = 0;
+            int64_t ringTimestamp = 0;
+            if (takeZslRingSelection(i->frame_number, ringSourceFrame, ringTimestamp)) {
+                LOGI("ZSLRING result frame=%u source=%u ts=%lld mCameraId: %d",
+                        i->frame_number, ringSourceFrame,
+                        (long long)ringTimestamp, mCameraId);
+                capture_time = ringTimestamp;
+            }
+
             if (capture_time == 0) {
                 LOGE("Invalid timestamp in metadata, send result error");
                 notifyError(i->frame_number, CAMERA3_MSG_ERROR_RESULT);
@@ -6816,7 +6889,14 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
                     internalPproc = true;
                     QCamera3ProcessingChannel *channel =
                        (QCamera3ProcessingChannel *)iter->stream->priv;
+                    if (isZslRingRequest(i->frame_number)) {
+                        LOGI("ZSLRING metadata queued request=%u", i->frame_number);
+                    }
                     channel->queueReprocMetadata(metadata_buf, i->frame_number, dropFrame);
+                    if (previewJpegFrame) {
+                        LOGI("ZSLPREVIEW metadata queued request=%u drop=%d",
+                                i->frame_number, dropFrame ? 1 : 0);
+                    }
                     if(p_is_metabuf_queued != NULL) {
                         *p_is_metabuf_queued = true;
                     }
@@ -6835,6 +6915,9 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
                 }
             }
 
+            if (previewJpegFrame) {
+                clearPreviewJpegRequest(i->frame_number);
+            }
             saveExifParams(metadata);
             if(IS_MULTI_CAMERA)
             {
@@ -7139,6 +7222,7 @@ void QCamera3HardwareInterface::handleBufferWithLock(
     ATRACE_CAMSCOPE_CALL(CAMSCOPE_HAL3_HANDLE_BUF_LKD);
 
     if (buffer->stream->format == HAL_PIXEL_FORMAT_BLOB) {
+        clearZslRingRequest(frame_number);
         if (m_bIsVideo && !m_bIs4KVideo) {
             m_bStopPicChannel = true;
         }
@@ -9839,6 +9923,22 @@ no_error:
         if (mZSLChannel != NULL) {
             mZSLChannel->startDeferredAllocation();
         }
+        /* M1 ring PoC: the normal stream-on path starts channels inline here,
+         * not via startAllChannels(); gate log is unconditional for field
+         * diagnosis (property-off sessions only emit this one line). */
+        const bool ringEnabled = oppoZslRingEnabled();
+        LOGI("ZSLRING gate: enabled=%d picture=%p isZSL=%d state=%d streamOnPending=%d",
+                ringEnabled ? 1 : 0,
+                mPictureChannel, mPictureChannel != NULL ? mPictureChannel->isZSLChannel() : -1,
+                mState, mStreamOnPending ? 1 : 0);
+        if (ringEnabled && mPictureChannel != NULL) {
+            LOGI("ZSLRING auto-start (halzsl=%d ringProp=%d)", mHALZSL, ringEnabled);
+            if (mZslRingYuvChannel != NULL && !mZslRingYuvChannel->isActive()) {
+                const int32_t ringStartRc = startZslRingChannel();
+                LOGI("ZSLRING YUV gate start rc=%d", ringStartRc);
+            }
+            mPictureChannel->startZslRing();
+        }
     }
     if ((mState == STARTED)&&(mStreamOnPending)){
 
@@ -10152,25 +10252,27 @@ no_error:
     if (request->input_buffer == NULL && !is_request_on_zsl &&
             (mZSLChannel != NULL) && (frameNumber % 2 == 0) &&
             (internallyRequestedStreams.size() == 0) && mZSLChannel->mAllocDone) {
-        streamsArray.stream_request[streamsArray.num_streams].streamID =
-            mZSLChannel->getStreamID(mZSLChannel->getStreamTypeMask());
-        streamsArray.stream_request[streamsArray.num_streams++].buf_index = CAM_FREERUN_IDX;
-        if(isDualCamera() && !IS_MULTI_CAMERA)
-        {
-            bool is_aux_needed = false;
-            if (IS_HAL_PP_TYPE_BOKEH
-                || (IS_YUV_ZSL
-                && getHalPPType() == CAM_HAL_PP_TYPE_SAT))
-            {
-                is_aux_needed = true;
-            }
-
-            if(is_aux_needed)
-            {
-                streamsArraySlave.stream_request[streamsArraySlave.num_streams].streamID =
-                    mZSLChannel->getStreamID(mZSLChannel->getStreamTypeMask());
-                streamsArraySlave.stream_request[streamsArraySlave.num_streams++].buf_index =
-                    CAM_FREERUN_IDX;
+        if (mPictureChannel != NULL && mPictureChannel->isZslRingActive()) {
+            /* ring4's snapshot stream stays filled only when the preview request
+             * itself carries the ZSL stream with CAM_FREERUN_IDX. jpegfix2
+             * replaced this with a direct request_super_buf keepalive, which the
+             * daemon answers with an error/placeholder snapshot buffer when the
+             * ring is active. Restore the stream request while keeping the ring
+             * request as the owner of its own super buffers. */
+            streamsArray.stream_request[streamsArray.num_streams].streamID =
+                mZSLChannel->getStreamID(mZSLChannel->getStreamTypeMask());
+            streamsArray.stream_request[streamsArray.num_streams++].buf_index =
+                CAM_FREERUN_IDX;
+            LOGI("ZSLRING keepalive stream request frame=%u streamID=0x%x",
+                    frameNumber,
+                    streamsArray.stream_request[streamsArray.num_streams - 1].streamID);
+        } else {
+            /* Non-ring pseudo-ZSL keep-alive: request the latest super buffer so
+             * the snapshot stream is not reported dropped every frame. */
+            const int32_t zslFillRc = mZSLChannel->requestZSLBuf(
+                    mCameraHandle->camera_handle, mZSLChannel->getMyHandle(), 0);
+            if (zslFillRc != NO_ERROR) {
+                LOGW("ZSL fill request failed rc=%d frame=%u", zslFillRc, frameNumber);
             }
         }
     }
@@ -10520,7 +10622,58 @@ no_error:
                     return rc;
                 }
             } else {
-                if (channel->isZSLChannel()) {
+                /* Always make sure the daemon ZSL snapshot mode is active before
+                 * the first BLOB request (camera restart / lens switch safety). */
+                startZslSnapshotMode();
+                /* M2 standard-ZSL: decide the ring dispatch BEFORE the pseudo-ZSL
+                 * needZSLCapture/frame-specific accounting, so ring requests never
+                 * enter the deferred-drop/timeout bookkeeping. */
+                bool ringDispatch = false;
+                if (mPictureChannel != NULL &&
+                        channel == mPictureChannel &&
+                        !m_bIsVideo && request->input_buffer == NULL &&
+                        request->settings != NULL && !m_bQuadraCfaRequest &&
+                        !m_bMultiRawRequest && !mFlashNeeded) {
+                    CameraMetadata ringSettings;
+                    ringSettings = request->settings;
+                    bool zslHint = false;
+                    if (ringSettings.exists(ANDROID_CONTROL_ENABLE_ZSL) &&
+                            ringSettings.find(ANDROID_CONTROL_ENABLE_ZSL).count == 1) {
+                        zslHint = ringSettings.find(ANDROID_CONTROL_ENABLE_ZSL).data.u8[0] != 0;
+                    }
+                    bool stillIntent = true;
+                    if (ringSettings.exists(ANDROID_CONTROL_CAPTURE_INTENT) &&
+                            ringSettings.find(ANDROID_CONTROL_CAPTURE_INTENT).count == 1) {
+                        stillIntent = ringSettings.find(ANDROID_CONTROL_CAPTURE_INTENT).data.u8[0] ==
+                                ANDROID_CONTROL_CAPTURE_INTENT_STILL_CAPTURE;
+                    }
+                    if (stillIntent && oppoNativeMode(ringSettings) == OPPO_NATIVE_OFF &&
+                            oppoZslRingEnabled()) {
+                        if (!mPictureChannel->isZslRingActive() &&
+                                mPictureChannel->shouldStartZslRing()) {
+                            LOGI("ZSLRING lazy start request=%u", frameNumber);
+                            mPictureChannel->startZslRing();
+                        }
+                        if (mPictureChannel->isZslRingActive() &&
+                                !mPictureChannel->hasZslRingFrame()) {
+                            /* Warmup: ring is still filling; deliver this one live
+                             * (the channel cancels the request and restarts the
+                             * ring after the JPEG callback). */
+                            mPictureChannel->prepareRingZslSkip();
+                            LOGI("ZSLRING skip (ring empty warmup) request=%u",
+                                    frameNumber);
+                        } else if (mPictureChannel->isZslRingActive()) {
+                            ringDispatch = true;
+                            isZSLCapture = false;
+                            pendingBufferIter->isZSL = false;
+                            mPictureChannel->prepareRingZslRequest();
+                            markZslRingRequest(frameNumber);
+                            LOGI("ZSLRING dispatch request=%u (still BLOB, zslHint=%d, pseudo bypassed)",
+                                    frameNumber, zslHint ? 1 : 0);
+                        }
+                    }
+                }
+                if (!ringDispatch && channel->isZSLChannel()) {
                     isZSLCapture = needZSLCapture(request, frameNumber, true);
                     if (!isZSLCapture && mOppoZslFailFrame == frameNumber) {
                         LOGE("vendor ZSL requested but not eligible and fallback disabled");
@@ -10529,8 +10682,8 @@ no_error:
                     }
                     pendingBufferIter->isZSL = isZSLCapture;
                 }
-                LOGD("snapshot request with buffer %p, frame_number %d isZSLCapture %d",
-                         output.buffer, frameNumber, isZSLCapture);
+                LOGD("snapshot request with buffer %p, frame_number %d isZSLCapture %d ringDispatch %d",
+                         output.buffer, frameNumber, isZSLCapture, ringDispatch);
                 if (m_bQuadraCfaRequest || m_bMultiRawRequest) {
                     LOGH("blob request for quadra cfa raw size");
                     rc = channel->request(output.buffer, frameNumber, NULL, m_params, indexUsed);
@@ -10550,8 +10703,21 @@ no_error:
                 }
                 if (rc < 0) {
                     LOGE("Fail to request on picture channel");
+                    if (ringDispatch) clearZslRingRequest(frameNumber);
                     pthread_mutex_unlock(&mMutex);
                     return rc;
+                }
+                if (ringDispatch) {
+                    if (mPictureChannel->consumeRingZslFallback()) {
+                        clearZslRingRequest(frameNumber);
+                        LOGI("ZSLRING fallback live request=%u (ring kept)", frameNumber);
+                    } else {
+                        /* Ring frame queued: request metadata is needed to pair
+                         * the ring YUV with PostProc and to queue the JPEG job. */
+                        pendingBufferIter->need_metadata = true;
+                        streams_need_metadata++;
+                        LOGI("ZSLRING metadata requested request=%u", frameNumber);
+                    }
                 }
 
                 uint32_t streamId = channel->getStreamID(channel->getStreamTypeMask());
@@ -11047,6 +11213,12 @@ void QCamera3HardwareInterface::dump(int fd)
  *==========================================================================*/
 int QCamera3HardwareInterface::flush(bool restartChannels)
 {
+    {
+        Mutex::Autolock lock(mZslRingSelectionLock);
+        mZslRingSelections.clear();
+        mZslRingRequestFrames.clear();
+        mPreviewJpegRequestFrames.clear();
+    }
     mPerfLockMgr.acquirePerfLock(PERF_LOCK_FLUSH, DEFAULT_PERF_LOCK_TIMEOUT_MS);
     KPI_ATRACE_CAMSCOPE_CALL(CAMSCOPE_HAL3_STOP_PREVIEW);
     int32_t rc = NO_ERROR;
@@ -15019,9 +15191,6 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
                       &partial_result_count,
                        1);
 
-    int32_t max_stall_duration = MAX_REPROCESS_STALL;
-    staticInfo.update(ANDROID_REPROCESS_MAX_CAPTURE_STALL, &max_stall_duration, 1);
-
     Vector<uint8_t> available_capabilities;
     available_capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE);
     available_capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR);
@@ -15030,8 +15199,6 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
     if (supportBurst) {
         available_capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_BURST_CAPTURE);
     }
-    available_capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_PRIVATE_REPROCESSING);
-    available_capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_YUV_REPROCESSING);
     if (gCamCapability[cameraId]->is_depth_sensor) {
         available_capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_DEPTH_OUTPUT);
     }
@@ -15064,19 +15231,6 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
 
     staticInfo.update(ANDROID_CONTROL_AWB_LOCK_AVAILABLE,
             &awbLockAvailable, 1);
-
-    int32_t max_input_streams = 1;
-    staticInfo.update(ANDROID_REQUEST_MAX_NUM_INPUT_STREAMS,
-                      &max_input_streams,
-                      1);
-
-    /* format of the map is : input format, num_output_formats, outputFormat1,..,outputFormatN */
-    int32_t io_format_map[] = {HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, 2,
-            HAL_PIXEL_FORMAT_BLOB, HAL_PIXEL_FORMAT_YCbCr_420_888,
-            HAL_PIXEL_FORMAT_YCbCr_420_888, 2, HAL_PIXEL_FORMAT_BLOB,
-            HAL_PIXEL_FORMAT_YCbCr_420_888};
-    staticInfo.update(ANDROID_SCALER_AVAILABLE_INPUT_OUTPUT_FORMATS_MAP,
-                      io_format_map, sizeof(io_format_map)/sizeof(io_format_map[0]));
 
     int32_t max_latency = ANDROID_SYNC_MAX_LATENCY_PER_FRAME_CONTROL;
     staticInfo.update(ANDROID_SYNC_MAX_LATENCY,
@@ -18254,10 +18408,15 @@ void QCamera3HardwareInterface::setBufferErrorStatus(QCamera3Channel* ch,
      * handleBufferWithLock report STATUS_ERROR and loses a good image. Real
      * encode failures arrive through jpegEvtHandle(result.status=ERROR); real
      * stalls are reported by the pending-buffer timeout below. */
-    if (mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT && !mOppoZslEnabled &&
-            oppoHalZslDropBypassEnabled() && ch != nullptr &&
-            ch->isSnapshotJpegChannel() && ch->isZSLChannel()) {
-        LOGI("HAL ZSL expected pseudo-ZSL JPEG buffer error suppressed"
+    if ((ch != nullptr && ch->isSnapshotJpegChannel()) ||
+            isZslRingRequest(frameNumber)) {
+        /* Snapshot/JPEG delivery is decided by jpegEvtHandle(result.status):
+         * the daemon may flag the intermediate snapshot buffer while PostProc
+         * still encodes a good JPEG (plain snapshot, pseudo-ZSL and ring all
+         * share this). Reporting early would lose the image twice. Real encode
+         * failures return result.status=ERROR and the pending timeout still
+         * fires for stalls. */
+        LOGI("snapshot JPEG buffer error deferred to jpeg result"
                 " frame#=%u mCameraId: %d", frameNumber, mCameraId);
         pthread_mutex_unlock(&mMutex);
         return;
@@ -18363,6 +18522,214 @@ const camera_metadata_t* QCamera3HardwareInterface::
 
     LOGD("X");
     return fwk_metadata;
+}
+
+uint32_t QCamera3HardwareInterface::allocZslRingFrameNumber()
+{
+    uint32_t internalFrameNumber = 0;
+    _orchestrationDb.generateStoreInternalFrameNumber(internalFrameNumber);
+    return internalFrameNumber;
+}
+
+void QCamera3HardwareInterface::noteZslRingSelection(uint32_t requestFrame,
+        uint32_t sourceFrame, int64_t timestampNs)
+{
+    Mutex::Autolock lock(mZslRingSelectionLock);
+    mZslRingSelections[requestFrame] = std::make_pair(sourceFrame, timestampNs);
+}
+
+void QCamera3HardwareInterface::clearZslRingSelection(uint32_t requestFrame)
+{
+    Mutex::Autolock lock(mZslRingSelectionLock);
+    mZslRingSelections.erase(requestFrame);
+}
+
+bool QCamera3HardwareInterface::takeZslRingSelection(uint32_t requestFrame,
+        uint32_t &sourceFrame, int64_t &timestampNs)
+{
+    Mutex::Autolock lock(mZslRingSelectionLock);
+    auto it = mZslRingSelections.find(requestFrame);
+    if (it == mZslRingSelections.end()) return false;
+    sourceFrame = it->second.first;
+    timestampNs = it->second.second;
+    mZslRingSelections.erase(it);
+    return true;
+}
+
+void QCamera3HardwareInterface::markZslRingRequest(uint32_t requestFrame)
+{
+    Mutex::Autolock lock(mZslRingSelectionLock);
+    mZslRingRequestFrames[requestFrame] = 1;
+}
+
+void QCamera3HardwareInterface::clearZslRingRequest(uint32_t requestFrame)
+{
+    Mutex::Autolock lock(mZslRingSelectionLock);
+    mZslRingRequestFrames.erase(requestFrame);
+    mZslRingSelections.erase(requestFrame);
+}
+
+bool QCamera3HardwareInterface::isZslRingRequest(uint32_t requestFrame)
+{
+    Mutex::Autolock lock(mZslRingSelectionLock);
+    return mZslRingRequestFrames.find(requestFrame) != mZslRingRequestFrames.end();
+}
+
+int32_t QCamera3HardwareInterface::createZslRingYuvChannel()
+{
+    if (mHALZSL != CAM_HAL3_ZSL_TYPE_SNAPSHOT || mPictureChannel == NULL) {
+        return NO_ERROR;
+    }
+    if (mZslRingYuvChannel != NULL) {
+        return NO_ERROR;
+    }
+    cam_dimension_t dim = {};
+    mPictureChannel->getStreamSize(dim);
+    if (dim.width <= 0 || dim.height <= 0) {
+        LOGW("ZSLRING YUV create skipped: no picture dimension");
+        return NO_ERROR;
+    }
+    camera3_stream_t *stream = (camera3_stream_t *)calloc(1, sizeof(*stream));
+    if (stream == NULL) return -ENOMEM;
+    stream->stream_type = CAMERA3_STREAM_OUTPUT;
+    stream->width = uint32_t(dim.width);
+    stream->height = uint32_t(dim.height);
+    stream->format = HAL_PIXEL_FORMAT_YCbCr_420_888;
+    stream->usage = GRALLOC_USAGE_HW_CAMERA_WRITE | GRALLOC_USAGE_SW_READ_OFTEN;
+    stream->max_buffers = 6;
+    stream->rotation = CAMERA3_STREAM_ROTATION_0;
+    stream->data_space = HAL_DATASPACE_UNKNOWN;
+    stream->priv = NULL;
+    cam_padding_info_t padding = gCamCapability[mCameraId]->padding_info;
+    /* The existing 0x700 channel already owns preview+JPEG streams; the daemon
+     * rejects a new 4608x3456 YUV stream there. Give the ring its own channel. */
+    mZslRingChannelHandle = mCameraHandle->ops->add_channel(
+            mCameraHandle->camera_handle, NULL, NULL, this);
+    if (mZslRingChannelHandle == 0) {
+        LOGE("ZSLRING YUV add_channel failed");
+        free(stream);
+        return -ENODEV;
+    }
+    LOGI("ZSLRING YUV add_channel channel=0x%x", mZslRingChannelHandle);
+    mZslRingYuvChannel = new QCamera3ZslRingChannel(
+            mCameraHandle->camera_handle, mZslRingChannelHandle, mCameraHandle->ops,
+            this, stream, CAM_STREAM_TYPE_CALLBACK, &padding, 6, mPictureChannel);
+    if (mZslRingYuvChannel == NULL) {
+        free(stream);
+        return -ENOMEM;
+    }
+    mZslRingYuvStream = stream;
+    const int32_t rc = mZslRingYuvChannel->initialize(IS_TYPE_NONE);
+    if (rc != NO_ERROR) {
+        LOGE("ZSLRING YUV channel initialize failed rc=%d", rc);
+        delete mZslRingYuvChannel;
+        mZslRingYuvChannel = NULL;
+        free(mZslRingYuvStream);
+        mZslRingYuvStream = NULL;
+        if (mZslRingChannelHandle != 0) {
+            mCameraHandle->ops->delete_channel(mCameraHandle->camera_handle,
+                    mZslRingChannelHandle);
+            mZslRingChannelHandle = 0;
+        }
+        return rc;
+    }
+    mPictureChannel->setRingYuvChannel(mZslRingYuvChannel);
+    LOGI("ZSLRING YUV channel created stream=0x%x serverId=0x%x %dx%d bufs=6",
+            mZslRingYuvChannel->getRingStreamHandle(),
+            mZslRingYuvChannel->getRingServerStreamId(),
+            dim.width, dim.height);
+    LOGI("ZSLRING YUV channel ready channel=0x%x (start at stream-on)",
+            mZslRingChannelHandle);
+    return NO_ERROR;
+}
+
+int32_t QCamera3HardwareInterface::startZslSnapshotMode()
+{
+    if (mHALZSL != CAM_HAL3_ZSL_TYPE_SNAPSHOT || mChannelHandle == 0 ||
+            mZslSnapshotModeStarted) {
+        return NO_ERROR;
+    }
+    /* HAL1 starts the daemon ZSL snapshot mode on the picture/preview channel
+     * before takePicture; without it the daemon has no preview match context
+     * and drops the snapshot buffer (Snapshot dropped, match_cnt=0). */
+    const int32_t rc = mCameraHandle->ops->start_zsl_snapshot(
+            mCameraHandle->camera_handle, mChannelHandle);
+    LOGI("ZSLSNAP start_zsl_snapshot ch=0x%x rc=%d", mChannelHandle, rc);
+    if (rc == NO_ERROR) {
+        mZslSnapshotModeStarted = true;
+    }
+    return rc;
+}
+
+void QCamera3HardwareInterface::stopZslSnapshotMode()
+{
+    if (!mZslSnapshotModeStarted || mChannelHandle == 0) {
+        return;
+    }
+    const int32_t rc = mCameraHandle->ops->stop_zsl_snapshot(
+            mCameraHandle->camera_handle, mChannelHandle);
+    LOGI("ZSLSNAP stop_zsl_snapshot ch=0x%x rc=%d", mChannelHandle, rc);
+    mZslSnapshotModeStarted = false;
+}
+
+int32_t QCamera3HardwareInterface::startZslRingChannel()
+{
+    if (mZslRingYuvChannel == NULL || mZslRingChannelHandle == 0) {
+        return -EINVAL;
+    }
+    if (!mZslRingYuvChannel->isActive()) {
+        const int32_t streamRc = mZslRingYuvChannel->start();
+        if (streamRc != NO_ERROR) {
+            LOGE("ZSLRING YUV channel HAL start failed rc=%d", streamRc);
+            return streamRc;
+        }
+    }
+    const int32_t rc = mCameraHandle->ops->start_channel(
+            mCameraHandle->camera_handle, mZslRingChannelHandle);
+    LOGI("ZSLRING YUV daemon start_channel=0x%x rc=%d",
+            mZslRingChannelHandle, rc);
+    return rc;
+}
+
+void QCamera3HardwareInterface::destroyZslRingYuvChannel()
+{
+    if (mZslRingYuvChannel != NULL) {
+        if (mZslRingYuvChannel->isActive()) {
+            mZslRingYuvChannel->stop();
+        }
+        delete mZslRingYuvChannel;
+        mZslRingYuvChannel = NULL;
+    }
+    if (mZslRingChannelHandle != 0) {
+        mCameraHandle->ops->stop_channel(mCameraHandle->camera_handle,
+                mZslRingChannelHandle);
+        mCameraHandle->ops->delete_channel(mCameraHandle->camera_handle,
+                mZslRingChannelHandle);
+        mZslRingChannelHandle = 0;
+    }
+    if (mZslRingYuvStream != NULL) {
+        free(mZslRingYuvStream);
+        mZslRingYuvStream = NULL;
+    }
+}
+
+void QCamera3HardwareInterface::markPreviewJpegRequest(uint32_t requestFrame)
+{
+    Mutex::Autolock lock(mZslRingSelectionLock);
+    mPreviewJpegRequestFrames[requestFrame] = 1;
+}
+
+void QCamera3HardwareInterface::clearPreviewJpegRequest(uint32_t requestFrame)
+{
+    Mutex::Autolock lock(mZslRingSelectionLock);
+    mPreviewJpegRequestFrames.erase(requestFrame);
+}
+
+bool QCamera3HardwareInterface::isPreviewJpegRequest(uint32_t requestFrame)
+{
+    Mutex::Autolock lock(mZslRingSelectionLock);
+    return mPreviewJpegRequestFrames.find(requestFrame) !=
+            mPreviewJpegRequestFrames.end();
 }
 
 /*===========================================================================
@@ -19366,6 +19733,7 @@ int32_t QCamera3HardwareInterface::startAllChannels()
             LOGE("start_channel failed");
             return rc;
         }
+        startZslSnapshotMode();
     }
     if (mMultiRawChannel) {
         rc = mMultiRawChannel->start();
@@ -19377,6 +19745,20 @@ int32_t QCamera3HardwareInterface::startAllChannels()
 
     if (mZSLChannel != NULL) {
         mZSLChannel->startDeferredAllocation();
+    }
+
+    if (oppoZslRingEnabled()) {
+        LOGI("ZSLRING gate(startAllChannels): enabled=%d halzsl=%d picture=%p isZSL=%d",
+                oppoZslRingEnabled() ? 1 : 0, mHALZSL,
+                mPictureChannel,
+                mPictureChannel != NULL ? mPictureChannel->isZSLChannel() : -1);
+        if (mZslRingYuvChannel != NULL && !mZslRingYuvChannel->isActive()) {
+            const int32_t ringStartRc = startZslRingChannel();
+            LOGI("ZSLRING YUV startAll start rc=%d", ringStartRc);
+        }
+        if (mPictureChannel != NULL) {
+            mPictureChannel->startZslRing();
+        }
     }
 
     LOGD("All channels started");
