@@ -106,6 +106,12 @@ public:
  * copied by the preview stream callback, for the JPEG fallback. */
 bool oppoPreviewFrameCacheGet(int32_t &width, int32_t &height, int64_t &timestampNs,
         uint8_t *&data, size_t &length);
+// Panorama frame hook: called synchronously from the preview callback before the
+// buffer is returned. The callee must copy the packed NV21 data itself.
+typedef void (*oppo_panorama_frame_hook_t)(void *userdata,
+        const mm_camera_buf_def_t *frame, const cam_dimension_t &dim,
+        const cam_frame_len_offset_t &offset, int64_t timestampNs);
+void oppoPanoramaSetFrameHook(oppo_panorama_frame_hook_t hook, void *userdata);
 bool oppoPreviewFrameCacheSize(int32_t &width, int32_t &height);
 void oppoPreviewFrameCachePut(const mm_camera_buf_def_t *def,
         const cam_dimension_t &dim, int64_t timestampNs);

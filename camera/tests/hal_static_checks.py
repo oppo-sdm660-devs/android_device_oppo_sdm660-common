@@ -694,11 +694,17 @@ need(pano_cpp, "QCamera3OppoPanorama::stitch", "stitch implementation")
 need(pano_cpp, "stockDirectionCode", "direction code implementation")
 need(tests / "oppo_panorama_backend_test.cpp", "testHorizontalPan", "panorama host test")
 need(tests / "run_oppo_panorama_tests.py", "def main", "panorama host test runner")
-# The Android build entry is owned by the integration task; the backend must
-# stay compilable on the host without it.
-checks += 1
-if "QCamera3OppoPanorama.cpp" in read(CAMERA / "Android.bp"):
-    failures.append("Android.bp: integration not expected in the prototype task")
+# task-143a: HAL build/protocol/frame hook wiring for the OSS backend.
+need(CAMERA / "Android.bp", "QCamera3OppoPanorama.cpp", "panorama backend in HAL build")
+need(hwi, "PANORAMA_ENABLE", "panorama enable request")
+need(hwi, "PANORAMA_CAPTURE", "panorama capture request")
+need(hwi, "PANORAMA_CANCEL", "panorama cancel request")
+need(hwi, "PANORAMA_STATE", "panorama state result")
+need(hwi, "PANORAMA_FRAME_COUNT", "panorama frame count result")
+need(hwi, "PANORAMA_FAILURE_REASON", "panorama failure result")
+need(hwi, "PANORAMA capture refused", "143a capture failure is explicit")
+need(channel, "oppoPanoramaSetFrameHook", "preview frame hook")
+need(HAL3 / "QCamera3VendorTags.cpp", "panoramaSupported", "panorama vendor tag registration")
 
 if failures:
     print("static checks FAILED:")

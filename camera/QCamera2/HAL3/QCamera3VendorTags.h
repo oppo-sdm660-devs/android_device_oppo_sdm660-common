@@ -394,6 +394,14 @@ enum qcamera3_ext_tags {
     QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH,      // int32 0..100, effect 8
     QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_TEMPORAL_SMOOTHING, // int32 0..95
     QCAMERA3_NATIVE_ALGORITHM_AUTO_CAPTURE_REASON,         // int32 result
+    // Panorama v0.8.x protocol (App-owned; HAL rejects capture until 143b).
+    QCAMERA3_NATIVE_ALGORITHM_PANORAMA_SUPPORTED,          // byte static
+    QCAMERA3_NATIVE_ALGORITHM_PANORAMA_ENABLE,             // int32 0/1 request
+    QCAMERA3_NATIVE_ALGORITHM_PANORAMA_CAPTURE,            // int32 1 request
+    QCAMERA3_NATIVE_ALGORITHM_PANORAMA_CANCEL,             // int32 1 request
+    QCAMERA3_NATIVE_ALGORITHM_PANORAMA_STATE,              // int32 0..4 result
+    QCAMERA3_NATIVE_ALGORITHM_PANORAMA_FRAME_COUNT,        // int32 result
+    QCAMERA3_NATIVE_ALGORITHM_PANORAMA_FAILURE_REASON,     // int32 result
     QCAMERA3_NATIVE_ALGORITHMS_END,
     // Kept for registration/ABI compatibility; no in-tree consumer.
     QCAMERA3_POSTPROCESS_SETTINGS = QCAMERA3_POSTPROCESS_START,

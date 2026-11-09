@@ -93,6 +93,7 @@ cc_library_shared {
         "QCamera2/HAL3/QCamera3HdrDenoise.cpp",
         "QCamera2/HAL3/QCamera3LowLightHdrAlgo.cpp",
         "QCamera2/HAL3/QCamera3MmsVstab.cpp",
+        "QCamera2/HAL3/QCamera3OppoPanorama.cpp",
         "QCamera2/HAL3/QCamera3MmsGl.cpp",
         "QCamera2/HAL3/QCamera3MmsGyroSource.cpp",
         "QCamera2/HAL3/QCamera3MmsChannel.cpp",

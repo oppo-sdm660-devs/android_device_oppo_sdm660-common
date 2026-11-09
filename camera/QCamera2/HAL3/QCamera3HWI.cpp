@@ -78,6 +78,8 @@
 #include "QCamera3GyroVstab.h"
 #include "QCamera3Occlusion.h"
 #include "QCamera3RawCapability.h"
+#include "QCamera3OppoPanorama.h"
+#include <vector>
 #include "QCamera3SatPolicy.h"
 #include "QCamera3LogicalMultiCam.h"
 #include "QCamera3PostprocessAssets.h"
@@ -1114,6 +1116,17 @@ static void oppoAdvertisedFpsRanges(const cam_capability_t *capability,
     }
 }
 
+extern cam_capability_t *gCamCapability[MM_CAMERA_MAX_NUM_SENSORS];
+
+static bool oppoPanoramaSupported(uint32_t cameraId)
+{
+    if (cameraId >= MM_CAMERA_MAX_NUM_SENSORS || gCamCapability[cameraId] == NULL)
+        return false;
+    const cam_capability_t *cap = gCamCapability[cameraId];
+    return cap->position == CAM_POSITION_BACK &&
+            cap->sensor_type.sens_type != CAM_SENSOR_YUV;
+}
+
 static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
         const cam_capability_t *sensorCapability, uint32_t cameraId, bool logical)
 {
@@ -1170,6 +1183,8 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
         info.update(ANDROID_CONTROL_AF_AVAILABLE_MODES, &focus, 1);
     }
     info.update(QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_MODES, nativeModes.array(), nativeModes.size());
+    const uint8_t panorama = oppoPanoramaSupported(cameraId) ? 1 : 0;
+    info.update(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_SUPPORTED, &panorama, 1);
     const int32_t professionalVer = QCamera3ExifExtras::isAvailable() ?
             QCamera3ExifExtras::professionalVer() : 0;
     info.update(QCAMERA3_NATIVE_ALGORITHM_PROFESSIONAL_VER, &professionalVer, 1);
@@ -1259,6 +1274,11 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
                 basicKeys.add(QCAMERA3_VIDEO_HDR_MODE);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_MODE);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH);
+            if (oppoPanoramaSupported(cameraId)) {
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_ENABLE);
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_CAPTURE);
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_CANCEL);
+            }
             const bool singleCamera = sensorCapability != NULL &&
                     sensorCapability->aux_cam_cap == NULL;
             const auto modeAdvertised = [&](int32_t mode) -> bool {
@@ -1292,6 +1312,11 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
                 basicKeys.add(QCAMERA3_VIDEO_HDR_MODE);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_NATIVE_TRACE);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_APPLIED_NATIVE_MODE);
+            if (oppoPanoramaSupported(cameraId)) {
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_STATE);
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_FRAME_COUNT);
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_FAILURE_REASON);
+            }
             basicKeys.add(QCAMERA3_DIAGNOSTICS_STAGE_RECORDS);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_HOT_PIXEL_MAP_AVAILABLE);
             basicKeys.add(QCAMERA3_DIAGNOSTICS_OCCLUSION_OCCLUDED);
@@ -1335,6 +1360,8 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
             basicKeys.add(ANDROID_SCALER_AVAILABLE_STALL_DURATIONS);
             if (reprocess) basicKeys.add(ANDROID_REPROCESS_MAX_CAPTURE_STALL);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_AVAILABLE_MODES);
+            if (oppoPanoramaSupported(cameraId))
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_SUPPORTED);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PROFESSIONAL_VER);
             basicKeys.add(QCAMERA3_DIAGNOSTICS_HARDWARE_LEVEL_ADVERTISED);
             if (logical) {
@@ -1561,6 +1588,19 @@ static bool oppoRaw16Admitted(uint32_t cameraId)
     const QCamera3RawCapability::Decision *decision = oppoRawCapabilityDecision(cameraId);
     return oppoRaw16Supported(gCamCapability[cameraId]) && decision != NULL &&
             decision->status == 0 && decision->completeRawCapability == 1;
+}
+
+bool QCamera3HardwareInterface::panoramaSupported(uint32_t cameraId)
+{
+    return oppoPanoramaSupported(cameraId);
+}
+
+static int32_t oppoPanoramaSetting(const camera_metadata_t *settings, uint32_t tag)
+{
+    camera_metadata_ro_entry_t entry;
+    if (settings == NULL || find_camera_metadata_ro_entry(settings, tag, &entry) != 0 ||
+            entry.count != 1 || entry.data.i32 == NULL) return 0;
+    return entry.data.i32[0];
 }
 
 namespace {
@@ -2432,6 +2472,7 @@ QCamera3HardwareInterface::QCamera3HardwareInterface(uint32_t cameraId,
 QCamera3HardwareInterface::~QCamera3HardwareInterface()
 {
     LOGD("E");
+    resetPanoramaState(0);
 
     int32_t rc = 0;
 
@@ -8937,6 +8978,15 @@ int QCamera3HardwareInterface::processCaptureRequest(
         return rc;
     }
 
+    // Panorama protocol is handled before the normal still path. 143a only
+    // collects frames; capture is explicitly refused until the synthetic JPEG
+    // path (task-150) exists, so no non-panorama image is returned.
+    rc = handlePanoramaRequest(request->settings);
+    if (rc != NO_ERROR) {
+        pthread_mutex_unlock(&mMutex);
+        return rc;
+    }
+
     logical_setting = request->settings;
 
     meta = request->settings;
@@ -11224,6 +11274,7 @@ void QCamera3HardwareInterface::dump(int fd)
  *==========================================================================*/
 int QCamera3HardwareInterface::flush(bool restartChannels)
 {
+    resetPanoramaState(12);
     {
         Mutex::Autolock lock(mZslRingSelectionLock);
         mZslRingSelections.clear();
@@ -13065,6 +13116,7 @@ QCamera3HardwareInterface::translateFromHalMetadata(
         camMetadata.update(QCAMERA3_NATIVE_ALGORITHM_HOT_PIXEL_MAP_AVAILABLE,
                 &hotPixelMapAvailable, 1);
     }
+    updatePanoramaMetadata(camMetadata);
 
     // CDS
     IF_META_AVAILABLE(int32_t, cds, CAM_INTF_PARM_CDS_MODE, metadata) {
@@ -21225,6 +21277,166 @@ bool QCamera3HardwareInterface::isPreviewSATEnabled()
     }
 
     return rc;
+}
+
+
+int32_t QCamera3HardwareInterface::handlePanoramaRequest(const camera_metadata_t *settings)
+{
+    if (!panoramaSupported(mCameraId)) return NO_ERROR;
+    const int32_t enable = oppoPanoramaSetting(
+            settings, QCAMERA3_NATIVE_ALGORITHM_PANORAMA_ENABLE);
+    const int32_t capture = oppoPanoramaSetting(
+            settings, QCAMERA3_NATIVE_ALGORITHM_PANORAMA_CAPTURE);
+    const int32_t cancel = oppoPanoramaSetting(
+            settings, QCAMERA3_NATIVE_ALGORITHM_PANORAMA_CANCEL);
+    if (cancel == 1) {
+        resetPanoramaState(12);
+        return NO_ERROR;
+    }
+    if (enable == 1) {
+        Mutex::Autolock lock(mPanoramaLock);
+        if (mPanoramaActive) return NO_ERROR;
+        if (mPanorama == nullptr) mPanorama = new QCamera3OppoPanorama();
+        if (mPanorama == nullptr) {
+            mPanoramaFailureReason = 13;
+            return NO_ERROR;
+        }
+        QCamera3OppoPanorama::Config config;
+        const cam_capability_t *cap = gCamCapability[mCameraId];
+        if (cap != NULL && cap->preview_sizes_tbl_cnt > 0) {
+            config.previewWidth = cap->preview_sizes_tbl[0].width;
+            config.previewHeight = cap->preview_sizes_tbl[0].height;
+        } else {
+            config.previewWidth = 1280;
+            config.previewHeight = 720;
+        }
+        uint32_t outWidth = 0, outHeight = 0;
+        if (QCamera3OppoPanorama::stockAspectSize(config.previewWidth,
+                config.previewHeight, &outWidth, &outHeight)) {
+            config.outputWidth = outWidth;
+            config.outputHeight = outHeight;
+        }
+        config.orientationDeg = 0;
+        config.directionDeg = QCamera3OppoPanorama::DIR_AUTO;
+        config.crop = false;
+        config.maxFrames = 12;
+        if (mPanorama->init(config) != QCamera3OppoPanorama::OK) {
+            mPanoramaFailureReason = 13;
+            delete mPanorama;
+            mPanorama = nullptr;
+            return NO_ERROR;
+        }
+        mPanoramaActive = true;
+        mPanoramaFrameCount = 0;
+        mPanoramaFailureReason = 0;
+        oppoPanoramaSetFrameHook(&QCamera3HardwareInterface::panoramaFrameHook, this);
+        LOGI("PANORAMA enabled %ux%u", config.previewWidth, config.previewHeight);
+    }
+    if (capture == 1) {
+        Mutex::Autolock lock(mPanoramaLock);
+        mPanoramaFailureReason = 13; // synthetic JPEG path is task-150
+        mPanoramaActive = false;
+        oppoPanoramaSetFrameHook(NULL, NULL);
+        if (mPanorama != nullptr) {
+            mPanorama->cancel();
+            delete mPanorama;
+            mPanorama = nullptr;
+        }
+        LOGE("PANORAMA capture refused: synthesized JPEG path not implemented (INTERNAL)");
+        // Refuse the normal still path: returning a plain camera JPEG would be a
+        // fake panorama result.
+        return -ENOSYS;
+    }
+    return NO_ERROR;
+}
+
+void QCamera3HardwareInterface::updatePanoramaMetadata(CameraMetadata &metadata)
+{
+    if (!panoramaSupported(mCameraId)) return;
+    Mutex::Autolock lock(mPanoramaLock);
+    const int32_t state = mPanoramaFailureReason != 0 ? 4 :
+            (mPanoramaActive ? 1 : 0);
+    const int32_t count = int32_t(mPanoramaFrameCount);
+    metadata.update(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_STATE, &state, 1);
+    metadata.update(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_FRAME_COUNT, &count, 1);
+    metadata.update(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_FAILURE_REASON,
+            &mPanoramaFailureReason, 1);
+}
+
+void QCamera3HardwareInterface::resetPanoramaState(int32_t failureReason)
+{
+    Mutex::Autolock lock(mPanoramaLock);
+    oppoPanoramaSetFrameHook(NULL, NULL);
+    mPanoramaActive = false;
+    if (mPanorama != nullptr) {
+        mPanorama->cancel();
+        delete mPanorama;
+        mPanorama = nullptr;
+    }
+    if (failureReason != 0) {
+        mPanoramaFailureReason = failureReason;
+        mPanoramaFrameCount = 0;
+    }
+}
+
+void QCamera3HardwareInterface::panoramaFrameHook(void *userdata,
+        const mm_camera_buf_def_t *frame, const cam_dimension_t &dim,
+        const cam_frame_len_offset_t &offset, int64_t timestampNs)
+{
+    auto *self = static_cast<QCamera3HardwareInterface *>(userdata);
+    if (self == nullptr || frame == nullptr || frame->buffer == nullptr ||
+            dim.width <= 0 || dim.height <= 0 || offset.num_planes < 2) return;
+    const uint32_t width = uint32_t(dim.width);
+    const uint32_t height = uint32_t(dim.height);
+    const uint8_t *base = static_cast<const uint8_t *>(frame->buffer);
+    if (offset.mp[0].stride_in_bytes < int32_t(width) ||
+            offset.mp[1].stride_in_bytes < int32_t(width)) return;
+    std::vector<uint8_t> packed(size_t(width) * height * 3 / 2);
+    for (uint32_t y = 0; y < height; ++y) {
+        memcpy(packed.data() + size_t(y) * width,
+                base + offset.mp[0].offset + size_t(y) * offset.mp[0].stride_in_bytes,
+                width);
+    }
+    const uint32_t uvHeight = height / 2;
+    for (uint32_t y = 0; y < uvHeight; ++y) {
+        memcpy(packed.data() + size_t(width) * height + size_t(y) * width,
+                base + offset.mp[1].offset + size_t(y) * offset.mp[1].stride_in_bytes,
+                width);
+    }
+    Mutex::Autolock lock(self->mPanoramaLock);
+    if (!self->mPanoramaActive || self->mPanorama == nullptr) return;
+    const auto &config = self->mPanorama->config();
+    if (config.previewWidth != width || config.previewHeight != height) {
+        QCamera3OppoPanorama::Config next = config;
+        next.previewWidth = width;
+        next.previewHeight = height;
+        uint32_t outWidth = 0, outHeight = 0;
+        if (QCamera3OppoPanorama::stockAspectSize(width, height, &outWidth, &outHeight)) {
+            next.outputWidth = outWidth;
+            next.outputHeight = outHeight;
+        } else {
+            next.outputWidth = 0;
+            next.outputHeight = 0;
+        }
+        if (self->mPanorama->reinit(next) != QCamera3OppoPanorama::OK) {
+            self->mPanoramaFailureReason = 13;
+            return;
+        }
+    }
+    QCamera3OppoPanorama::Frame input;
+    input.data = packed.data();
+    input.length = packed.size();
+    input.width = width;
+    input.height = height;
+    input.yStride = width;
+    input.uvStride = width;
+    input.timestampUs = timestampNs / 1000;
+    const int32_t rc = self->mPanorama->addFrame(input, nullptr);
+    if (rc == QCamera3OppoPanorama::OK) {
+        ++self->mPanoramaFrameCount;
+    } else if (rc != QCamera3OppoPanorama::E_LIMIT) {
+        self->mPanoramaFailureReason = 13;
+    }
 }
 
 }; //end namespace qcamera

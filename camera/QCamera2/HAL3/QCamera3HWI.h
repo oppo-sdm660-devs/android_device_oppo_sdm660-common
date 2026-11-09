@@ -66,6 +66,8 @@ using namespace android;
 
 namespace qcamera {
 
+class QCamera3OppoPanorama;
+
 using ::android::hardware::camera::common::V1_0::helper::CameraMetadata;
 
 #ifndef TRUE
@@ -1065,6 +1067,21 @@ private:
     NativeTraceEntry mNativeTrace[kNativeTraceSlots];
     size_t mNativeTraceNext = 0;
     Mutex mNativeTraceLock;
+
+    // Panorama v0.8.x protocol state. The backend is only used for frame
+    // collection until task-150 connects the synthetic JPEG output.
+    static bool panoramaSupported(uint32_t cameraId);
+    int32_t handlePanoramaRequest(const camera_metadata_t *settings);
+    void updatePanoramaMetadata(CameraMetadata &metadata);
+    static void panoramaFrameHook(void *userdata, const mm_camera_buf_def_t *frame,
+            const cam_dimension_t &dim, const cam_frame_len_offset_t &offset,
+            int64_t timestampNs);
+    void resetPanoramaState(int32_t failureReason);
+    QCamera3OppoPanorama *mPanorama = nullptr;
+    Mutex mPanoramaLock;
+    bool mPanoramaActive = false;
+    uint32_t mPanoramaFrameCount = 0;
+    int32_t mPanoramaFailureReason = 0;
 };
 
 }; // namespace qcamera

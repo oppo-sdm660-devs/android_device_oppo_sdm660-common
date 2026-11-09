@@ -113,6 +113,9 @@ namespace qcamera {
 
 namespace {
 Mutex gPreviewCacheLock;
+Mutex gPanoramaHookLock;
+oppo_panorama_frame_hook_t gPanoramaFrameHook = NULL;
+void *gPanoramaFrameHookUser = NULL;
 uint8_t *gPreviewCacheData = NULL;
 size_t gPreviewCacheLength = 0;
 int32_t gPreviewCacheWidth = 0;
@@ -136,6 +139,13 @@ void oppoPreviewFrameCachePut(const mm_camera_buf_def_t *def,
     gPreviewCacheWidth = dim.width;
     gPreviewCacheHeight = dim.height;
     gPreviewCacheTimestampNs = timestampNs;
+}
+
+void oppoPanoramaSetFrameHook(oppo_panorama_frame_hook_t hook, void *userdata)
+{
+    Mutex::Autolock lock(gPanoramaHookLock);
+    gPanoramaFrameHook = hook;
+    gPanoramaFrameHookUser = userdata;
 }
 
 bool oppoPreviewFrameCacheGet(int32_t &width, int32_t &height, int64_t &timestampNs,
@@ -1107,6 +1117,21 @@ void QCamera3ProcessingChannel::streamCbRoutine(mm_camera_super_buf_t *super_fra
     {
         mMemory.cleanInvalidateCache(super_frame->bufs[0]->buf_idx);
         super_frame->bufs[0]->cache_flags = 0;
+    }
+
+    if (stream->getMyType() == CAM_STREAM_TYPE_PREVIEW) {
+        oppo_panorama_frame_hook_t hook = NULL;
+        void *hookUser = NULL;
+        {
+            Mutex::Autolock lock(gPanoramaHookLock);
+            hook = gPanoramaFrameHook;
+            hookUser = gPanoramaFrameHookUser;
+        }
+        if (hook != NULL) {
+            const struct timespec &ts = super_frame->bufs[0]->ts;
+            const int64_t timestampNs = int64_t(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+            hook(hookUser, super_frame->bufs[0], dim, offset, timestampNs);
+        }
     }
 
     do {
