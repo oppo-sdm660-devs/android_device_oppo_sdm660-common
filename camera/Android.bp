@@ -183,7 +183,7 @@ cc_library_shared {
         "libutils",
     ],
     static_libs: ["android.hardware.camera.common-helper"],
-    required: ["cameraconfig.txt"],
+    required: ["cameraconfig.txt", "libui_vstab_shim"],
 }
 
 cc_library_shared {

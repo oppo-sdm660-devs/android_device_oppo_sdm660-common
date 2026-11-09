@@ -74,6 +74,11 @@ blob_fixups: blob_fixups_user_type = {
         .clear_symbol_version('__aeabi_memset')
         .clear_symbol_version('__gnu_Unwind_Find_exidx'),
     # Stock SDSPRPC imports resolve to libcdsprpc's unversioned exports.
+    (
+        'vendor/lib/libmms_hal_vstab.so',
+        'vendor/lib/libmms_warper_vstab.so',
+    ): blob_fixup()
+        .add_needed('libui_vstab_shim.so'),
     'vendor/lib/libthread_blur.so': blob_fixup()
         .clear_symbol_version('remote_handle_open')
         .clear_symbol_version('remote_handle_invoke')

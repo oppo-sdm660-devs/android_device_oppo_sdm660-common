@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: Apache-2.0
+// Prototype only (task-137): old Android-9 GraphicBuffer::lock ABI shim and a
+// 32-bit vendor smoke binary for the stock MMS libraries.
+
+cc_library_shared {
+    name: "libui_vstab_shim",
+    vendor: true,
+    compile_multilib: "32",
+    srcs: ["ui_vstab_shim.cpp"],
+    shared_libs: [
+        "libui",
+        "liblog",
+    ],
+    header_libs: [
+        "libui_headers",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+}
+
+cc_binary {
+    name: "vstab_smoke",
+    vendor: true,
+    compile_multilib: "32",
+    relative_install_path: "tests",
+    srcs: ["vstab_smoke.cpp"],
+    shared_libs: [
+        "libdl",
+        "liblog",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+}
