@@ -245,7 +245,11 @@ QCamera3RawCapability::Decision QCamera3RawCapability::decide(const Inputs &inpu
             inputs.noiseModelKnown == 1;
     out.raw16Available = raw16 ? 1 : 0;
     out.dngAvailable = raw16 && colourOk ? 1 : 0;
-    out.completeRawCapability = (raw16 && colourOk && out.hotPixelMapAvailable == 1) ? 1 : 0;
+    // DPC calibration is not exported by the current camera ABI. RAW16/DNG does
+    // not consume a hot-pixel map (DngCreator uses black level/CFA/colour data),
+    // so admission is gated on the real RAW16 and colour calibration records.
+    // The ON hot-pixel mode stays unadvertised: no map is fabricated here.
+    out.completeRawCapability = (raw16 && colourOk) ? 1 : 0;
     return out;
 }
 

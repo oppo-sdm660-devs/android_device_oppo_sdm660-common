@@ -1131,7 +1131,8 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
     Vector<uint8_t> capabilities;
     capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE);
     if (manualSensor) capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR);
-    // Complete RAW needs an ON-mode hot-pixel map; this ABI has none.
+    // RAW16/DNG admission is backed by real sensor RAW16/colour calibration.
+    // The ON hot-pixel map remains unadvertised (no DPC record in this ABI).
     if (rawDecision != NULL && raw && rawDecision->completeRawCapability == 1)
         capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_RAW);
     if (logical) capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA);
@@ -1549,11 +1550,11 @@ static const QCamera3RawCapability::Decision *oppoRawCapabilityDecision(uint32_t
     return &gRawCapabilityDecision[cameraId];
 }
 
-// RAW16 = stream/calibration contract AND Complete-RAW decision. The Complete-RAW
-// capability needs an ON-mode hot-pixel map; this ABI does not carry the decoded
-// hot-pixel record in cam_capability_t, so the decision fails closed. RAW16 must
-// therefore stay out of the format/stream tables as well, otherwise the HAL would
-// advertise a RAW format without ANDROID_REQUEST_AVAILABLE_CAPABILITIES_RAW.
+// RAW16 = stream/calibration contract AND RAW16/colour admission. The native
+// capability carries real 10-bit RAW16 sizes, white/black levels, colour matrices,
+// illuminants and noise model, but no DPC hot-pixel record. DNG does not consume
+// that map, so RAW16/DNG is admitted; the ON hot-pixel mode is still not
+// advertised (see applyOppoBasicMetadataPolicy), avoiding a fake map.
 static bool oppoRaw16Admitted(uint32_t cameraId)
 {
     if (cameraId >= MM_CAMERA_MAX_NUM_SENSORS || gCamCapability[cameraId] == NULL) return false;
@@ -2552,6 +2553,7 @@ QCamera3HardwareInterface::~QCamera3HardwareInterface()
             delete channel;
         free (*it);
     }
+    mRawChannel = NULL;
     if (mSupportChannel) {
         delete mSupportChannel;
         mSupportChannel = NULL;
@@ -4406,6 +4408,14 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
             processedStreamCnt > MAX_PROCESSED_STREAMS) {
         LOGE("Invalid stream configu: stall: %d, raw: %d, processed %d",
                  stallStreamCnt, rawStreamCnt, processedStreamCnt);
+        pthread_mutex_unlock(&mMutex);
+        return -EINVAL;
+    }
+    // RAW16 is a professional still path: keep it out of video, ZSL and
+    // secure sessions instead of accepting a combination the daemon cannot
+    // deliver. The App also gates the mode; this is the HAL-side backstop.
+    if (rawStreamCnt > 0 && (m_bIsVideo || isZsl || isSecureMode())) {
+        LOGE("RAW16 cannot be combined with video, ZSL or secure streams");
         pthread_mutex_unlock(&mMutex);
         return -EINVAL;
     }
@@ -8324,6 +8334,7 @@ int32_t QCamera3HardwareInterface::switchStreamConfigInternal(__unused uint32_t 
 
     //delete the channels
     cleanAndSortStreamInfo();
+    mRawChannel = NULL;
 
     if (mMetadataChannel) {
         delete mMetadataChannel;

@@ -186,12 +186,19 @@ need(hwi, "cannot be executed must not be reported as applied",
      "auto trigger availability guard")
 need(hwi, "config.hdrEnable = autoHdr.count == 1", "auto policy per-request config")
 need(hwi, "mAutoCaptureStats = AutoCaptureStats();", "stats reset per session")
-need(hwi, "RAW16 must", "RAW16 admission comment")
+need(hwi, "RAW16/DNG admission is backed by real sensor RAW16/colour calibration",
+     "RAW16 admission comment")
 need(hwi, "Explicit MFNR/SUPER_PHOTO cannot run its pipeline",
      "MFNR/SUPER single-frame degrade")
 need(hwi, "The auto extension requests histogram statistics internally",
      "internal histogram result keys suppressed")
 absent(hwi, "decision->raw16Available == 1", "inconsistent RAW16 admission")
+need(HAL3 / "QCamera3RawCapability.cpp", "DPC calibration is not exported",
+     "RAW16 admission without a fabricated hot-pixel map")
+need(HAL3 / "QCamera3RawCapability.cpp", "The ON hot-pixel mode stays unadvertised",
+     "no fake ON hot-pixel map")
+need(hwi, "RAW16 cannot be combined with video, ZSL or secure streams",
+     "RAW stream mutual exclusion")
 need(post, "always publish the stage", "scene stage always recorded")
 need(HAL3 / "QCamera3AutoCapturePolicy.cpp",
      "QCamera3AutoCapturePolicy::histogramClipping", "histogram helper implementation")
