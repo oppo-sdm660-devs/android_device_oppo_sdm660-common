@@ -706,6 +706,19 @@ need(hwi, "PANORAMA capture refused", "143a capture failure is explicit")
 need(channel, "oppoPanoramaSetFrameHook", "preview frame hook")
 need(HAL3 / "QCamera3VendorTags.cpp", "panoramaSupported", "panorama vendor tag registration")
 
+# task-150a: synthetic panorama JPEG encoder (no HWI caller until task-155).
+pano_jpeg_h = HAL3 / "QCamera3PanoramaJpeg.h"
+pano_jpeg_cpp = HAL3 / "QCamera3PanoramaJpeg.cpp"
+need(pano_jpeg_h, "class QCamera3PanoramaJpeg", "panorama JPEG encoder API")
+need(pano_jpeg_h, "exifOrientation", "EXIF orientation API")
+need(pano_jpeg_cpp, "jpeg_mem_dest", "libjpeg memory encoder")
+need(pano_jpeg_cpp, "appendExifOrientation", "EXIF orientation segment")
+need(CAMERA / "Android.bp", "QCamera3PanoramaJpeg.cpp", "panorama JPEG encoder in HAL build")
+need(CAMERA / "Android.bp", "libjpeg", "libjpeg vendor dependency")
+need(tests / "panorama_jpeg_encoder_test.cpp", "testValidOrientations", "panorama JPEG host test")
+need(tests / "run_panorama_jpeg_tests.py", "def main", "panorama JPEG host runner")
+absent(hwi, "QCamera3PanoramaJpeg", "150a must not wire the HWI caller yet")
+
 if failures:
     print("static checks FAILED:")
     for item in failures:
