@@ -5553,6 +5553,10 @@ void QCamera3PicChannel::jpegEvtHandle(jpeg_job_status_t status,
             }
 
             QCamera3HardwareInterface *hw = (QCamera3HardwareInterface *)obj->mUserData;
+            // ZSL snapshot mode is a capture-scoped daemon state. Leaving it on
+            // freezes AE after the first JPEG, so leave it as soon as the job
+            // completes (including errors).
+            hw->stopZslSnapshotMode();
             if (hw->isQuadCfaSensor()) {
                 hw->deleteQCFACaptureChannel();
             }

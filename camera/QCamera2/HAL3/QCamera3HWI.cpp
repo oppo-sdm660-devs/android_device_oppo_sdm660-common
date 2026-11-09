@@ -19796,7 +19796,9 @@ int32_t QCamera3HardwareInterface::startAllChannels()
             LOGE("start_channel failed");
             return rc;
         }
-        startZslSnapshotMode();
+        // Do not enter daemon ZSL snapshot mode at stream-on: it freezes AE
+        // until the next BLOB request. It is started immediately before the
+        // first BLOB request and stopped after its JPEG callback.
     }
     if (mMultiRawChannel) {
         rc = mMultiRawChannel->start();
