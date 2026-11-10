@@ -23,6 +23,7 @@ Frame frame(uint32_t number, int64_t tsMs, uint8_t buf, bool inUse = false)
     f.timestampNs = tsMs * kMs;
     f.bufIndex = buf;
     f.inUse = inUse;
+    f.metadataReady = true;
     return f;
 }
 
@@ -45,6 +46,30 @@ void testSizing()
             int64_t(4608) * 3456 * 3 / 2 * 4);
     CHECK(QCamera3ZslRingPolicy::estimateRingBytes(0, 100, 4) == 0);
     CHECK(QCamera3ZslRingPolicy::estimateRingBytes(100, 100, 0) == 0);
+}
+
+void testReadinessAndRequestGate()
+{
+    auto source = frame(1, 950, 0);
+    source.metadataReady = false;
+    const auto incomplete = QCamera3ZslRingPolicy::select({source}, 1000 * kMs, 1000 * kMs, 120);
+    CHECK(!incomplete.selected);
+    CHECK(incomplete.reason == QCamera3ZslRingPolicy::kFallbackMetadataMissing);
+    source.metadataReady = true;
+    CHECK(QCamera3ZslRingPolicy::select({source}, 1000 * kMs, 1000 * kMs, 120).selected);
+    QCamera3ZslRingPolicy::Request request = {true, true, true, true, true, true, true};
+    CHECK(QCamera3ZslRingPolicy::eligible(request));
+    request.standardEnableZsl = false;
+    CHECK(!QCamera3ZslRingPolicy::eligible(request));
+    request.standardEnableZsl = true;
+    request.automaticControls = false;
+    CHECK(!QCamera3ZslRingPolicy::eligible(request));
+    request.automaticControls = true;
+    request.flashOff = false;
+    CHECK(!QCamera3ZslRingPolicy::eligible(request));
+    request.flashOff = true;
+    request.stillCapture = false;
+    CHECK(!QCamera3ZslRingPolicy::eligible(request));
 }
 
 void testSelection()
@@ -170,6 +195,7 @@ void testStats()
 int main()
 {
     testSizing();
+    testReadinessAndRequestGate();
     testSelection();
     testStats();
     if (g_failures) {

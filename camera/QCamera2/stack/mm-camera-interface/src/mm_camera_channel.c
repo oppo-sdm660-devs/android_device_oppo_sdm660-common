@@ -30,6 +30,7 @@
 // System dependencies
 #include <pthread.h>
 #include <fcntl.h>
+#include <errno.h>
 
 // Camera dependencies
 #include "cam_semaphore.h"
@@ -308,6 +309,42 @@ int32_t mm_channel_send_frame_sync_req_buf(mm_channel_t* my_obj)
     return rc;
 }
 
+static void mm_channel_reset_frame_requests(mm_channel_t *ch_obj)
+{
+    pthread_mutex_lock(&ch_obj->frame_req_lock);
+    /* Commands queued after a cancellation still own their reservations. */
+    ch_obj->frame_req_pending -= ch_obj->frame_req_cnt - ch_obj->cur_req_idx;
+    pthread_mutex_unlock(&ch_obj->frame_req_lock);
+    ch_obj->cur_req_idx = 0;
+    ch_obj->frame_req_cnt = 0;
+    memset(ch_obj->requested_frame_id, 0, sizeof(ch_obj->requested_frame_id));
+}
+
+static void mm_channel_append_frame_request(mm_channel_t *ch_obj, uint32_t frame_idx)
+{
+    if (ch_obj->cur_req_idx != 0) {
+        ch_obj->frame_req_cnt -= ch_obj->cur_req_idx;
+        memmove(ch_obj->requested_frame_id,
+                ch_obj->requested_frame_id + ch_obj->cur_req_idx,
+                ch_obj->frame_req_cnt * sizeof(ch_obj->requested_frame_id[0]));
+        ch_obj->cur_req_idx = 0;
+    }
+    ch_obj->requested_frame_id[ch_obj->frame_req_cnt++] = frame_idx;
+}
+
+static void mm_channel_consume_frame_request(mm_channel_t *ch_obj)
+{
+    if (ch_obj->frame_req_cnt == 0) return;
+    ++ch_obj->cur_req_idx;
+    pthread_mutex_lock(&ch_obj->frame_req_lock);
+    --ch_obj->frame_req_pending;
+    pthread_mutex_unlock(&ch_obj->frame_req_lock);
+    if (ch_obj->cur_req_idx == ch_obj->frame_req_cnt) {
+        ch_obj->cur_req_idx = 0;
+        ch_obj->frame_req_cnt = 0;
+    }
+}
+
 /*===========================================================================
  * FUNCTION   : mm_channel_process_stream_buf
  *
@@ -351,6 +388,8 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
                         &ch_obj->bundle.superbuf_queue,
                         &cmd_cb->u.buf);
     } else if (MM_CAMERA_CMD_TYPE_REQ_DATA_CB  == cmd_cb->cmd_type) {
+        if (cmd_cb->u.req_buf.num_buf_requested == 0)
+            mm_channel_reset_frame_requests(ch_obj);
         /* skip frames if needed */
         if (ch_obj->match_meta) {
             ch_obj->pending_cnt += cmd_cb->u.req_buf.num_buf_requested;
@@ -361,8 +400,7 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
         ch_obj->req_type = cmd_cb->u.req_buf.type;
         ch_obj->bWaitForPrepSnapshotDone = 0;
         if (cmd_cb->u.req_buf.frame_idx) {
-            ch_obj->requested_frame_id[ch_obj->frame_req_cnt++] =
-                    cmd_cb->u.req_buf.frame_idx;
+            mm_channel_append_frame_request(ch_obj, cmd_cb->u.req_buf.frame_idx);
             LOGH("FrameID Request from Q = %d", cmd_cb->u.req_buf.frame_idx);
         }
 
@@ -384,7 +422,9 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
             mm_camera_start_zsl_snapshot(ch_obj->cam_obj);
     } else if (MM_CAMERA_CMD_TYPE_STOP_ZSL == cmd_cb->cmd_type) {
             ch_obj->manualZSLSnapshot = FALSE;
-            mm_camera_stop_zsl_snapshot(ch_obj->cam_obj);
+            ch_obj->stop_zsl_snapshot_rc = mm_camera_stop_zsl_snapshot(ch_obj->cam_obj);
+            mm_channel_reset_frame_requests(ch_obj);
+            ch_obj->pending_cnt = ch_obj->pending_retro_cnt = 0;
     } else if (MM_CAMERA_CMD_TYPE_CONFIG_NOTIFY == cmd_cb->cmd_type) {
            if (m_obj->frame_sync.is_active) {
               m_obj->frame_sync.superbuf_queue.attr.notify_mode =
@@ -392,6 +432,7 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
            }
            ch_obj->bundle.superbuf_queue.attr.notify_mode = cmd_cb->u.notify_mode;
     } else if (MM_CAMERA_CMD_TYPE_FLUSH_QUEUE  == cmd_cb->cmd_type) {
+        mm_channel_reset_frame_requests(ch_obj);
         ch_obj->bundle.superbuf_queue.expected_frame_id = cmd_cb->u.flush_cmd.frame_idx;
         mm_channel_superbuf_flush(ch_obj,
                 &ch_obj->bundle.superbuf_queue, cmd_cb->u.flush_cmd.stream_type);
@@ -659,6 +700,8 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
             }
         }
         if (info.num_nodes > 0) {
+            /* Indexed requests are consumed in continuous mode too. */
+            mm_channel_consume_frame_request(ch_obj);
             if ((m_obj->frame_sync.is_active)
                     && (ch_obj->pending_cnt > 0)) {
                 trigger_cb = 1;
@@ -674,17 +717,6 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
                   ch_obj->pending_retro_cnt--;
                 }
 
-                if (ch_obj->frame_req_cnt != 0) {
-                    ch_obj->cur_req_idx++;
-                }
-
-                if ((ch_obj->pending_cnt == 0) && ch_obj->match_meta) {
-                    ch_obj->cur_req_idx = 0;
-                    ch_obj->frame_req_cnt = 0;
-                    memset(ch_obj->requested_frame_id, 0,
-                            sizeof(uint8_t) * MAX_CAPTURE_BATCH_NUM);
-                }
-
                 if (((ch_obj->pending_cnt == 0) ||
                       (ch_obj->stopZslSnapshot == 1)) &&
                       (ch_obj->manualZSLSnapshot == FALSE) &&
@@ -698,10 +730,7 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
                     ch_obj->needLEDFlash = FALSE;
                     ch_obj->bracketingState = MM_CHANNEL_BRACKETING_STATE_OFF;
                     ch_obj->isConfigCapture = FALSE;
-                    ch_obj->cur_req_idx = 0;
-                    ch_obj->frame_req_cnt = 0;
-                    memset(ch_obj->requested_frame_id, 0,
-                            sizeof(uint8_t) * MAX_CAPTURE_BATCH_NUM);
+                    mm_channel_reset_frame_requests(ch_obj);
                 }
 
                 if (ch_obj->isConfigCapture) {
@@ -739,6 +768,8 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
             break;
         }
     }
+    if (MM_CAMERA_CMD_TYPE_STOP_ZSL == cmd_cb->cmd_type)
+        cam_sem_post(&(ch_obj->cmd_thread.sync_sem));
 }
 
 /*===========================================================================
@@ -1372,6 +1403,9 @@ int32_t mm_channel_init(mm_channel_t *my_obj,
     }
 
     my_obj->num_s_cnt = 0;
+    my_obj->cur_req_idx = my_obj->frame_req_cnt = 0;
+    my_obj->frame_req_pending = 0;
+    pthread_mutex_init(&my_obj->frame_req_lock, NULL);
     memset(&my_obj->frame_sync, 0, sizeof(my_obj->frame_sync));
     pthread_mutex_init(&my_obj->frame_sync.sync_lock, NULL);
     mm_muxer_frame_sync_queue_init(&my_obj->frame_sync.superbuf_queue);
@@ -1411,6 +1445,7 @@ void mm_channel_release(mm_channel_t *my_obj)
 
     mm_muxer_frame_sync_queue_deinit(&my_obj->frame_sync.superbuf_queue);
     pthread_mutex_destroy(&my_obj->frame_sync.sync_lock);
+    pthread_mutex_destroy(&my_obj->frame_req_lock);
 
     /* memset bundle info */
     memset(&my_obj->bundle, 0, sizeof(mm_channel_bundle_t));
@@ -2159,7 +2194,6 @@ int32_t mm_channel_request_super_buf(mm_channel_t *my_obj,
         LOGE("Request info buf is NULL");
         return -1;
     }
-
     /* set pending_cnt
      * will trigger dispatching super frames if pending_cnt > 0 */
     /* send cam_sem_post to wake up cmd thread to dispatch super buffer */
@@ -2169,8 +2203,23 @@ int32_t mm_channel_request_super_buf(mm_channel_t *my_obj,
         node->cmd_type = MM_CAMERA_CMD_TYPE_REQ_DATA_CB;
         node->u.req_buf = *buf;
 
+        /* Include commands waiting for the worker when bounding indexed requests. */
+        pthread_mutex_lock(&my_obj->frame_req_lock);
+        if (buf->frame_idx && my_obj->frame_req_pending == MAX_CAPTURE_BATCH_NUM) {
+            pthread_mutex_unlock(&my_obj->frame_req_lock);
+            free(node);
+            return -ENOSPC;
+        }
+        if (buf->frame_idx) ++my_obj->frame_req_pending;
+
         /* enqueue to cmd thread */
-        cam_queue_enq(&(my_obj->cmd_thread.cmd_queue), node);
+        rc = cam_queue_enq(&(my_obj->cmd_thread.cmd_queue), node);
+        if (rc != 0 && buf->frame_idx) --my_obj->frame_req_pending;
+        pthread_mutex_unlock(&my_obj->frame_req_lock);
+        if (rc != 0) {
+            free(node);
+            return rc;
+        }
 
         /* wake up cmd thread */
         cam_sem_post(&(my_obj->cmd_thread.cmd_sem));
@@ -2345,10 +2394,18 @@ int32_t mm_channel_stop_zsl_snapshot(mm_channel_t *my_obj)
         node->cmd_type = MM_CAMERA_CMD_TYPE_STOP_ZSL;
 
         /* enqueue to cmd thread */
-        cam_queue_enq(&(my_obj->cmd_thread.cmd_queue), node);
+        rc = cam_queue_enq(&(my_obj->cmd_thread.cmd_queue), node);
+        if (rc != 0) {
+            free(node);
+            return rc;
+        }
 
         /* wake up cmd thread */
         cam_sem_post(&(my_obj->cmd_thread.cmd_sem));
+
+        /* The next HAL3 request must not race the daemon's previous snapshot. */
+        cam_sem_wait(&(my_obj->cmd_thread.sync_sem));
+        rc = my_obj->stop_zsl_snapshot_rc;
     } else {
         LOGE("No memory for mm_camera_node_t");
         rc = -1;

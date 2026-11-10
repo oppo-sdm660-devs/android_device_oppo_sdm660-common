@@ -44,6 +44,7 @@
 
 // Camera dependencies
 #include "QCamera3Channel.h"
+#include "QCamera3SourceMetadata.h"
 #include "QCamera3HWI.h"
 #include "QCamera3NativeAlgorithms.h"
 #include "QCameraTrace.h"
@@ -1254,7 +1255,7 @@ int32_t QCamera3ProcessingChannel::requestZSLBuf(uint32_t cam_handle,
                                    uint32_t channel_handle, uint32_t frameNumber,
                                    uint32_t numBuf)
 {
-    LOGI("ZSL request cam=%x rawCh=%x frame=%u num=%u",
+    LOGD("ZSL request cam=%x rawCh=%x frame=%u num=%u",
             cam_handle, channel_handle, frameNumber, numBuf);
     mm_camera_req_buf_t buf;
     memset(&buf, 0x0, sizeof(buf));
@@ -1820,7 +1821,9 @@ int32_t QCamera3ProcessingChannel::queueReprocMetadata(mm_camera_super_buf_t *me
                 dropInfo != mReprocDropBufferList.end(); dropInfo++) {
             if (*dropInfo == framenum) {
                 mReprocDropBufferList.erase(dropInfo);
-                return metadataBufDone(metadata);
+                const int32_t rc = metadataBufDone(metadata);
+                free(metadata);
+                return rc;
             } else if (*dropInfo < framenum) {
                 if(m_postprocessor.releaseReprocMetaBuffer(*dropInfo)) {
                     mReprocDropBufferList.erase(dropInfo);
@@ -1846,6 +1849,7 @@ int32_t QCamera3ProcessingChannel::queueReprocMetadata(mm_camera_super_buf_t *me
 int32_t QCamera3ProcessingChannel::metadataBufDone(mm_camera_super_buf_t *recvd_frame)
 {
     int32_t rc = NO_ERROR;;
+    if (recvd_frame != NULL && recvd_frame->ch_id == 0) return NO_ERROR;
     if ((NULL == m_pMetaChannel) || (NULL == recvd_frame)) {
         LOGE("Metadata channel or metadata buffer invalid");
         return BAD_VALUE;
@@ -5479,7 +5483,9 @@ void QCamera3PicChannel::jpegEvtHandle(jpeg_job_status_t status,
             else
                 src_frame = job->src_frame;
 
-            if (src_frame) {
+            if (src_frame && src_frame->ch_id == 0) {
+                obj->freeBufferForFrame(src_frame);
+            } else if (src_frame) {
                 if ((is_dual_camera_by_handle(obj->mStreams[0]->getMyHandle())
                     && ((get_main_camera_handle(obj->mStreams[0]->getMyHandle()))
                     || (get_aux_camera_handle(obj->mStreams[0]->getMyHandle()))))
@@ -5513,6 +5519,9 @@ void QCamera3PicChannel::jpegEvtHandle(jpeg_job_status_t status,
                 obj->m_postprocessor.releaseOfflineBuffersForFrame(
                         (uint32_t)resultFrameNumber);
             }
+
+            QCamera3HardwareInterface *hw = static_cast<QCamera3HardwareInterface *>(obj->mUserData);
+            hw->stopZslSnapshotMode();
 
             if (isMFCRaw) {
                 QCamera3HardwareInterface *hw = (QCamera3HardwareInterface *)obj->mUserData;
@@ -5552,11 +5561,6 @@ void QCamera3PicChannel::jpegEvtHandle(jpeg_job_status_t status,
                obj->m_postprocessor.stop(true);
             }
 
-            QCamera3HardwareInterface *hw = (QCamera3HardwareInterface *)obj->mUserData;
-            // ZSL snapshot mode is a capture-scoped daemon state. Leaving it on
-            // freezes AE after the first JPEG, so leave it as soon as the job
-            // completes (including errors).
-            hw->stopZslSnapshotMode();
             if (hw->isQuadCfaSensor()) {
                 hw->deleteQCFACaptureChannel();
             }
@@ -5685,6 +5689,7 @@ int32_t QCamera3PicChannel::startZslRing()
     mZslRingDraining = false;
     mZslRingInFlight = 0;
     mZslRingEntries.clear();
+    mZslRingMetadata.clear();
     mZslRingStats = QCamera3ZslRingPolicy::Stats();
     mRingZslFallbackPending = false;
     mRingZslSkipPending = false;
@@ -5796,7 +5801,8 @@ static void dumpRingSnapshot(const mm_camera_buf_def_t *def, uint32_t frame,
     LOGI("ZSLRING dump frame=%u bytes=%zu path=%s", frame, written, path);
 }
 
-void QCamera3PicChannel::handleZslRingSuperBuf(mm_camera_super_buf_t *recvd_frame)
+void QCamera3PicChannel::handleZslRingSuperBuf(mm_camera_super_buf_t *recvd_frame,
+        QCamera3Stream *sourceOwner)
 {
     const int64_t receivedNs = systemTime(SYSTEM_TIME_BOOTTIME);
     metadata_buffer_t *metadata = NULL;
@@ -5837,12 +5843,11 @@ void QCamera3PicChannel::handleZslRingSuperBuf(mm_camera_super_buf_t *recvd_fram
         }
     }
 
-    if (imageBuf != NULL && timestampNs == 0) {
+    if (metadata != NULL) queueZslRingMetadata(metadata);
+    if (imageBuf != NULL) {
         timestampNs = int64_t(imageBuf->ts.tv_sec) * 1000000000LL +
                 int64_t(imageBuf->ts.tv_nsec);
-        if (daemonFrame == 0) {
-            daemonFrame = imageBuf->frame_idx;
-        }
+        daemonFrame = imageBuf->frame_idx;
     }
     LOGI("ZSLRING cb bufs=%u imageIdx=%d type=%d len=%zu ts=%lld active=%d disabled=%d",
             recvd_frame->num_bufs, imageIdx,
@@ -5850,6 +5855,18 @@ void QCamera3PicChannel::handleZslRingSuperBuf(mm_camera_super_buf_t *recvd_fram
             imageBuf != NULL ? imageBuf->frame_len : 0,
             (long long)timestampNs,
             mZslRingActive ? 1 : 0, mZslRingDisabled ? 1 : 0);
+    QCamera3Stream *owner = sourceOwner;
+    if (imageBuf != NULL && owner == NULL) {
+        if (mRingYuvChannel && imageBuf->stream_id == mRingYuvChannel->getRingStreamHandle())
+            owner = mRingYuvChannel->getStreamByIndex(0);
+        for (uint32_t si = 0; owner == NULL && si < m_numStreams; ++si) {
+            if (mStreams[si] && (mStreams[si]->getMyHandle() == imageBuf->stream_id ||
+                    mStreams[si]->getMyServerID() == imageBuf->stream_id)) owner = mStreams[si];
+        }
+        if (owner == NULL && mRingYuvChannel &&
+                imageBuf->stream_id == mRingYuvChannel->getRingServerStreamId())
+            owner = mRingYuvChannel->getStreamByIndex(0);
+    }
     bool retained = false;
     {
         Mutex::Autolock lock(mZslRingLock);
@@ -5862,22 +5879,12 @@ void QCamera3PicChannel::handleZslRingSuperBuf(mm_camera_super_buf_t *recvd_fram
             mZslRingNextFrame = daemonFrame + 1;
         }
         if (mZslRingActive && !mZslRingDraining && !mZslRingDisabled &&
-                imageIdx >= 0) {
+                imageIdx >= 0 && owner != NULL && timestampNs > 0) {
             while (mZslRingEntries.size() >= size_t(mZslRingDepth)) {
                 ZslRingEntry oldest = *mZslRingEntries.begin();
                 mZslRingEntries.erase(mZslRingEntries.begin());
                 mZslRingStats.noteOverwritten();
-                if (mRingYuvChannel != NULL) {
-                    mRingYuvChannel->bufDone(oldest.bufIndex);
-                } else {
-                    for (uint32_t si = 0; si < m_numStreams; ++si) {
-                        if (mStreams[si] != NULL &&
-                                mStreams[si]->getMyServerID() == oldest.bufDef.stream_id) {
-                            mStreams[si]->bufDone(oldest.bufIndex);
-                            break;
-                        }
-                    }
-                }
+                oldest.owner->bufDone(oldest.bufIndex);
             }
             ZslRingEntry entry;
             memset(&entry.bufDef, 0, sizeof(entry.bufDef));
@@ -5885,8 +5892,10 @@ void QCamera3PicChannel::handleZslRingSuperBuf(mm_camera_super_buf_t *recvd_fram
             entry.timestampNs = timestampNs;
             entry.receivedNs = receivedNs;
             entry.bufIndex = uint8_t(imageIdx);
-            if (imageBuf != NULL) entry.bufDef = *imageBuf;
+            entry.owner = owner;
+            entry.bufDef = *imageBuf;
             mZslRingEntries.push_back(entry);
+            pairZslRingMetadataLocked();
             retained = true;
             const uint8_t *ringData = (const uint8_t *)entry.bufDef.buffer;
             const size_t ringLen = entry.bufDef.frame_len;
@@ -5915,19 +5924,7 @@ void QCamera3PicChannel::handleZslRingSuperBuf(mm_camera_super_buf_t *recvd_fram
         }
     }
 
-    if (!retained && imageBuf != NULL) {
-        if (mRingYuvChannel != NULL) {
-            mRingYuvChannel->bufDone(imageIdx);
-        } else {
-            for (uint32_t si = 0; si < m_numStreams; ++si) {
-                if (mStreams[si] != NULL &&
-                        mStreams[si]->getMyServerID() == imageBuf->stream_id) {
-                    mStreams[si]->bufDone(imageIdx);
-                    break;
-                }
-            }
-        }
-    }
+    if (!retained && imageBuf != NULL && owner != NULL) owner->bufDone(imageIdx);
     if (metaIdx >= 0 && m_pMetaChannel != NULL) {
         mm_camera_super_buf_t metaBuf = {};
         metaBuf.num_bufs = 1;
@@ -5962,9 +5959,10 @@ void QCamera3PicChannel::stopZslRing(const char *reason)
         mZslRingLastRequestNs = 0;
         for (List<ZslRingEntry>::iterator it = mZslRingEntries.begin();
                 it != mZslRingEntries.end(); ++it) {
-            if (mStreams[0] != NULL) mStreams[0]->bufDone(it->bufIndex);
+            it->owner->bufDone(it->bufIndex);
         }
         mZslRingEntries.clear();
+        mZslRingMetadata.clear();
         LOGI("ZSLRING drain held=%u inFlight=%u entries=%zu reason=%s",
                 held, inFlight, mZslRingEntries.size(),
                 reason != NULL ? reason : "unknown");
@@ -5976,6 +5974,7 @@ void QCamera3PicChannel::stopZslRing(const char *reason)
          * session reconfigure and blocks the next session's snapshot stream. */
         const int32_t cancelRc = m_camOps->cancel_super_buf_request(
                 m_camHandle, m_handle);
+        Mutex::Autolock lock(mZslRingLock);
         ++mZslRingCancelCount;
         LOGI("ZSLRING cancel request rc=%d count=%u held=%u inFlight=%u",
                 cancelRc, mZslRingCancelCount, held, inFlight);
@@ -6016,7 +6015,9 @@ void QCamera3PicChannel::resumeZslRingAfterLive(uint32_t frameNumber)
 bool QCamera3PicChannel::hasZslRingFrame()
 {
     Mutex::Autolock lock(mZslRingLock);
-    return mZslRingActive && !mZslRingDisabled && !mZslRingEntries.empty();
+    if (!mZslRingActive || mZslRingDisabled) return false;
+    for (const auto &entry : mZslRingEntries) if (entry.metadata) return true;
+    return false;
 }
 
 /*===========================================================================
@@ -6025,8 +6026,8 @@ bool QCamera3PicChannel::hasZslRingFrame()
  * DESCRIPTION: M2 standard-ZSL delivery. Pick the newest complete ring frame
  *              with sensor timestamp <= the request time and queue it into the
  *              existing JPEG postprocessor for the request frame number. The
- *              pseudo-ZSL deferred request is skipped; result metadata timestamp
- *              is overridden by HWI from noteZslRingSelection().
+ *              pseudo-ZSL deferred request is skipped; HWI receives the paired
+ *              source metadata for result translation and JPEG/EXIF.
  *
  * RETURN     : true when a ring frame was queued (JPEG will be delivered by the
  *              normal jpegEvtHandle path); false to fall back to live capture.
@@ -6034,7 +6035,6 @@ bool QCamera3PicChannel::hasZslRingFrame()
 bool QCamera3PicChannel::deliverRingZslFrame(uint32_t frameNumber)
 {
     ZslRingEntry selected;
-    memset(&selected, 0, sizeof(selected));
     bool found = false;
     const int32_t maxAgeMs = oppoZslRingMaxAgeMs();
     const int64_t nowNs = systemTime(SYSTEM_TIME_BOOTTIME);
@@ -6057,6 +6057,7 @@ bool QCamera3PicChannel::deliverRingZslFrame(uint32_t frameNumber)
             frame.receivedNs = it->receivedNs;
             frame.bufIndex = it->bufIndex;
             frame.inUse = false;
+            frame.metadataReady = bool(it->metadata);
             frames.push_back(frame);
             if (it->receivedNs >= latestReceivedNs) {
                 latestReceivedNs = it->receivedNs;
@@ -6100,6 +6101,8 @@ bool QCamera3PicChannel::deliverRingZslFrame(uint32_t frameNumber)
         ZslRingBorrowed borrowed;
         borrowed.frameNumber = frameNumber;
         borrowed.bufIndex = selected.bufIndex;
+        borrowed.owner = selected.owner;
+        borrowed.streamId = selected.bufDef.stream_id;
         mRingZslBorrowed.push_back(borrowed);
     }
 
@@ -6120,13 +6123,13 @@ bool QCamera3PicChannel::deliverRingZslFrame(uint32_t frameNumber)
     block->super.ch_id = 0;  // not a reprocess channel; PostProc frees the block
 
     QCamera3HardwareInterface *hal_obj = (QCamera3HardwareInterface *)mUserData;
-    const int64_t ageMs = (nowNs - selected.timestampNs) / 1000000LL;
+    const int64_t ageMs = (nowNs - selected.receivedNs) / 1000000LL;
     LOGI("ZSLRING select request=%u source=%u ts=%lld ageMs=%lld maxAge=%d ring=%zu",
             frameNumber, selected.frameNumber, (long long)selected.timestampNs,
             (long long)ageMs, maxAgeMs, ringSize);
     if (hal_obj != NULL) {
         hal_obj->noteZslRingSelection(frameNumber, selected.frameNumber,
-                selected.timestampNs);
+                selected.timestampNs, selected.metadata);
     }
     const int32_t rc = m_postprocessor.processData(&block->super, NULL, frameNumber);
     if (rc == NO_ERROR) {
@@ -6143,14 +6146,52 @@ bool QCamera3PicChannel::deliverRingZslFrame(uint32_t frameNumber)
     return true;
 }
 
-void QCamera3PicChannel::handleRingYuvBuf(mm_camera_buf_def_t *buf)
+void QCamera3PicChannel::queueZslRingMetadata(const metadata_buffer_t *metadata)
+{
+    Mutex::Autolock lock(mZslRingLock);
+    if (!mZslRingActive || mZslRingDraining || mZslRingDisabled) return;
+    IF_META_AVAILABLE(const int32_t, validFrame, CAM_INTF_META_FRAME_NUMBER_VALID, metadata) {
+        if (*validFrame && metadata->is_valid[CAM_INTF_META_FRAME_NUMBER]) {
+            const uint32_t frame = *POINTER_OF_META(CAM_INTF_META_FRAME_NUMBER, metadata);
+            mZslRingMetadata[frame].full = std::make_shared<metadata_buffer_t>(*metadata);
+        }
+    }
+    IF_META_AVAILABLE(const int32_t, validUrgent, CAM_INTF_META_URGENT_FRAME_NUMBER_VALID, metadata) {
+        if (*validUrgent && metadata->is_valid[CAM_INTF_META_URGENT_FRAME_NUMBER]) {
+            const uint32_t frame = *POINTER_OF_META(CAM_INTF_META_URGENT_FRAME_NUMBER, metadata);
+            mZslRingMetadata[frame].urgent = std::make_shared<metadata_buffer_t>(*metadata);
+        }
+    }
+    while (mZslRingMetadata.size() > mZslRingDepth + 8)
+        mZslRingMetadata.erase(mZslRingMetadata.begin());
+    pairZslRingMetadataLocked();
+}
+
+void QCamera3PicChannel::pairZslRingMetadataLocked()
+{
+    for (auto &entry : mZslRingEntries) {
+        if (entry.metadata || entry.timestampNs <= 0) continue;
+        for (const auto &record : mZslRingMetadata) {
+            const ZslRingMetadata &partial = record.second;
+            if (!partial.full || !partial.urgent) continue;
+            const auto &full = partial.full;
+            auto merged = pairSourceMetadata(full, partial.urgent, entry.timestampNs);
+            if (!merged) continue;
+            entry.frameNumber = record.first;
+            entry.metadata = merged;
+            break;
+        }
+    }
+}
+
+void QCamera3PicChannel::handleRingYuvBuf(mm_camera_buf_def_t *buf, QCamera3Stream *owner)
 {
     if (buf == NULL) return;
     mm_camera_super_buf_t super = {};
     super.num_bufs = 1;
     super.bufs[0] = buf;
     super.ch_id = 0;
-    handleZslRingSuperBuf(&super);
+    handleZslRingSuperBuf(&super, owner);
 }
 
 void QCamera3PicChannel::releaseRingZslBuffer(uint32_t frameNumber)
@@ -6159,17 +6200,20 @@ void QCamera3PicChannel::releaseRingZslBuffer(uint32_t frameNumber)
     for (List<ZslRingBorrowed>::iterator it = mRingZslBorrowed.begin();
             it != mRingZslBorrowed.end(); ++it) {
         if (it->frameNumber == frameNumber) {
-            if (mRingYuvChannel != NULL) {
-                mRingYuvChannel->bufDone(it->bufIndex);
-            } else if (mStreams[0] != NULL) {
-                mStreams[0]->bufDone(it->bufIndex);
-            }
+            it->owner->bufDone(it->bufIndex);
             LOGI("ZSLRING buffer returned request=%u bufIdx=%u", frameNumber,
                     (unsigned)it->bufIndex);
             mRingZslBorrowed.erase(it);
             return;
         }
     }
+}
+
+void QCamera3PicChannel::drainRingZslBorrowed()
+{
+    Mutex::Autolock lock(mZslRingLock);
+    for (const auto &entry : mRingZslBorrowed) entry.owner->bufDone(entry.bufIndex);
+    mRingZslBorrowed.clear();
 }
 
 bool QCamera3PicChannel::consumeRingZslFallback()
@@ -6246,6 +6290,7 @@ bool QCamera3PicChannel::deliverPreviewJpegFrame(uint32_t frameNumber)
  *==========================================================================*/
 int32_t QCamera3PicChannel::flush()
 {
+    stopZslRing("channel_flush");
     if (!mDualOwner) mDualCapture.flush();
     m_postprocessor.abortHdrCapture();
     int32_t rc = NO_ERROR;
@@ -6261,6 +6306,7 @@ int32_t QCamera3PicChannel::flush()
         return rc;
     }
 
+    drainRingZslBorrowed();
     if (0 < mOfflineMetaMemory.getCnt()) {
         mOfflineMetaMemory.deallocate();
     }
@@ -6389,6 +6435,7 @@ int32_t QCamera3PicChannel::stop()
         mPostProcStarted = false;
     }
 
+    drainRingZslBorrowed();
     if (mAuxPicChannel) {
         rc = mAuxPicChannel->stop();
     }
@@ -7116,10 +7163,13 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
             }
             mStreams[0]->bufDone(bufIdx);
             LOGI("ZSLSNAP plain qbuf frame=%u idx=%u", frameNumber, bufIdx);
-            /* HAL1 order: snapshot buffer queued first, then request_super_buf on
-             * the same (preview+snapshot) daemon channel. */
-            const int32_t plainRc = requestZSLBuf(m_camHandle, m_handle, frameNumber);
-            LOGI("plain snapshot request frame=%u rc=%d", frameNumber, plainRc);
+            // Live snapshot channels use individual stream callbacks; their
+            // daemon channel has no super-buffer command queue.
+            if (!hal_obj->isVideoSession()) {
+                const int32_t plainRc = requestZSLBuf(m_camHandle, m_handle, frameNumber);
+                LOGI("plain snapshot request frame=%u rc=%d", frameNumber, plainRc);
+                if (plainRc != NO_ERROR) return plainRc;
+            }
             indexUsed = bufIdx;
         } else {
             qcamera_fwk_input_pp_data_t *src_frame = NULL;
@@ -7188,6 +7238,7 @@ int32_t QCamera3PicChannel::requestZSLBuf(uint32_t camera_handle,
     uint32_t channel_handle = ch_handle;
     LOGH("frameNumber %d", frameNumber);
     QCamera3HardwareInterface* hal_obj = (QCamera3HardwareInterface*)mUserData;
+    if (hal_obj->isVideoSession()) return BAD_VALUE;
     if((hal_obj->getHalPPType() == CAM_HAL_PP_TYPE_BOKEH) && hal_obj->needHALPP()) {
         if (mAuxPicChannel) {
             return NO_ERROR;
@@ -7198,8 +7249,13 @@ int32_t QCamera3PicChannel::requestZSLBuf(uint32_t camera_handle,
         }
     }
 
-    LOGI("ZSL request cam=%x rawCh=%x frame=%u num=%u",
-            cam_handle, channel_handle, frameNumber, numBuf);
+    if (frameNumber != 0) {
+        LOGI("ZSL request cam=%x rawCh=%x frame=%u num=%u",
+                cam_handle, channel_handle, frameNumber, numBuf);
+    } else {
+        LOGD("ZSL request cam=%x rawCh=%x frame=0 num=%u",
+                cam_handle, channel_handle, numBuf);
+    }
     mm_camera_req_buf_t buf;
     memset(&buf, 0x0, sizeof(buf));
     buf.type = MM_CAMERA_REQ_SUPER_BUF;
@@ -7255,14 +7311,15 @@ int32_t QCamera3PicChannel::releaseOfflineMemory(uint32_t resultFrameNumber)
     return QCamera3ProcessingChannel::releaseOfflineMemory(resultFrameNumber);
 }
 
-int32_t QCamera3PicChannel::waitForSnapshotBuffer()
+int32_t QCamera3PicChannel::waitForSnapshotBuffer(const std::atomic<bool> *cancelled)
 {
     // HWI calls this before processCaptureRequest without mMutex; waiting in
     // request() would block the metadata needed to recycle these buffers.
     const nsecs_t deadline = systemTime(SYSTEM_TIME_MONOTONIC) + 3000000000LL;
     Mutex::Autolock lock(mFreeBuffersLock);
     for (;;) {
-        if (m_postprocessor.isHdrCaptureCancelled()) return -ECANCELED;
+        if ((cancelled && cancelled->load()) || m_postprocessor.isHdrCaptureCancelled())
+            return -ECANCELED;
         if (!mYuvMemory || m_bZSL || !mFreeBufferList.empty() ||
                 mYuvMemory->getCnt() < MIN(mCamera3Stream->max_buffers,
                     (uint32_t)MM_CAMERA_MAX_NUM_FRAMES)) return NO_ERROR;
@@ -7281,6 +7338,18 @@ void QCamera3PicChannel::freeBufferForFrame(mm_camera_super_buf_t *frame)
             frame->bufs[0]->buf_idx == CAM_FREERUN_IDX) {
         /* Preview YUV fallback owns a heap block released by PostProc; there is
          * no daemon stream buffer to return. */
+        return;
+    }
+    if (frame != NULL && frame->ch_id == 0) {
+        Mutex::Autolock lock(mZslRingLock);
+        for (auto it = mRingZslBorrowed.begin(); it != mRingZslBorrowed.end(); ++it) {
+            if (it->bufIndex == frame->bufs[0]->buf_idx &&
+                    it->streamId == frame->bufs[0]->stream_id) {
+                it->owner->bufDone(it->bufIndex);
+                mRingZslBorrowed.erase(it);
+                break;
+            }
+        }
         return;
     }
     Mutex::Autolock lock(mFreeBuffersLock);
@@ -7390,13 +7459,17 @@ void QCamera3PicChannel::streamCbRoutine(mm_camera_super_buf_t *super_frame,
 
     const bool zeroSource = snapshotSampleIsZero(super_frame->bufs[0]);
     if (IS_BUFFER_ERROR(super_frame->bufs[0]->flags) || zeroSource) {
+        const uint32_t failedFrame = mYuvMemory->getFrameNumber(frameIndex);
         LOGE("snapshot buffer invalid: errFlag=%d zeroSource=%d frame=%d",
                 IS_BUFFER_ERROR(super_frame->bufs[0]->flags) ? 1 : 0,
-                zeroSource ? 1 : 0, mYuvMemory->getFrameNumber(frameIndex));
-        mChannelCbBufErr(this, mYuvMemory->getFrameNumber(frameIndex),
-                CAMERA3_BUFFER_STATUS_ERROR, mUserData);
+                zeroSource ? 1 : 0, failedFrame);
+        cancelFramePProc(failedFrame);
+        mYuvMemory->markFrameNumber(frameIndex, EMPTY_FRAMEWORK_FRAME_NUMBER);
         freeBufferForFrame(super_frame);
+        free(frame);
         free(super_frame);
+        // This source never reaches the encoder, so its output cannot wait for a JPEG callback.
+        returnBufferError(failedFrame);
         return;
     }
     int32_t frameNum = ((IS_VALID_PTR(mSourceZSLChannel))?
@@ -7470,6 +7543,9 @@ int QCamera3PicChannel::returnBufferError(uint32_t frameNumber)
     result_buffer.status = CAMERA3_BUFFER_STATUS_ERROR;
     result_buffer.acquire_fence = -1;
     result_buffer.release_fence = -1;
+
+    QCamera3HardwareInterface *hw = static_cast<QCamera3HardwareInterface *>(mUserData);
+    hw->stopZslSnapshotMode();
 
     mChannelCB(NULL,
             &result_buffer,
@@ -8260,6 +8336,7 @@ void QCamera3PicChannel::ZSLChannelCb(mm_camera_super_buf_t *recvd_frame)
                 queueReprocMetadata(meta_buf, frameNum, false);
             } else {
                 m_pMetaChannel->bufDone(meta_buf);
+                free(meta_buf);
             }
         }
     }
@@ -8361,7 +8438,7 @@ void QCamera3ZslRingChannel::streamCbRoutine(mm_camera_super_buf_t *super_frame,
         return;
     }
     if (mRingOwner != NULL) {
-        mRingOwner->handleRingYuvBuf(buf);
+        mRingOwner->handleRingYuvBuf(buf, stream);
     } else {
         stream->bufDone(buf->buf_idx);
     }

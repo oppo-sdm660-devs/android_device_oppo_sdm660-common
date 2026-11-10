@@ -16,6 +16,12 @@ namespace qcamera {
  */
 class QCamera3ZslPolicy {
 public:
+    static bool snapshotChannelEligible(bool jpeg, bool inputZsl, bool video,
+            uint32_t encoderStreams, bool jpegOnEncoder) {
+        return jpeg && !inputZsl && !video &&
+                (encoderStreams == 0 || (encoderStreams == 1 && jpegOnEncoder));
+    }
+
     /* Result values published as org.lineageos.camera.zsl.zslStatus. */
     enum Status : int32_t {
         kStatusPending = 0,   /* request entered ZSL, selection not finished yet */

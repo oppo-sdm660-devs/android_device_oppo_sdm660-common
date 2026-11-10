@@ -45,6 +45,8 @@
 #include "QCamera3Mem.h"
 #include "QCamera3PostProc.h"
 #include "QCamera3ZslRingPolicy.h"
+#include <memory>
+#include <map>
 #include "QCamera3DualCapture.h"
 #include "QCamera3Stream.h"
 #include "QCamera3StreamMem.h"
@@ -857,13 +859,14 @@ public:
     }
     void abortHdrCapture() { m_postprocessor.abortHdrCapture(); }
     int32_t beginStillCapture(const uint32_t frameIds[4], uint32_t baseId,
-            bool frontCamera, bool enhanceDetail) {
-        return m_postprocessor.beginStillCapture(frameIds, baseId, frontCamera, enhanceDetail);
+            bool frontCamera, bool enhanceDetail, bool superZoom = false) {
+        return m_postprocessor.beginStillCapture(frameIds, baseId, frontCamera, enhanceDetail, superZoom);
     }
     bool cancelHdrCapture(uint32_t frameNumber) {
         return m_postprocessor.cancelHdrCapture(frameNumber);
     }
-    int32_t waitForSnapshotBuffer();
+    int32_t waitForSnapshotBuffer(const std::atomic<bool> *cancelled = nullptr);
+    void wakeSnapshotBufferWaiters() { mSnapshotBufferCond.broadcast(); }
     bool isHdrCaptureFrame(uint32_t frameNumber) {
         return m_postprocessor.isHdrCaptureFrame(frameNumber);
     }
@@ -975,10 +978,14 @@ private:
         int64_t receivedNs;
         uint8_t bufIndex;
         mm_camera_buf_def_t bufDef;
+        QCamera3Stream *owner;
+        std::shared_ptr<metadata_buffer_t> metadata;
     } ZslRingEntry;
     typedef struct {
         uint32_t frameNumber;
         uint8_t bufIndex;
+        QCamera3Stream *owner;
+        uint32_t streamId;
     } ZslRingBorrowed;
     bool mZslRingActive;
     bool mZslRingDraining;
@@ -990,6 +997,11 @@ private:
     bool mRingZslResumeAfterLive;
     uint32_t mRingZslResumeFrame;
     uint32_t mZslRingDepth;
+    struct ZslRingMetadata {
+        std::shared_ptr<metadata_buffer_t> full;
+        std::shared_ptr<metadata_buffer_t> urgent;
+    };
+    std::map<uint32_t, ZslRingMetadata> mZslRingMetadata;
     List<ZslRingEntry> mZslRingEntries;
     QCamera3ZslRingPolicy::Stats mZslRingStats;
     QCamera3ZslRingChannel *mRingYuvChannel;
@@ -1005,17 +1017,21 @@ private:
     uint32_t mRingZslSelectFailures;
     List<ZslRingBorrowed> mRingZslBorrowed;
     void requestZslRingFrameLocked();
-    void handleZslRingSuperBuf(mm_camera_super_buf_t *recvd_frame);
+    void pairZslRingMetadataLocked();
+    void handleZslRingSuperBuf(mm_camera_super_buf_t *recvd_frame,
+            QCamera3Stream *owner = nullptr);
     void logZslRingStatsLocked(bool final);
     bool isPendingCaptureFrame(uint32_t frameNumber);
     void resumeZslRingAfterLive(uint32_t frameNumber);
     bool deliverRingZslFrame(uint32_t frameNumber);
     bool deliverPreviewJpegFrame(uint32_t frameNumber);
     void releaseRingZslBuffer(uint32_t frameNumber);
+    void drainRingZslBorrowed();
     int32_t queueZslSnapshotBuffer(uint32_t frameNumber);
 public:
     void setRingYuvChannel(QCamera3ZslRingChannel *channel) { mRingYuvChannel = channel; }
-    void handleRingYuvBuf(mm_camera_buf_def_t *buf);
+    void handleRingYuvBuf(mm_camera_buf_def_t *buf, QCamera3Stream *owner);
+    void queueZslRingMetadata(const metadata_buffer_t *metadata);
 private:
     bool mLiveShot;
     bool m_bStarted;

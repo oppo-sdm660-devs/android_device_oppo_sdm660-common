@@ -542,6 +542,7 @@ typedef struct mm_channel {
 
     /* manual zsl snapshot control */
     uint8_t manualZSLSnapshot;
+    int32_t stop_zsl_snapshot_rc;
 
     /* control for zsl led */
     uint8_t startZSlSnapshotCalled;
@@ -567,6 +568,8 @@ typedef struct mm_channel {
     uint8_t cur_req_idx;
     uint8_t frame_req_cnt;
     uint32_t requested_frame_id[MAX_CAPTURE_BATCH_NUM];
+    pthread_mutex_t frame_req_lock;
+    uint32_t frame_req_pending;
 
     /*For channel frame sync*/
     mm_frame_sync_t frame_sync;

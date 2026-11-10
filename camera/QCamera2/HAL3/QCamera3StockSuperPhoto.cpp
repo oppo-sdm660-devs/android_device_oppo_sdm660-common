@@ -33,6 +33,10 @@ struct Api {
     int32_t (*addOutput)(uint8_t *, uint8_t *, void *) = nullptr;
     int32_t (*process)(RenderParameters, void *) = nullptr;
     int32_t (*release)(void **) = nullptr;
+    int32_t (*outputWidth)(void *) = nullptr;
+    int32_t (*outputHeight)(void *) = nullptr;
+    int32_t (*setBaseFrame)(int32_t, void *) = nullptr;
+    int32_t (*baseFrame)(void *) = nullptr;
     void (*configure)(char *, float, bool, bool, int32_t, void *, int32_t) = nullptr;
     Api() {
         if (!core) return;
@@ -43,6 +47,10 @@ struct Api {
         addOutput = reinterpret_cast<decltype(addOutput)>(dlsym(core, "VDSuperPhoto_AddOutputBufferPlanes"));
         process = reinterpret_cast<decltype(process)>(dlsym(core, "VDSuperPhoto_Process"));
         release = reinterpret_cast<decltype(release)>(dlsym(core, "VDReleaseSuperPhoto"));
+        outputWidth = reinterpret_cast<decltype(outputWidth)>(dlsym(core, "VDSuperPhoto_GetOuputWidth"));
+        outputHeight = reinterpret_cast<decltype(outputHeight)>(dlsym(core, "VDSuperPhoto_GetOuputHeight"));
+        setBaseFrame = reinterpret_cast<decltype(setBaseFrame)>(dlsym(core, "VDSuperPhoto_SetBaseFrameIndex"));
+        baseFrame = reinterpret_cast<decltype(baseFrame)>(dlsym(core, "VDSuperPhoto_GetBaseFrameIndex"));
         configure = reinterpret_cast<decltype(configure)>(dlsym(tuning,
                 "_Z19superZoomConfigParaPcfbbiPvi"));
     }
@@ -51,6 +59,7 @@ struct Api {
         if (core) dlclose(core);
     }
     bool valid() const { return initialize && addFrame && addOutput && process && release && configure; }
+    bool zoomValid() const { return valid() && outputWidth && outputHeight && setBaseFrame && baseFrame; }
 };
 struct Scratch {
     uint8_t *planes = nullptr;
@@ -62,16 +71,9 @@ void copyPlane(uint8_t *dst, uint32_t dstStride, const uint8_t *src, uint32_t sr
     for (uint32_t y = 0; y < rows; ++y)
         memcpy(dst + size_t(y) * dstStride, src + size_t(y) * srcStride, width);
 }
-}
-
-bool QCamera3StockSuperPhoto::isAvailable() {
-    Lock lock;
-    Api api;
-    return api.valid();
-}
-
-int32_t QCamera3StockSuperPhoto::process(const Image *images, uint32_t count,
-        const Image &output, const char *sensorName, int32_t iso, bool frontCamera,
+using Image = QCamera3StockSuperPhoto::Image;
+int32_t processCore(const Image *images, uint32_t count, const Image &output,
+        const char *sensorName, int32_t iso, bool frontCamera, float zoom,
         const std::atomic<bool> *cancelled) {
     if (!images || count < 2 || count > 4 || !QCamera3HdrAlgo::validImage(output) ||
             !sensorName || sensorName[0] == '\0' || strnlen(sensorName, 32) == 32 || iso <= 0)
@@ -101,20 +103,25 @@ int32_t QCamera3StockSuperPhoto::process(const Image *images, uint32_t count,
     uint8_t *destination = scratch.planes + size_t(frameBytes) * count;
     Lock lock;
     Api api;
-    if (!api.valid()) return -ENOSYS;
+    const bool superZoom = zoom > 1.0f;
+    if (superZoom ? !api.zoomValid() : !api.valid()) return -ENOSYS;
     if (stopped(cancelled)) return -ECANCELED;
     char sensor[32] = {};
     memcpy(sensor, sensorName, strlen(sensorName));
     // Defaults at the stock caller's 0xff60, then the exact stock tuning call.
     RenderParameters parameters = {0, 0, 0, 0, iso, -1.0f, {0, 0, 0, 60}};
-    api.configure(sensor, 1.0f, false, frontCamera, iso, &parameters, 0);
+    api.configure(sensor, zoom, false, frontCamera, iso, &parameters, 0);
     if (stopped(cancelled)) return -ECANCELED;
     void *engine = nullptr;
     int32_t frameCounter = 0;
     int32_t rc = api.initialize(count, 8, output.width, output.height, 0, 0,
-            1.0f, output.width, output.height, -1, -1, output.width,
+            zoom, output.width, output.height, -1, -1, output.width,
             output.height, 8, &frameCounter, &engine);
     if (rc == 0 && !engine) rc = -EIO;
+    if (rc == 0 && superZoom &&
+            (api.outputWidth(engine) != int32_t(output.width) ||
+             api.outputHeight(engine) != int32_t(output.height))) rc = -EPROTO;
+    if (rc == 0 && superZoom) rc = api.setBaseFrame(0, engine);
     for (uint32_t i = 0; i < count && rc == 0; ++i) {
         uint8_t *image = scratch.planes + size_t(frameBytes) * i;
         rc = stopped(cancelled) ? -ECANCELED : api.addFrame(image, image + size_t(yBytes), 0, engine);
@@ -122,6 +129,7 @@ int32_t QCamera3StockSuperPhoto::process(const Image *images, uint32_t count,
     if (rc == 0) rc = stopped(cancelled) ? -ECANCELED :
             api.addOutput(destination, destination + size_t(yBytes), engine);
     if (rc == 0) rc = stopped(cancelled) ? -ECANCELED : api.process(parameters, engine);
+    if (rc == 0 && superZoom && api.baseFrame(engine) != 0) rc = -EPROTO;
     if (engine) {
         const int32_t cleanup = api.release(&engine);
         if (rc == 0) rc = cleanup;
@@ -132,6 +140,55 @@ int32_t QCamera3StockSuperPhoto::process(const Image *images, uint32_t count,
             output.width, output.height);
     copyPlane(output.data + output.uvOffset, output.uvStride, destination + size_t(yBytes),
             output.width, output.width, output.height / 2);
+    return 0;
+}
+}
+
+bool QCamera3StockSuperPhoto::isAvailable() {
+    Lock lock;
+    Api api;
+    return api.valid();
+}
+
+bool QCamera3StockSuperPhoto::is2xAvailable() {
+    Lock lock;
+    Api api;
+    return api.zoomValid();
+}
+
+int32_t QCamera3StockSuperPhoto::process(const Image *images, uint32_t count,
+        const Image &output, const char *sensorName, int32_t iso, bool frontCamera,
+        const std::atomic<bool> *cancelled) {
+    return processCore(images, count, output, sensorName, iso, frontCamera, 1.0f, cancelled);
+}
+
+int32_t QCamera3StockSuperPhoto::process2x(const Image *images, const Source *sources,
+        uint32_t count, const Image &output, const char *sensorName,
+        const ZoomOptions &options, ZoomResult *result, const std::atomic<bool> *cancelled) {
+    if (!options.fullFieldOfView || !sources || count != ZOOM_FRAME_COUNT) return -EINVAL;
+    const Source &reference = sources[0];
+    for (uint32_t i = 0; i < count; ++i) {
+        const Source &source = sources[i];
+        if (source.timestampNs <= 0 || source.exposureTimeNs <= 0 || source.sensitivity <= 0)
+            return -EINVAL;
+        for (uint32_t j = 0; j < i; ++j)
+            if (source.frameNumber == sources[j].frameNumber ||
+                    source.timestampNs == sources[j].timestampNs) return -EINVAL;
+        if (double(source.exposureTimeNs) < double(reference.exposureTimeNs) * .85 ||
+                double(source.exposureTimeNs) > double(reference.exposureTimeNs) * 1.15 ||
+                source.sensitivity != reference.sensitivity) return -EINVAL;
+    }
+    const int32_t rc = processCore(images, count, output, sensorName,
+            reference.sensitivity, false, 2.0f, cancelled);
+    if (rc != 0) return rc;
+    if (result) {
+        ZoomResult report;
+        report.algorithmApplied = true;
+        report.zoomRatio = 2.0f;
+        report.submittedFrames = count;
+        memcpy(report.sources, sources, sizeof(report.sources));
+        *result = report;
+    }
     return 0;
 }
 }

@@ -26,6 +26,15 @@ enum QCamera3NativeAlgorithm {
     OPPO_NATIVE_LONG_EXPOSURE = 18,
     OPPO_NATIVE_AR_TRACK = 19,
     OPPO_NATIVE_REMOSAIC = 20,
+    OPPO_NATIVE_PANORAMA = 21,
+    OPPO_NATIVE_SUPERZOOM = 22,
+};
+
+// Diagnostics cannot report success/failure as if they were the requested fusion.
+enum QCamera3DiagnosticStage {
+    OPPO_STAGE_FLASH_SEQUENCE = 1001,
+    OPPO_STAGE_SCENE_BRIGHTNESS = 1002,
+    OPPO_STAGE_OCCLUSION = 1003,
 };
 
 }

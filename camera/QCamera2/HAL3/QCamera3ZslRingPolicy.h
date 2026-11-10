@@ -26,7 +26,23 @@ public:
         int64_t receivedNs = 0;    /* HAL receipt time, same clock as nowNs */
         uint8_t bufIndex = 0;
         bool inUse = false;
+        bool metadataReady = false;
     };
+
+    struct Request {
+        bool standardEnableZsl;
+        bool stillCapture;
+        bool automaticControls;
+        bool flashOff;
+        bool ordinarySession;
+        bool nativeModeOff;
+        bool ringEnabled;
+    };
+    static bool eligible(const Request &request) {
+        return request.standardEnableZsl && request.stillCapture &&
+                request.automaticControls && request.flashOff && request.ordinarySession &&
+                request.nativeModeOff && request.ringEnabled;
+    }
 
     struct Stats {
         uint32_t received = 0;
@@ -61,6 +77,7 @@ public:
         kFallbackTooOld,
         kFallbackFutureOnly,
         kFallbackFrameInUse,
+        kFallbackMetadataMissing,
     };
 
     static int32_t clampDepth(int32_t depth);

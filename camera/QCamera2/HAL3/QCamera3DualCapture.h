@@ -21,12 +21,20 @@ public:
         Rect referenceCrop;
         Rect activeArrayCrop;
         uint32_t imageWidth, imageHeight;
+        // Actual captured frame dimensions; imageWidth/imageHeight stay the stock
+        // ARC reference and are reached by centre-crop + upscale when needed.
+        uint32_t sourceWidth, sourceHeight;
+        // Daemon scaler metadata can still report the binned raw mode; map it to
+        // source coordinates before ARC.
+        uint32_t metadataWidth, metadataHeight;
         Rect streamCrop, streamRoiMap;
         bool requireStreamCrop;
     };
     struct Config {
         Sensor sensors[2];
         float wideMaxFov;
+        // Stock bokeh narrows the output to the auxiliary FOV; 0 keeps full wide.
+        float teleMaxFov = 0.0f;
         int64_t maxTimestampDeltaNs;
         int64_t timeoutNs;
     };
@@ -59,6 +67,10 @@ public:
     bool hasActiveCapture() const;
     // -EAGAIN until complete; output and wide identity untouched on failure.
     int32_t process(uint64_t token, const Image &destination);
+    // CPU NV12 centre-crop + bilinear scale; used by submitImage/process and
+    // host tests. crop=true applies the FOV ratio, otherwise aspect crop only.
+    static bool resize(const Image &from, const Image &to, bool crop,
+            float ratio = 1.0f);
     bool cancel(uint64_t token);
     void flush();
 

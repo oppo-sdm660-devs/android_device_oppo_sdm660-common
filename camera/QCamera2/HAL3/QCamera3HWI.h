@@ -35,11 +35,23 @@
 #include <utils/KeyedVector.h>
 #include <utils/List.h>
 #include <map>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <string>
+#include <vector>
 #include "CameraMetadata.h"
 
 // Camera dependencies
 #include "hardware/camera3.h"
 #include "QCamera3Channel.h"
+#include "QCamera3RequestLifecycle.h"
+#include "QCamera3FrameNumberMap.h"
+#include "QCamera3SuperZoomPlan.h"
+#include "QCamera3PanoramaWorker.h"
 #include "QCamera3CropRegionMapper.h"
 #include "QCamera3HALHeader.h"
 #include "QCamera3Mem.h"
@@ -204,12 +216,14 @@ public:
     int32_t allocStoreInternalFrameNumber(uint32_t frameworkFrameNumber,
             uint32_t &internalFrameNumber);
     int32_t generateStoreInternalFrameNumber(uint32_t &internalFrameNumber);
-    int32_t freeInternalFrameNumber(uint32_t internalFrameNumber);
+    void retireFrameworkFrameNumber(uint32_t frameworkFrameNumber);
+    void retireInternalFrameNumber(uint32_t internalFrameNumber);
+    void retireAllInternalFrames();
     int32_t getFrameworkFrameNumber(uint32_t internalFrameNumber, uint32_t &frameworkFrameNumber);
     void purgeOldEntriesLocked();
 
 private:
-    std::map<uint32_t, uint32_t> _register;
+    QCamera3FrameNumberMap _register;
     uint32_t _nextFreeInternalNumber;
     Mutex mRegistryLock;
 };
@@ -297,9 +311,10 @@ public:
     int32_t orchestrateLowLightCapture(camera3_capture_request_t *request);
     int32_t orchestrateBurstCapture(camera3_capture_request_t *request, bool lowLight);
     int32_t orchestrateAutoCapturePolicy(camera3_capture_request_t *request,
-            const CameraMetadata &settings);
+            const CameraMetadata &settings, bool &isAdvancedCapture);
     bool isLowLightSnapshotRequest(camera3_capture_request_t *request);
     bool isStillSnapshotRequest(camera3_capture_request_t *request);
+    bool makeSuperZoomPlan(const camera3_capture_request_t *request, QCamera3SuperZoomPlan &plan);
     // Auto HDR/night decision published as autoCaptureReason.
     int32_t mAutoCaptureReason = 0;
     // Frame the decision above belongs to; UINT32_MAX until decided.
@@ -352,7 +367,7 @@ public:
             metadata_buffer_t *parm, uint32_t snapshotStreamId,
             const camera3_capture_request_t *request);
     camera_metadata_t* translateCbUrgentMetadataToResultMetadata (
-                             metadata_buffer_t *metadata);
+                             metadata_buffer_t *metadata, bool updateState = true);
     camera_metadata_t* translateFromHalMetadata(metadata_buffer_t *metadata,
                             nsecs_t timestamp, int32_t request_id,
                             const CameraMetadata& jpegMetadata, uint8_t pipeline_depth,
@@ -432,10 +447,12 @@ public:
     /* M2: map a ring-selected source frame to the request so result metadata
      * can report the source SENSOR_TIMESTAMP/shutter timestamp. */
     void noteZslRingSelection(uint32_t requestFrame, uint32_t sourceFrame,
-            int64_t timestampNs);
+            int64_t timestampNs,
+            std::shared_ptr<metadata_buffer_t> metadata = nullptr);
+    std::shared_ptr<metadata_buffer_t> getZslRingMetadata(uint32_t requestFrame);
     void clearZslRingSelection(uint32_t requestFrame);
     bool takeZslRingSelection(uint32_t requestFrame, uint32_t &sourceFrame,
-            int64_t &timestampNs);
+            int64_t &timestampNs, std::shared_ptr<metadata_buffer_t> &metadata);
     void markZslRingRequest(uint32_t requestFrame);
     void clearZslRingRequest(uint32_t requestFrame);
     bool isZslRingRequest(uint32_t requestFrame);
@@ -464,6 +481,8 @@ public:
 
     uint32_t getCameraID() {return mCameraId;}
     bool isDualCamera() { return mDualCamera; };
+    bool isVideoSession() const { return m_bIsVideo; }
+    bool isSuperZoomFullFieldOfView(const metadata_buffer_t *metadata);
     int32_t getNativeStillMode() { return mNativeStillMode; }
     int32_t getNativeDualBindStatus() { return mNativeDualBindStatus; }
     int32_t getNativeBeautyStrength() { return mNativeBeautyStrength; }
@@ -858,6 +877,12 @@ private:
     bool mLdafCalibExist;
     uint32_t mLdafCalib[2];
     int32_t mLastCustIntentFrmNum;
+    // task-178 diagnostic A/B only; both properties default off.
+    int32_t mLegacyAfTrigger = 0;
+    cam_area_t mLastAeRoi[2] = {};
+    cam_area_t mLastAfRoi[2] = {};
+    bool mLastAeRoiValid[2] = {};
+    bool mLastAfRoiValid[2] = {};
 
     bool cacheMetaIfNeeded(
              mm_camera_super_buf_t *metadata_buf, uint32_t frame_number);
@@ -1005,7 +1030,12 @@ private:
     int32_t mOppoZslRingBuffers = 4;
     uint32_t mOppoZslFailFrame = UINT32_MAX;
     Mutex mZslRingSelectionLock;
-    std::map<uint32_t, std::pair<uint32_t, int64_t>> mZslRingSelections;
+    struct ZslRingSelection {
+        uint32_t sourceFrame;
+        int64_t timestampNs;
+        std::shared_ptr<metadata_buffer_t> metadata;
+    };
+    std::map<uint32_t, ZslRingSelection> mZslRingSelections;
     std::map<uint32_t, uint8_t> mZslRingRequestFrames;
     std::map<uint32_t, uint8_t> mPreviewJpegRequestFrames;
     struct ZslFrameState {
@@ -1048,6 +1078,47 @@ private:
     void fillAutoCaptureStats(QCamera3AutoCapturePolicy::Stats &stats,
             const CameraMetadata &settings);
     bool mRestoreFrameworkSettings = false;
+    struct AcceptedRequest : QCamera3RequestLifecycle {
+        camera3_capture_request_t request = {};
+        CameraMetadata settings;
+        CameraMetadata deferredMetadata;
+        bool deferFinalMetadata = false;
+        std::vector<buffer_handle_t> handles;
+        std::vector<camera3_stream_buffer_t> outputs;
+        buffer_handle_t inputHandle = nullptr;
+        camera3_stream_buffer_t input = {};
+        std::vector<std::string> physicalIds;
+        std::vector<CameraMetadata> physicalSettings;
+        std::vector<const char *> physicalIdPointers;
+        std::vector<const camera_metadata_t *> physicalSettingPointers;
+        ~AcceptedRequest();
+    };
+    int32_t acceptRequest(camera3_capture_request_t *request);
+    void requestWorker();
+    int32_t waitRequestFences(AcceptedRequest &request);
+    void markAsyncNativePending(uint32_t internalFrame);
+    void deferAsyncFinalMetadata(uint32_t frameworkFrame);
+    int32_t waitForAsyncResult(uint32_t frameworkFrame);
+    std::shared_ptr<AcceptedRequest> recordAsyncResult(
+            uint32_t frameworkFrame, const camera3_capture_result_t &result);
+    void recordAsyncError(uint32_t frameworkFrame, int32_t code);
+    void pauseAsyncRequests();
+    void resumeAsyncRequests();
+    void settleUnsubmittedRequests();
+    void stopRequestWorker();
+    std::mutex mAsyncLock;
+    std::condition_variable mAsyncCondition;
+    std::deque<std::shared_ptr<AcceptedRequest>> mAsyncQueue;
+    std::map<uint32_t, std::shared_ptr<AcceptedRequest>> mAcceptedRequests;
+    CameraMetadata mAcceptedSettings;
+    bool mAcceptedVideoHdrChosen = false;
+    int32_t mAcceptedVideoHdrMode = 0;
+    std::thread mRequestWorker;
+    std::atomic<bool> mAsyncCancelled{false};
+    unsigned mAsyncPauseCount = 0;
+    bool mAsyncStopping = false;
+    bool mAsyncBusy = false;
+    static constexpr size_t kMaxAcceptedRequests = 128;
     uint32_t mSubmittingBurstFrameNumber = UINT32_MAX;
     uint32_t sync_counter;
 
@@ -1069,20 +1140,39 @@ private:
     size_t mNativeTraceNext = 0;
     Mutex mNativeTraceLock;
 
-    // Panorama v0.8.x protocol state. The backend is only used for frame
-    // collection until task-150 connects the synthetic JPEG output.
     static bool panoramaSupported(uint32_t cameraId);
     int32_t handlePanoramaRequest(const camera_metadata_t *settings);
+    int32_t capturePanorama(camera3_capture_request_t *request);
+    void finishPanorama(QCamera3PanoramaWorker::Result result);
+    void cachePanoramaMetadata(const metadata_buffer_t *metadata);
+    void drainPanorama();
     void updatePanoramaMetadata(CameraMetadata &metadata);
     static void panoramaFrameHook(void *userdata, const mm_camera_buf_def_t *frame,
             const cam_dimension_t &dim, const cam_frame_len_offset_t &offset,
             int64_t timestampNs);
     void resetPanoramaState(int32_t failureReason);
-    QCamera3OppoPanorama *mPanorama = nullptr;
+    struct PanoramaOutput {
+        uint32_t frameNumber;
+        camera3_stream_buffer_t buffer;
+        CameraMetadata settings;
+        QCamera3GrallocMemory memory{0, false};
+        int32_t index = -1;
+        size_t capacity = 0;
+        ~PanoramaOutput() { if (index >= 0) memory.unregisterBuffer(index); }
+    };
+    struct PanoramaMetadata {
+        std::shared_ptr<metadata_buffer_t> full;
+        std::shared_ptr<metadata_buffer_t> urgent;
+    };
+    std::map<uint32_t, PanoramaMetadata> mPanoramaMetadata;
+    std::shared_ptr<QCamera3PanoramaWorker> mPanorama;
+    std::shared_ptr<PanoramaOutput> mPanoramaOutput;
+    Condition mPanoramaCondition;
     Mutex mPanoramaLock;
     bool mPanoramaActive = false;
     uint32_t mPanoramaFrameCount = 0;
     int32_t mPanoramaFailureReason = 0;
+
 };
 
 }; // namespace qcamera

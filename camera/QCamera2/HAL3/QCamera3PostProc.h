@@ -165,7 +165,7 @@ public:
     int32_t beginHdrCapture(const uint32_t frameIds[3], uint32_t baseId, bool frontCamera);
     int32_t beginLowLightCapture(const uint32_t frameIds[5], uint32_t baseId, bool frontCamera);
     int32_t beginStillCapture(const uint32_t frameIds[4], uint32_t baseId,
-            bool frontCamera, bool enhanceDetail);
+            bool frontCamera, bool enhanceDetail, bool superZoom = false);
     void abortHdrCapture();
     int32_t beginDualCapture(uint32_t frameNumber, uint64_t token);
     void notifyDualFrameReady();
@@ -335,7 +335,10 @@ private:
     QCamera3HdrAlgo::Image mHdrImages[kMaxBurstFrames];
     double mHdrExposure[kMaxBurstFrames];
     int32_t mHdrSensitivity[kMaxBurstFrames];
+    int64_t mHdrExposureTime[kMaxBurstFrames];
+    bool mHdrFullFieldOfView[kMaxBurstFrames];
     float mHdrDrcGain[kMaxBurstFrames];
+    bool mHdrDrcValid[kMaxBurstFrames];
     // Per-frame capture timestamps, filled by the collector from frame metadata.
     int64_t mHdrTimestamps[kMaxBurstFrames];
     qcamera_hal3_pp_data_t *mHdrBaseJob;

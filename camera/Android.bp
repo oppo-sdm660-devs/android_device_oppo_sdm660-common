@@ -95,6 +95,7 @@ cc_library_shared {
         "QCamera2/HAL3/QCamera3MmsVstab.cpp",
         "QCamera2/HAL3/QCamera3OppoPanorama.cpp",
         "QCamera2/HAL3/QCamera3PanoramaJpeg.cpp",
+        "QCamera2/HAL3/QCamera3PanoramaWorker.cpp",
         "QCamera2/HAL3/QCamera3MmsGl.cpp",
         "QCamera2/HAL3/QCamera3MmsGyroSource.cpp",
         "QCamera2/HAL3/QCamera3MmsChannel.cpp",

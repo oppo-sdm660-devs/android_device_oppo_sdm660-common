@@ -71,7 +71,7 @@ namespace qcamera {
 
 static void nativeAlgorithmTrace(jpeg_settings_t *settings, const char *algorithm,
         int32_t status, uint32_t frame, uint32_t inputs,
-        QCamera3HardwareInterface *hardware, int32_t applied = 0)
+        QCamera3HardwareInterface *hardware, int32_t applied = 0, int32_t stageId = -1)
 {
     if (!settings) return;
     uint32_t frameworkFrame = settings->framework_frame_number_valid ?
@@ -93,8 +93,9 @@ static void nativeAlgorithmTrace(jpeg_settings_t *settings, const char *algorith
         settings->native_trace_valid = 1;
         if (hardware) {
             hardware->noteNativeTrace(frame, settings->native_trace.c_str(),
-                    status == NO_ERROR ? settings->native_still_mode : OPPO_NATIVE_OFF);
-            hardware->noteNativeStage(frame, settings->native_still_mode, status, applied);
+                    stageId < 0 && status == NO_ERROR ? settings->native_still_mode : OPPO_NATIVE_OFF);
+            hardware->noteNativeStage(frame, stageId < 0 ? settings->native_still_mode : stageId,
+                    status, applied);
         }
     }
     LOGI("%s", settings->image_desc);
@@ -849,34 +850,6 @@ int32_t QCamera3PostProcessor::processData(mm_camera_super_buf_t *input,
 {
     LOGD("E");
 
-    // Snapshot path selected structurally: picture channel, snapshot buffer and
-    // no framework output buffer; the YUV channel shares this entry point.
-    if (QCamera3OppoPlatformHwi::configured()) {
-        const bool snapshotPath = m_parent != NULL &&
-                m_parent->isSnapshotJpegChannel() &&
-                input != NULL && input->num_bufs == 1 && input->bufs[0] != NULL &&
-                input->bufs[0]->stream_type == CAM_STREAM_TYPE_SNAPSHOT &&
-                output == NULL;
-        if (snapshotPath) {
-            QCamera3HdrAlgo::Image hwiImage;
-            QCamera3StreamMem *hwiMemory = nullptr;
-            if (getHdrImage(input, hwiImage, hwiMemory)) {
-                QCamera3OppoPlatformFrame hwiFrame = {};
-                hwiFrame.data = hwiImage.data;
-                hwiFrame.length = hwiImage.length;
-                hwiFrame.width = hwiImage.width;
-                hwiFrame.height = hwiImage.height;
-                hwiFrame.stride = hwiImage.yStride;
-                hwiFrame.slice = hwiImage.yScanline;
-                QCamera3OppoPlatformHwi::get().processFrame(hwiFrame);
-            } else {
-                LOGI("oppo hwi process skipped: frame is not a two-plane NV21 snapshot");
-            }
-        } else {
-            LOGI("oppo hwi process skipped: not a snapshot path");
-        }
-    }
-
     pthread_mutex_lock(&mReprocJobLock);
 
     // enqueue to post proc input queue
@@ -1151,6 +1124,8 @@ int32_t QCamera3PostProcessor::processPPMetadata(mm_camera_super_buf_t *reproc_m
 
     if (!ppMetaBuf) {
         pthread_mutex_unlock(&mReprocJobLock);
+        m_parent->metadataBufDone(reproc_meta);
+        free(reproc_meta);
         return NO_MEMORY;
     }
     ppMetaBuf->metabuf = reproc_meta;
@@ -1450,9 +1425,10 @@ int32_t QCamera3PostProcessor::beginLowLightCapture(const uint32_t frameIds[5],
 }
 
 int32_t QCamera3PostProcessor::beginStillCapture(const uint32_t frameIds[4],
-        uint32_t baseId, bool frontCamera, bool enhanceDetail)
+        uint32_t baseId, bool frontCamera, bool enhanceDetail, bool superZoom)
 {
-    return beginBurstCapture(frameIds, 4, baseId, frontCamera, false, true, enhanceDetail);
+    return beginBurstCapture(frameIds, 4, baseId, frontCamera, false, true, enhanceDetail, 0,
+            superZoom ? OPPO_NATIVE_SUPERZOOM : OPPO_NATIVE_OFF);
 }
 
 int32_t QCamera3PostProcessor::beginDualCapture(uint32_t frameNumber, uint64_t token)
@@ -1479,7 +1455,8 @@ int32_t QCamera3PostProcessor::beginBurstCapture(const uint32_t *frameIds,
         for (unsigned j = 0; j < i; ++j)
             if (frameIds[i] == frameIds[j]) return BAD_VALUE;
     if (!(dualToken ? m_parent->dualCapture() != nullptr :
-            still ? QCamera3StillAlgo::isAvailable() :
+            still ? (nativeMode == OPPO_NATIVE_SUPERZOOM ? QCamera3StockSuperPhoto::is2xAvailable() :
+                    QCamera3StillAlgo::isAvailable()) :
             lowLight ? QCamera3LowLightHdrAlgo::isAvailable() :
             QCamera3HdrAlgo::isAvailable())) return -ENOSYS;
     struct timespec deadline;
@@ -1508,7 +1485,10 @@ int32_t QCamera3PostProcessor::beginBurstCapture(const uint32_t *frameIds,
     memset(mHdrReceived, 0, sizeof(mHdrReceived));
     memset(mHdrExposure, 0, sizeof(mHdrExposure));
     memset(mHdrSensitivity, 0, sizeof(mHdrSensitivity));
+    memset(mHdrExposureTime, 0, sizeof(mHdrExposureTime));
+    memset(mHdrFullFieldOfView, 0, sizeof(mHdrFullFieldOfView));
     memset(mHdrDrcGain, 0, sizeof(mHdrDrcGain));
+    memset(mHdrDrcValid, 0, sizeof(mHdrDrcValid));
     memset(mHdrTimestamps, 0, sizeof(mHdrTimestamps));
     memset(mHdrImages, 0, sizeof(mHdrImages));
     mHdrBaseJob = NULL;
@@ -1777,7 +1757,8 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
     mHdrReceived[slot] = true;
     QCamera3HdrAlgo::Image source;
     QCamera3StreamMem *memory;
-    if (getHdrImage(frame, source, memory)) {
+    const bool imageOk = getHdrImage(frame, source, memory);
+    if (imageOk) {
         const uint64_t ySize = uint64_t(source.width) * source.height;
         const uint64_t size = ySize + ySize / 2;
         if (size <= SIZE_MAX) {
@@ -1802,6 +1783,10 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
             }
         }
     }
+    LOGI("DUALBDBG collect slot=%d frame=%u imageOk=%d image=%ux%u stride=%u/%u",
+            slot, job->frameNumber, imageOk ? 1 : 0,
+            imageOk ? source.width : 0, imageOk ? source.height : 0,
+            imageOk ? source.yStride : 0, imageOk ? source.uvStride : 0);
     if (job->metadata) {
         int64_t exposure = 0;
         int32_t sensitivity = 0;
@@ -1814,11 +1799,19 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
         if (exposure > 0 && sensitivity > 0)
             mHdrExposure[slot] = double(exposure) * sensitivity;
         mHdrSensitivity[slot] = sensitivity;
+        mHdrExposureTime[slot] = exposure;
+        if (state->nativeMode == OPPO_NATIVE_SUPERZOOM) {
+            auto *hardware = static_cast<QCamera3HardwareInterface *>(m_parent->mUserData);
+            mHdrFullFieldOfView[slot] = hardware && hardware->isSuperZoomFullFieldOfView(job->metadata) &&
+                    job->metadata->is_valid[CAM_INTF_META_FRAME_NUMBER] &&
+                    *POINTER_OF_META(CAM_INTF_META_FRAME_NUMBER, job->metadata) == job->frameNumber;
+        }
         IF_META_AVAILABLE(int64_t, frameTimestamp, CAM_INTF_META_SENSOR_TIMESTAMP,
                 job->metadata) {
             if (*frameTimestamp > 0) mHdrTimestamps[slot] = *frameTimestamp;
         }
-        if (job->metadata->oppo_algorithm.llhdr_drc_valid)
+        mHdrDrcValid[slot] = job->metadata->oppo_algorithm.llhdr_drc_valid;
+        if (mHdrDrcValid[slot])
             mHdrDrcGain[slot] = job->metadata->oppo_algorithm.llhdr_drc_gain;
     }
     if (slot == 0) {
@@ -1831,7 +1824,11 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
     if (state->dualToken) {
         QCamera3DualCapture *capture = m_parent->dualCapture();
         QCamera3PostProcessor *owner = m_parent->dualPostprocessor();
-        const int32_t rc = capture && QCamera3HdrAlgo::validImage(mHdrImages[0]) ?
+        const bool haveBase = QCamera3HdrAlgo::validImage(mHdrImages[0]);
+        LOGI("DUALBDBG submit main=%d valid=%d image=%ux%u",
+                m_parent->dualPostprocessor() == this, haveBase ? 1 : 0,
+                haveBase ? mHdrImages[0].width : 0, haveBase ? mHdrImages[0].height : 0);
+        const int32_t rc = capture && haveBase ?
                 capture->submitImage(state->dualToken, m_parent->getMyCamHandle(),
                         state->frameIds[0], mHdrImages[0]) : -EINVAL;
         if (rc != NO_ERROR && capture) capture->cancel(state->dualToken);
@@ -1852,14 +1849,21 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
     job = mHdrBaseJob;
     frame = mHdrBaseFrame;
     int32_t rc = -EINVAL;
+    const bool superZoom = state->nativeMode == OPPO_NATIVE_SUPERZOOM;
     const bool superPhoto = state->still && job->jpeg_settings &&
             job->jpeg_settings->native_still_mode == OPPO_NATIVE_SUPERPHOTO;
-    const char *algorithm = superPhoto ? "VDSuperPhoto" :
+    const char *algorithm = superZoom ? "VDSuperZoom2x" : superPhoto ? "VDSuperPhoto" :
             state->still ? "MFNR" : state->lowLight ? "LLHDR" : "HDR";
     QCamera3HdrAlgo::Image destination;
     bool settled = true;
     for (unsigned i = 0; i < state->count; ++i) settled &= mHdrExposure[i] > 0;
-    if (state->still) {
+    if (superZoom) {
+        for (unsigned i = 0; i < state->count; ++i)
+            settled &= mHdrFullFieldOfView[i] && mHdrTimestamps[i] > 0 &&
+                    mHdrSensitivity[i] == mHdrSensitivity[0] &&
+                    mHdrExposureTime[i] >= mHdrExposureTime[0] * 0.85 &&
+                    mHdrExposureTime[i] <= mHdrExposureTime[0] * 1.15;
+    } else if (state->still) {
         for (unsigned i = 1; i < state->count; ++i)
             settled &= mHdrExposure[i] >= mHdrExposure[0] * 0.90 &&
                     mHdrExposure[i] <= mHdrExposure[0] * 1.10;
@@ -1873,10 +1877,34 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
         settled &= mHdrExposure[1] < mHdrExposure[0] * 0.95 &&
                 mHdrExposure[2] > mHdrExposure[0] * 1.05;
     }
+    const bool destinationValid = getHdrImage(frame, destination, memory);
+    LOGI("HAL3 burst input frame=%u algorithm=%s count=%u settled=%d destinationValid=%d",
+            job->frameNumber, algorithm, state->count, settled, destinationValid);
+    for (unsigned i = 0; i < state->count; ++i) {
+        LOGI("HAL3 burst slot=%u frame=%u exposureNs=%lld ISO=%d product=%.0f "
+                "timestampNs=%lld DRCvalid=%d DRC=%.6f packedValid=%d size=%ux%u",
+                i, state->frameIds[i], (long long)mHdrExposureTime[i], mHdrSensitivity[i],
+                mHdrExposure[i], (long long)mHdrTimestamps[i],
+                mHdrDrcValid[i], mHdrDrcGain[i],
+                QCamera3HdrAlgo::validImage(mHdrImages[i]),
+                mHdrImages[i].width, mHdrImages[i].height);
+    }
     if (!settled) {
         LOGE("HAL3 burst exposure bracket did not settle; returning base JPEG");
-    } else if (getHdrImage(frame, destination, memory)) {
-        if (state->still) {
+    } else if (destinationValid) {
+        if (superZoom) {
+            auto *hardware = static_cast<QCamera3HardwareInterface *>(m_parent->mUserData);
+            const char *sensor = hardware ? hardware->getOppoSensorName() : nullptr;
+            QCamera3StockSuperPhoto::Source sources[4];
+            for (unsigned i = 0; i < state->count; ++i)
+                sources[i] = {state->frameIds[i], mHdrTimestamps[i], mHdrExposureTime[i], mHdrSensitivity[i]};
+            QCamera3StockSuperPhoto::ZoomOptions options;
+            options.fullFieldOfView = true;
+            QCamera3StockSuperPhoto::ZoomResult applied;
+            rc = sensor ? QCamera3StockSuperPhoto::process2x(mHdrImages, sources, state->count,
+                    destination, sensor, options, &applied, &state->cancelled) : -EINVAL;
+            if (rc == NO_ERROR && !applied.algorithmApplied) rc = -ENODATA;
+        } else if (state->still) {
             bool platformSuperApplied = false;
             if (superPhoto) {
                 QCamera3HardwareInterface *hardware =
@@ -1985,10 +2013,12 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
             rc = memory->cleanCache(frame->bufs[0]->buf_idx);
             if (rc != NO_ERROR) {
                 const QCamera3HdrAlgo::Image &base = mHdrImages[0];
-                for (uint32_t row = 0; row < base.height; ++row)
+                if (superZoom) {
+                    if (!QCamera3DualCapture::resize(base, destination, true, 0.5f)) state->cancelled.store(true);
+                } else for (uint32_t row = 0; row < base.height; ++row)
                     memcpy(destination.data + destination.yOffset + size_t(row) * destination.yStride,
                             base.data + size_t(row) * base.yStride, base.width);
-                for (uint32_t row = 0; row < base.height / 2; ++row)
+                if (!superZoom) for (uint32_t row = 0; row < base.height / 2; ++row)
                     memcpy(destination.data + destination.uvOffset + size_t(row) * destination.uvStride,
                             base.data + base.uvOffset + size_t(row) * base.uvStride, base.width);
                 if (memory->cleanCache(frame->bufs[0]->buf_idx) != NO_ERROR) {
@@ -1997,6 +2027,12 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
                 }
             }
         }
+    }
+    if (superZoom && rc != NO_ERROR) {
+        if (!mHdrFullFieldOfView[0] || !getHdrImage(frame, destination, memory) ||
+                !QCamera3DualCapture::resize(mHdrImages[0], destination, true, 0.5f) ||
+                memory->cleanCache(frame->bufs[0]->buf_idx) != NO_ERROR)
+            state->cancelled.store(true);
     }
     if (rc != NO_ERROR) {
         LOGE("HAL3 %s fusion failed (%d); returning unfused base JPEG",
@@ -2179,7 +2215,8 @@ int32_t QCamera3PostProcessor::processPPData(mm_camera_super_buf_t *frame,
             }
         } else if (job->src_frame != NULL) {
             LOGD("reprocess for non-fwk input frame.");
-            if (!hal3Hdr && p_metadata != NULL && job->metadata != NULL) {
+            if (!hal3Hdr && p_metadata != NULL && job->metadata != NULL &&
+                    !(job->src_metadata && job->src_metadata->ch_id == 0)) {
                 memcpy(job->metadata, p_metadata, sizeof(metadata_buffer_t));
             }
         }
@@ -2245,7 +2282,7 @@ int32_t QCamera3PostProcessor::queueJpegFrame(qcamera_hal3_pp_data_t *job,
                 (metadata_buffer_t *) job->fwk_src_frame->metadata_buffer.buffer;
         jpeg_job->fwk_src_buffer = job->fwk_src_frame;
     }
-    if (p_metadata != NULL) {
+    if (p_metadata != NULL && !(job->src_metadata && job->src_metadata->ch_id == 0)) {
         // update metadata content with input buffer
         memcpy(jpeg_job->metadata, p_metadata, sizeof(metadata_buffer_t));
     }
@@ -2560,7 +2597,7 @@ void QCamera3PostProcessor::releaseJpegData(void *data, void *user_data)
         mm_camera_super_buf_t *source = job ?
                 (job->src_reproc_frame ? job->src_reproc_frame : job->src_frame) : NULL;
         if (source && source->num_bufs == 1 && source->bufs[0] &&
-                source->bufs[0]->stream_type == CAM_STREAM_TYPE_SNAPSHOT)
+                (source->ch_id == 0 || source->bufs[0]->stream_type == CAM_STREAM_TYPE_SNAPSHOT))
             pme->m_parent->freeBufferForFrame(source);
         pme->releaseJpegJobData(job);
     }
@@ -2627,7 +2664,8 @@ void QCamera3PostProcessor::releaseSuperBuf(mm_camera_super_buf_t *super_buf)
 {
     if (NULL != super_buf) {
         if (m_parent != NULL) {
-            m_parent->bufDone(super_buf);
+            if (super_buf->ch_id == 0) m_parent->freeBufferForFrame(super_buf);
+            else m_parent->bufDone(super_buf);
         }
     }
 }
@@ -3684,7 +3722,7 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
                             flashOptions, flashResult, flashPlan);
                 // No decoded LED-on bound in this tree, so planning refuses with -ENODATA.
                 nativeAlgorithmTrace(jpeg_settings, "FlashSequence", flashStatus,
-                        jpeg_settings->frame_number, 0, hal_obj, 0);
+                        jpeg_settings->frame_number, 0, hal_obj, 0, OPPO_STAGE_FLASH_SEQUENCE);
             }
 
             // Brightness/macro over real statistics; the stock brightness range is
@@ -3723,7 +3761,7 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
                 if (brightnessStatus != NO_ERROR || brightnessResult.applied != 0)
                     nativeAlgorithmTrace(jpeg_settings, "SceneBrightness", brightnessStatus,
                             jpeg_settings->frame_number, 0, hal_obj,
-                            brightnessResult.applied);
+                            brightnessResult.applied, OPPO_STAGE_SCENE_BRIGHTNESS);
             }
 
             QCamera3Occlusion occlusion;
@@ -3736,7 +3774,8 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
                         occlusionResult);
             if (occlusionStatus != NO_ERROR || occlusionResult.applied != 0)
                 nativeAlgorithmTrace(jpeg_settings, "Occlusion", occlusionStatus,
-                        jpeg_settings->frame_number, 1, hal_obj, occlusionResult.applied);
+                        jpeg_settings->frame_number, 1, hal_obj, occlusionResult.applied,
+                        OPPO_STAGE_OCCLUSION);
             // Publish only an occlusion result the stage actually produced (status 0).
             if (occlusionStatus == NO_ERROR)
                 hal_obj->noteOcclusionResult(jpeg_settings->frame_number,

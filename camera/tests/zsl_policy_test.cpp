@@ -246,6 +246,10 @@ void testReasonNames() {
 }  // namespace
 
 int main() {
+    CHECK(QCamera3ZslPolicy::snapshotChannelEligible(true, false, false, 1, true));
+    CHECK(!QCamera3ZslPolicy::snapshotChannelEligible(true, false, true, 1, true));
+    CHECK(!QCamera3ZslPolicy::snapshotChannelEligible(true, false, true, 2, false));
+    CHECK(!QCamera3ZslPolicy::snapshotChannelEligible(true, true, false, 1, true));
     testConfig();
     testRingSizing();
     testNotRequested();

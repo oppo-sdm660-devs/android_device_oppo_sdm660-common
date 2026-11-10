@@ -702,22 +702,26 @@ need(hwi, "PANORAMA_CANCEL", "panorama cancel request")
 need(hwi, "PANORAMA_STATE", "panorama state result")
 need(hwi, "PANORAMA_FRAME_COUNT", "panorama frame count result")
 need(hwi, "PANORAMA_FAILURE_REASON", "panorama failure result")
-need(hwi, "PANORAMA capture refused", "143a capture failure is explicit")
+need(hwi, "capturePanorama(&local)", "panorama capture uses owned asynchronous BLOB path")
+need(hwi, "result.sources.back().timestampNs", "panorama result timestamp belongs to retained source")
+need(hwi, "pairSourceMetadata", "panorama source metadata is paired")
+need(hwi, "camera3_jpeg_blob_t footer", "panorama BLOB footer")
+need(hwi, "drainPanorama();", "panorama flush completion barrier")
 need(channel, "oppoPanoramaSetFrameHook", "preview frame hook")
 need(HAL3 / "QCamera3VendorTags.cpp", "panoramaSupported", "panorama vendor tag registration")
 
-# task-150a: synthetic panorama JPEG encoder (no HWI caller until task-155).
+# Synthetic panorama JPEG encoder and asynchronous HWI BLOB delivery.
 pano_jpeg_h = HAL3 / "QCamera3PanoramaJpeg.h"
 pano_jpeg_cpp = HAL3 / "QCamera3PanoramaJpeg.cpp"
 need(pano_jpeg_h, "class QCamera3PanoramaJpeg", "panorama JPEG encoder API")
 need(pano_jpeg_h, "exifOrientation", "EXIF orientation API")
-need(pano_jpeg_cpp, "jpeg_mem_dest", "libjpeg memory encoder")
+need(pano_jpeg_cpp, "jpeg_destination_mgr", "bounded libjpeg memory encoder")
 need(pano_jpeg_cpp, "appendExifOrientation", "EXIF orientation segment")
 need(CAMERA / "Android.bp", "QCamera3PanoramaJpeg.cpp", "panorama JPEG encoder in HAL build")
 need(CAMERA / "Android.bp", "libjpeg", "libjpeg vendor dependency")
 need(tests / "panorama_jpeg_encoder_test.cpp", "testValidOrientations", "panorama JPEG host test")
 need(tests / "run_panorama_jpeg_tests.py", "def main", "panorama JPEG host runner")
-absent(hwi, "QCamera3PanoramaJpeg", "150a must not wire the HWI caller yet")
+need(hwi, "QCamera3PanoramaJpeg::replaceExif", "panorama real canvas/source EXIF")
 
 # task-156: front Visidon selfie-panorama backend (not HWI-wired until task-157).
 visi_h = HAL3 / "QCamera3OppoVisidonPanorama.h"
@@ -748,6 +752,25 @@ need(stub_src, "AndroidBitmap_getInfo", "stub symbol")
 need(stub_src, "AndroidBitmap_lockPixels", "stub symbol")
 need(stub_src, "AndroidBitmap_unlockPixels", "stub symbol")
 
+# task-168 B: binned aux is upscaled to the stock ARC reference, never faked.
+need(HAL3 / "QCamera3DualCapture.h", "sourceWidth", "dual source dimensions")
+need(HAL3 / "QCamera3DualCapture.cpp", "copyScaled", "aux reference upscale")
+need(HAL3 / "QCamera3DualCapture.cpp", "copyCropScaled", "portrait FOV crop")
+need(HAL3 / "QCamera3DualCapture.cpp", "teleMaxFov", "FOV-derived portrait crop")
+need(HAL3 / "QCamera3DualGeometry.cpp", "sourceWidth = sourceW", "bind actual aux dimensions")
+need(CAMERA / "tests" / "dual_geometry_test.cpp", "testBindBinnedAux", "dual geometry host test")
+need(CAMERA / "tests" / "run_dual_geometry_tests.py", "def main", "dual geometry host runner")
+
+# task-178 A/B diagnostics: both gates default off; baseline path stays META/trigger.
+need(hwi, 'persist.vendor.camera.oppo.roi.parampath", prop, "0"', "ROI param-path gate default off")
+need(hwi, 'persist.vendor.camera.oppo.af.op", prop, "0"', "AF op gate default off")
+need(hwi, "CAM_INTF_PARM_AF_ROI", "legacy AF ROI A/B")
+need(hwi, "CAM_INTF_PARM_AEC_ROI", "legacy AEC ROI A/B")
+need(hwi, "mCameraHandle->ops->do_auto_focus", "legacy AF op A/B")
+need(hwi, "cancel_auto_focus", "legacy AF cancel A/B")
+need(hwi, "mLegacyAfTrigger", "AF op request handoff")
+
+
 # task-180: Android 16 Camera3FakeStream-only compatibility.
 fake_header = HAL3 / "QCamera3FakeStreamRules.h"
 need(fake_header, "FAKE_WIDTH = 320", "fake stream width constant")
@@ -761,6 +784,16 @@ need(hwi, "return acceptFakeStreamOnlyLocked(streamList);", "fake-only config ac
 need(hwi, "acceptFakeStreamOnlyLocked(", "fake-only cleanup helper")
 need(tests / "fake_stream_rules_test.cpp", "AOSP Camera3FakeStream-only configuration", "fake stream host test")
 need(tests / "run_fake_stream_rules_tests.py", "def main", "fake stream host runner")
+
+
+# Explicit 2x is a distinct current-capture full-FOV path, not stillMode SUPER(4).
+need(hwi, "QCAMERA3_NATIVE_ALGORITHM_SUPER_ZOOM_SUPPORTED", "2x capability consumer")
+need(hwi, "QCAMERA3_NATIVE_ALGORITHM_APPLIED_SUPER_ZOOM", "2x actual application result")
+need(hwi, "zoomPlan.captureCrop", "private full-FOV burst crop")
+need(hwi, "owned.deferredMetadata", "2x final metadata waits for pixel-stage result")
+need(post, "QCamera3StockSuperPhoto::process2x", "four-frame stock 2x consumer")
+need(post, "mHdrFullFieldOfView", "2x source crop verification")
+need(post, "QCamera3DualCapture::resize(mHdrImages[0], destination, true, 0.5f)", "2x failure preserves requested framing")
 
 if failures:
     print("static checks FAILED:")

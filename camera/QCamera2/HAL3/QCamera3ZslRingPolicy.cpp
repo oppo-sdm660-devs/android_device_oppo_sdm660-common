@@ -74,8 +74,11 @@ QCamera3ZslRingPolicy::Selection QCamera3ZslRingPolicy::select(
     Selection selection;
     bool sawFuture = false;
     bool sawInUse = false;
+    bool sawComplete = false;
     for (size_t i = 0; i < ring.size(); ++i) {
         const Frame &frame = ring[i];
+        if (!frame.metadataReady) continue;
+        sawComplete = true;
         if (frame.timestampNs > requestTimestampNs) {
             sawFuture = true;
             continue;
@@ -96,7 +99,9 @@ QCamera3ZslRingPolicy::Selection QCamera3ZslRingPolicy::select(
         }
     }
     if (!selection.selected) {
-        if (sawInUse) {
+        if (!ring.empty() && !sawComplete) {
+            selection.reason = kFallbackMetadataMissing;
+        } else if (sawInUse) {
             selection.reason = kFallbackFrameInUse;
         } else if (sawFuture) {
             selection.reason = kFallbackFutureOnly;
@@ -117,6 +122,7 @@ const char *QCamera3ZslRingPolicy::reasonName(int32_t reason)
         case kFallbackTooOld: return "too_old";
         case kFallbackFutureOnly: return "future_only";
         case kFallbackFrameInUse: return "frame_in_use";
+        case kFallbackMetadataMissing: return "metadata_missing";
         default: return "unknown";
     }
 }

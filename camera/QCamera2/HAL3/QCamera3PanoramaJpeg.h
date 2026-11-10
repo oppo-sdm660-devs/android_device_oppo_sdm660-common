@@ -24,6 +24,13 @@ public:
         uint32_t height = 0;
         uint32_t quality = 95;       // 1..100
         int32_t orientationDeg = 0;  // 0/90/180/270 -> EXIF orientation
+        size_t maxJpegBytes = 32u * 1024u * 1024u;
+    };
+    struct Metadata {
+        uint32_t width = 0, height = 0;
+        int64_t exposureTimeNs = 0;
+        uint32_t sensitivity = 0;
+        size_t maxJpegBytes = 32u * 1024u * 1024u;
     };
 
     enum Status : int32_t {
@@ -39,6 +46,8 @@ public:
     // width/2 x height/2). Appends/replaces `jpeg` only on success.
     static int32_t encode(const uint8_t *nv21, size_t length, const Config &config,
             std::vector<uint8_t> &jpeg);
+    // Canvas has already been physically rotated. Missing source fields stay absent.
+    static int32_t replaceExif(std::vector<uint8_t> &jpeg, const Metadata &metadata);
 
     // EXIF orientation value (TIFF Orientation tag) for the config.
     static int32_t exifOrientation(int32_t orientationDeg);

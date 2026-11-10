@@ -361,6 +361,9 @@ vendor_tag_info_t qcamera3_native_algorithms[QCAMERA3_NATIVE_ALGORITHMS_END -
     { "panoramaState", TYPE_INT32 },
     { "panoramaFrameCount", TYPE_INT32 },
     { "panoramaFailureReason", TYPE_INT32 },
+    { "superZoomSupported", TYPE_BYTE },
+    { "superZoom", TYPE_INT32 },
+    { "appliedSuperZoom", TYPE_INT32 },
 };
 
 vendor_tag_info_t qcamera3_postprocess[QCAMERA3_POSTPROCESS_END -
@@ -661,6 +664,9 @@ uint32_t qcamera3_all_tags[] = {
     (uint32_t)QCAMERA3_NATIVE_ALGORITHM_PANORAMA_STATE,
     (uint32_t)QCAMERA3_NATIVE_ALGORITHM_PANORAMA_FRAME_COUNT,
     (uint32_t)QCAMERA3_NATIVE_ALGORITHM_PANORAMA_FAILURE_REASON,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_SUPER_ZOOM_SUPPORTED,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_SUPER_ZOOM,
+    (uint32_t)QCAMERA3_NATIVE_ALGORITHM_APPLIED_SUPER_ZOOM,
     (uint32_t)QCAMERA3_POSTPROCESS_SETTINGS,
     (uint32_t)QCAMERA3_POSTPROCESS_WARP_REGIONS,
     (uint32_t)QCAMERA3_POSTPROCESS_OVERLAY,

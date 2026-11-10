@@ -8,6 +8,13 @@
 #include <openssl/sha.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __ANDROID__
+#define LOG_TAG "DUALB"
+#include <log/log.h>
+#define DUALB_LOGI(...) ALOGI(__VA_ARGS__)
+#else
+#define DUALB_LOGI(...) do {} while (0)
+#endif
 
 namespace qcamera {
 namespace {
@@ -158,6 +165,10 @@ int32_t QCamera3DualGeometry::fromCapabilities(const Calibration &calibration,
         capture.streamRoiMap = imageRoi(sensor.outputWidth, sensor.outputHeight,
                 capture.imageWidth, capture.imageHeight);
         capture.requireStreamCrop = true;
+        capture.sourceWidth = capture.imageWidth;
+        capture.sourceHeight = capture.imageHeight;
+        capture.metadataWidth = capture.imageWidth;
+        capture.metadataHeight = capture.imageHeight;
     }
     candidate.maxTimestampDeltaNs = 10000000; // A mismatched pair falls back to the main JPEG.
     candidate.timeoutNs = 3000000000LL;
@@ -186,6 +197,8 @@ int32_t QCamera3DualGeometry::decode(const uint8_t *bytes, size_t length,
         capture.referenceCrop = reader.rect(); capture.activeArrayCrop = reader.rect();
         capture.imageWidth = reader.integer(); capture.imageHeight = reader.integer();
         capture.streamCrop = reader.rect(); capture.streamRoiMap = reader.rect(); capture.requireStreamCrop = true;
+        capture.sourceWidth = capture.imageWidth; capture.sourceHeight = capture.imageHeight;
+        capture.metadataWidth = capture.imageWidth; capture.metadataHeight = capture.imageHeight;
     }
     candidate.maxTimestampDeltaNs = reader.duration(); candidate.timeoutNs = reader.duration();
     if (reader.data != bytes + length || !validProfile(candidate)) return -EINVAL;
@@ -211,17 +224,55 @@ int32_t QCamera3DualGeometry::bind(const Profile &profile, const Calibration &ca
                 (widths[i] != profile.sensors[i].outputWidth || heights[i] != profile.sensors[i].outputHeight))
             return -ERANGE;
         candidate.sensors[i] = profile.sensors[i].capture; candidate.sensors[i].cameraHandle = handles[i];
+        if (!profile.runtimeGeometry) {
+            candidate.sensors[i].sourceWidth = candidate.sensors[i].imageWidth;
+            candidate.sensors[i].sourceHeight = candidate.sensors[i].imageHeight;
+            candidate.sensors[i].metadataWidth = candidate.sensors[i].imageWidth;
+            candidate.sensors[i].metadataHeight = candidate.sensors[i].imageHeight;
+        }
         if (profile.runtimeGeometry) {
-            if (widths[i] < candidate.sensors[i].imageWidth ||
-                    heights[i] < candidate.sensors[i].imageHeight) return -ERANGE;
-            candidate.sensors[i].referenceCrop = {0, 0, int32_t(widths[i]), int32_t(heights[i])};
-            candidate.sensors[i].streamRoiMap = imageRoi(widths[i], heights[i],
-                    candidate.sensors[i].imageWidth, candidate.sensors[i].imageHeight);
+            auto &sensor = candidate.sensors[i];
+            // Wide CPP output is the stock reference size. The aux daemon can
+            // report a binned raw mode but its CPP frame for this paired stream is
+            // configured at the stock reference (observed 5120x3848); if it is
+            // larger, downscale it in DualCapture. Keep the scaler crop metadata in
+            // the daemon's raw mode coordinates (2592x1940 here).
+            uint32_t sourceW = sensor.imageWidth, sourceH = sensor.imageHeight;
+            uint32_t metadataW = widths[i], metadataH = heights[i];
+            if (i == 1 && metadataW > sensor.imageWidth && metadataH > sensor.imageHeight) {
+                sourceW = metadataW; sourceH = metadataH;
+            }
+            if (!sourceW || !sourceH || sourceW > 16384 || sourceH > 16384 ||
+                    !metadataW || !metadataH) return -ERANGE;
+            const int64_t cross = int64_t(sourceW) * sensor.imageHeight -
+                    int64_t(sourceH) * sensor.imageWidth;
+            if ((cross > 0 ? cross : -cross) * 100 >
+                    int64_t(sensor.imageWidth) * sensor.imageHeight) return -ERANGE;
+            // The daemon scaler metadata must describe the same optical aspect;
+            // RAW_DIMENSION alone is not the CPP buffer geometry.
+            const int64_t metaCross = int64_t(metadataW) * sensor.imageHeight -
+                    int64_t(metadataH) * sensor.imageWidth;
+            if ((metaCross > 0 ? metaCross : -metaCross) * 100 >
+                    int64_t(sensor.imageWidth) * sensor.imageHeight) return -ERANGE;
+            sensor.sourceWidth = sourceW; sensor.sourceHeight = sourceH;
+            sensor.metadataWidth = metadataW; sensor.metadataHeight = metadataH;
+            sensor.referenceCrop = {0, 0, int32_t(sourceW), int32_t(sourceH)};
+            sensor.streamCrop = {0, 0, int32_t(sourceW), int32_t(sourceH)};
+            sensor.streamRoiMap = {0, 0, int32_t(sourceW), int32_t(sourceH)};
         }
     }
     candidate.wideMaxFov = fmaxf(sensors[0].horizontalFov, sensors[0].verticalFov);
+    candidate.teleMaxFov = fmaxf(sensors[1].horizontalFov, sensors[1].verticalFov);
+    if (candidate.teleMaxFov >= candidate.wideMaxFov) candidate.teleMaxFov = 0.0f;
     candidate.maxTimestampDeltaNs = profile.maxTimestampDeltaNs; candidate.timeoutNs = profile.timeoutNs;
     if (!QCamera3DualCapture::validConfig(candidate)) return -EINVAL;
-    result = candidate; return 0;
+    result = candidate;
+    DUALB_LOGI("DUALBDBG bind ok source=%ux%u/%ux%u image=%ux%u/%ux%u fov=%.1f/%.1f",
+            result.sensors[0].sourceWidth, result.sensors[0].sourceHeight,
+            result.sensors[1].sourceWidth, result.sensors[1].sourceHeight,
+            result.sensors[0].imageWidth, result.sensors[0].imageHeight,
+            result.sensors[1].imageWidth, result.sensors[1].imageHeight,
+            result.wideMaxFov, result.teleMaxFov);
+    return 0;
 }
 } // namespace qcamera

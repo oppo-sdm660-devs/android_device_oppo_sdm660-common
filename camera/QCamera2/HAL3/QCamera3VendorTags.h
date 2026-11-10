@@ -402,6 +402,9 @@ enum qcamera3_ext_tags {
     QCAMERA3_NATIVE_ALGORITHM_PANORAMA_STATE,              // int32 0..4 result
     QCAMERA3_NATIVE_ALGORITHM_PANORAMA_FRAME_COUNT,        // int32 result
     QCAMERA3_NATIVE_ALGORITHM_PANORAMA_FAILURE_REASON,     // int32 result
+    QCAMERA3_NATIVE_ALGORITHM_SUPER_ZOOM_SUPPORTED,        // byte static
+    QCAMERA3_NATIVE_ALGORITHM_SUPER_ZOOM,                  // int32 request 0=off/1=2x
+    QCAMERA3_NATIVE_ALGORITHM_APPLIED_SUPER_ZOOM,          // int32 result 0/1
     QCAMERA3_NATIVE_ALGORITHMS_END,
     // Kept for registration/ABI compatibility; no in-tree consumer.
     QCAMERA3_POSTPROCESS_SETTINGS = QCAMERA3_POSTPROCESS_START,
