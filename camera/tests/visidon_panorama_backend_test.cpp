@@ -7,6 +7,9 @@
 #include <string.h>
 
 #include <vector>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 #include "QCamera3OppoVisidonPanorama.h"
 #include "visidon_jnienv.h"
@@ -33,9 +36,12 @@ struct Mock {
     int addRc = 0;
     bool failProcess = false;
     bool triggerUnsupportedSlot = false;
+    int nv21ExtraBytes = 0;
     int lastRotation = -1;
     int lastAddWidth = 0;
     int lastAddHeight = 0;
+    int lastDisplacement = 0;
+    int lastTransposed = -1;
     uint32_t outW = 64;
     uint32_t outH = 44;
     std::vector<uint8_t> lastFrame;
@@ -63,21 +69,32 @@ void setInts(void *env, void *array, int length, const int32_t *data) {
             length, data);
 }
 
-long long mockInit(void *, void *, int, int, int, int) {
+long long mockInit(void *, void *, int, int, int, int transposed) {
+    g_mock.lastTransposed = transposed;
     g_mock.inits++;
     return 0x1234;
 }
 
-int mockAddYuv(void *env, void *, void *array, int width, int height, int, long long) {
+int mockAddYuv(void *env, void *, void *array, int width, int height, int displacement, long long) {
     g_mock.adds++;
     g_mock.lastAddWidth = width;
     g_mock.lastAddHeight = height;
+    g_mock.lastDisplacement = displacement;
     auto *in = static_cast<VisidonJniEnv::ByteArrayIn *>(array);
     if (in == nullptr || in->data == nullptr) return 1;
     g_mock.lastFrame.assign(static_cast<const uint8_t *>(in->data),
             static_cast<const uint8_t *>(in->data) + in->size);
     (void)env;
     return g_mock.addRc;
+}
+
+void *mockOverlap(void *env, void *, void *, int, int, float, float, long long) {
+    void *array = arrayFromSlot(env, VisidonJniEnv::kNewFloatArray, 4);
+    auto *table = *static_cast<void ***>(env);
+    using SetFn = void (*)(void *, void *, int, int, const float *);
+    const float data[4] = {0.25f, -0.125f, 2.0f, 1.0f};
+    reinterpret_cast<SetFn>(table[VisidonJniEnv::kSetFloatArrayRegion])(env, array, 0, 4, data);
+    return array;
 }
 
 void *mockProcess(void *env, void *, long long) {
@@ -94,7 +111,7 @@ void *mockProcess(void *env, void *, long long) {
 }
 
 void *mockNv21(void *env, void *, long long) {
-    const size_t len = size_t(g_mock.outW) * g_mock.outH * 3 / 2;
+    const size_t len = size_t(int(g_mock.outW * g_mock.outH * 3 / 2) + g_mock.nv21ExtraBytes);
     void *array = arrayFromSlot(env, VisidonJniEnv::kNewByteArray, int(len));
     std::vector<uint8_t> data(len, 0x5a);
     setBytes(env, array, int(len), data.data());
@@ -120,6 +137,7 @@ QCamera3OppoVisidonPanorama::EngineAbi abi() {
     QCamera3OppoVisidonPanorama::EngineAbi api;
     api.init = mockInit;
     api.addYuvFrame = mockAddYuv;
+    api.measureOverlap = mockOverlap;
     api.process = mockProcess;
     api.getNv21 = mockNv21;
     api.getJpeg = mockJpeg;
@@ -181,7 +199,12 @@ int main() {
         CHECK(backend.init(config) == QCamera3OppoVisidonPanorama::OK);
         CHECK(backend.state() == QCamera3OppoVisidonPanorama::State::Capturing);
         auto frame = makeFrame(64, 48, 80, 80, y, uv);
+        QCamera3OppoVisidonPanorama::Position position;
+        CHECK(backend.measureOverlap(frame, &position) == QCamera3OppoVisidonPanorama::OK);
+        CHECK(position.x == 0.25f && position.y == -0.125f && position.quality == 2);
+        frame.displacementPx = 16;
         for (int i = 0; i < 3; i++) CHECK(backend.addFrame(frame) == QCamera3OppoVisidonPanorama::OK);
+        CHECK(g_mock.lastDisplacement == 16);
         CHECK(backend.acceptedFrames() == 3);
         CHECK(backend.addFrame(frame) == QCamera3OppoVisidonPanorama::E_LIMIT);
         CHECK(g_mock.lastFrame.size() == 64u * 48u * 3 / 2);
@@ -222,11 +245,27 @@ int main() {
         backend.deinit();
     }
 
+    // Packed NV21 must exactly match the dimensions reported by the engine.
+    for (int extra : {-2, 2}) {
+        QCamera3OppoVisidonPanorama backend;
+        CHECK(backend.init(baseConfig(api)) == QCamera3OppoVisidonPanorama::OK);
+        auto frame = makeFrame(64, 48, 64, 64, y, uv);
+        for (int i = 0; i < 3; i++) CHECK(backend.addFrame(frame) == QCamera3OppoVisidonPanorama::OK);
+        g_mock.nv21ExtraBytes = extra;
+        std::vector<uint8_t> bytes(64 * 44 * 3 / 2 + 16, 0x7f);
+        QCamera3OppoVisidonPanorama::Image image{bytes.data(), bytes.size(), 0, 0, 0};
+        CHECK(backend.captureNv21(&image) == QCamera3OppoVisidonPanorama::E_JPEG);
+        CHECK(image.length == 0 && bytes[0] == 0x7f);
+        CHECK(backend.state() == QCamera3OppoVisidonPanorama::State::Failed);
+        g_mock.nv21ExtraBytes = 0;
+    }
+
     // Rotation 90 swaps JPEG dimensions and is forwarded to the engine.
     {
         QCamera3OppoVisidonPanorama backend;
         auto config = baseConfig(api);
         config.rotationDeg = 90;
+        config.transposed = true;
         CHECK(backend.init(config) == QCamera3OppoVisidonPanorama::OK);
         auto frame = makeFrame(64, 48, 64, 64, y, uv);
         for (int i = 0; i < 3; i++) CHECK(backend.addFrame(frame) == QCamera3OppoVisidonPanorama::OK);
@@ -234,6 +273,7 @@ int main() {
         QCamera3OppoVisidonPanorama::Image image{jpeg.data(), jpeg.size(), 0, 0, 0};
         CHECK(backend.captureJpeg(&image) == QCamera3OppoVisidonPanorama::OK);
         CHECK(g_mock.lastRotation == 90);
+        CHECK(g_mock.lastTransposed == 1);
         CHECK(image.width == 44 && image.height == 64);
         backend.deinit();
     }
@@ -252,6 +292,18 @@ int main() {
         CHECK(backend.state() == QCamera3OppoVisidonPanorama::State::Failed);
         CHECK(backend.addFrame(frame) == QCamera3OppoVisidonPanorama::E_STATE);
         backend.deinit();
+    }
+
+    // The JNI owner follows the current native call, even after another engine was opened.
+    {
+        QCamera3OppoVisidonPanorama first, second;
+        CHECK(first.init(baseConfig(api)) == QCamera3OppoVisidonPanorama::OK);
+        CHECK(second.init(baseConfig(api)) == QCamera3OppoVisidonPanorama::OK);
+        uint32_t width = 0, height = 0;
+        g_mock.triggerUnsupportedSlot = true;
+        CHECK(first.process(&width, &height) == QCamera3OppoVisidonPanorama::E_INTERNAL);
+        g_mock.triggerUnsupportedSlot = false;
+        CHECK(second.process(&width, &height) == QCamera3OppoVisidonPanorama::OK);
     }
 
     // Engine errors fail closed with the documented HAL reason mapping.
@@ -290,6 +342,56 @@ int main() {
         CHECK(backend.addFrame(frame) == QCamera3OppoVisidonPanorama::E_STATE);
         backend.deinit();
         backend.deinit(); // idempotent
+    }
+
+    {
+        VisidonJniEnv environment;
+        void *env = environment.jniEnv();
+        void *array = arrayFromSlot(env, VisidonJniEnv::kNewByteArray, 8);
+        auto *table = *static_cast<void ***>(env);
+        using Set = void (*)(void *, void *, int, int, const uint8_t *);
+        const uint8_t bytes[4] = {1, 2, 3, 4};
+        const auto set = reinterpret_cast<Set>(table[VisidonJniEnv::kSetByteArrayRegion]);
+        set(env, array, 4, 4, bytes);
+        CHECK(environment.takeSlotError());
+        CHECK(static_cast<VisidonJniEnv::ByteArrayOut *>(array)->length == 0);
+        set(env, array, 0, 4, bytes);
+        set(env, array, 4, 4, bytes);
+        CHECK(!environment.takeSlotError());
+        CHECK(static_cast<VisidonJniEnv::ByteArrayOut *>(array)->length == 8);
+        set(env, array, 7, 4, bytes);
+        CHECK(environment.takeSlotError());
+        VisidonJniEnv::freeOutput(static_cast<VisidonJniEnv::ByteArrayOut *>(array));
+    }
+    {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool secondReady = false, firstCalled = false;
+        bool firstFault = false, secondFault = true;
+        std::thread first([&] {
+            VisidonJniEnv environment;
+            void *env = environment.jniEnv();
+            std::unique_lock<std::mutex> lock(mutex);
+            changed.wait(lock, [&] { return secondReady; });
+            auto *table = *static_cast<void ***>(env);
+            using Unsupported = uintptr_t (*)(void *, void *);
+            const auto value = reinterpret_cast<Unsupported>(table[6])(env, nullptr);
+            firstFault = value == 0 && environment.takeSlotError();
+            firstCalled = true;
+            changed.notify_all();
+        });
+        std::thread second([&] {
+            VisidonJniEnv environment;
+            environment.jniEnv();
+            std::unique_lock<std::mutex> lock(mutex);
+            secondReady = true;
+            changed.notify_all();
+            changed.wait(lock, [&] { return firstCalled; });
+            secondFault = environment.takeSlotError();
+        });
+        first.join();
+        second.join();
+        CHECK(firstFault && !secondFault);
     }
 
     // Failure-reason mapping (task-153 section 4).

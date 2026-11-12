@@ -74,7 +74,8 @@ bool copyScaled(const QCamera3DualCapture::Image &from,
     else
         cropH = uint32_t(uint64_t(cropW) * to.height / to.width) & ~1U;
     if (!cropW || !cropH) return false;
-    const uint32_t left = (from.width - cropW) / 2, top = (from.height - cropH) / 2;
+    const uint32_t left = ((from.width - cropW) / 2) & ~1U;
+    const uint32_t top = ((from.height - cropH) / 2) & ~1U;
     for (uint32_t y = 0; y < to.height; ++y) {
         const int64_t sy = (int64_t(top) << 16) +
                 (int64_t(y) * cropH << 16) / to.height;
@@ -111,7 +112,8 @@ bool copyCropScaled(const QCamera3DualCapture::Image &from,
     const uint32_t cropW = (uint32_t(float(from.width) * ratio)) & ~1U;
     const uint32_t cropH = (uint32_t(float(from.height) * ratio)) & ~1U;
     if (!cropW || !cropH || cropW > from.width || cropH > from.height) return false;
-    const uint32_t left = (from.width - cropW) / 2, top = (from.height - cropH) / 2;
+    const uint32_t left = ((from.width - cropW) / 2) & ~1U;
+    const uint32_t top = ((from.height - cropH) / 2) & ~1U;
     for (uint32_t y = 0; y < to.height; ++y) {
         const int64_t sy = (int64_t(top) << 16) + (int64_t(y) * cropH << 16) / to.height;
         for (uint32_t x = 0; x < to.width; ++x) {
@@ -222,13 +224,36 @@ bool QCamera3DualCapture::mapFocus(const Rect &crop, uint32_t width, uint32_t he
     imageY = int64_t(y - crop.top) * height / crop.height;
     return true;
 }
+bool QCamera3DualCapture::framingCrop(const Config &config, PortraitFraming framing,
+        uint32_t width, uint32_t height, Rect &crop) {
+    crop = {};
+    if (!width || !height || width > 16384 || height > 16384 || (width | height) & 1 ||
+            (framing != PortraitFraming::Half && framing != PortraitFraming::Full)) return false;
+    float ratio = 1.0f;
+    if (framing == PortraitFraming::Half) {
+        if (!std::isfinite(config.wideMaxFov) || !std::isfinite(config.teleMaxFov) ||
+                config.wideMaxFov <= 0 || config.wideMaxFov >= 180 || config.teleMaxFov <= 0 ||
+                config.teleMaxFov >= config.wideMaxFov) return false;
+        constexpr float halfRadians = 3.14159265358979323846f / 360.0f;
+        ratio = tanf(config.teleMaxFov * halfRadians) / tanf(config.wideMaxFov * halfRadians);
+    }
+    const uint32_t cropW = uint32_t(width * ratio) & ~1U;
+    const uint32_t cropH = uint32_t(height * ratio) & ~1U;
+    if (!cropW || !cropH) return false;
+    crop = {int32_t(((width - cropW) / 2) & ~1U), int32_t(((height - cropH) / 2) & ~1U),
+        int32_t(cropW), int32_t(cropH)};
+    return true;
+}
 int32_t QCamera3DualCapture::begin(const Config &config, const Request &request,
         const Calibration &calibration, uint64_t &token) {
     token = 0;
     int32_t x, y;
+    Rect crop;
     if (!validConfig(config) || calibration.source == Calibration::NONE ||
             !QCamera3DualBokehAlgo::validCalibration(calibration.data, sizeof(calibration.data)) ||
             request.blurLevel < 0 || request.blurLevel > QCamera3DualBokehAlgo::kMaxBlurLevel ||
+            !framingCrop(config, request.framing, config.sensors[0].imageWidth,
+                    config.sensors[0].imageHeight, crop) ||
             !mapFocus(config.sensors[0].requireStreamCrop ? config.sensors[0].streamRoiMap :
                     config.sensors[0].referenceCrop, config.sensors[0].referenceWidth,
                     config.sensors[0].referenceHeight, request.focusX, request.focusY, x, y))
@@ -407,7 +432,7 @@ int32_t QCamera3DualCapture::process(uint64_t token, const Image &destination) {
         bool cropped = false;
         const float wideFov = group->config.wideMaxFov;
         const float teleFov = group->config.teleMaxFov;
-        if (teleFov > 0 && teleFov < wideFov) {
+        if (group->request.framing == PortraitFraming::Half) {
             const float halfPi = 3.14159265358979323846f / 2.0f;
             const float ratio = tanf(teleFov * halfPi / 180.0f) /
                     tanf(wideFov * halfPi / 180.0f);

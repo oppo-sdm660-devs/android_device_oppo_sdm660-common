@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <vector>
+#include <string>
 
 namespace qcamera {
 
@@ -30,6 +31,15 @@ public:
         uint32_t width = 0, height = 0;
         int64_t exposureTimeNs = 0;
         uint32_t sensitivity = 0;
+        int32_t orientationDeg = 0;
+        uint32_t thumbnailWidth = 0, thumbnailHeight = 0;
+        std::vector<uint8_t> thumbnail;
+        std::string make, model, software, dateTime, subsecTime, imageDescription, userComment;
+        float focalLengthMm = 0;
+        bool gpsCoordinatesValid = false, gpsTimestampValid = false;
+        double gpsCoordinates[3] = {};
+        int64_t gpsTimestamp = 0;
+        std::string gpsProcessingMethod;
         size_t maxJpegBytes = 32u * 1024u * 1024u;
     };
 
@@ -46,7 +56,7 @@ public:
     // width/2 x height/2). Appends/replaces `jpeg` only on success.
     static int32_t encode(const uint8_t *nv21, size_t length, const Config &config,
             std::vector<uint8_t> &jpeg);
-    // Canvas has already been physically rotated. Missing source fields stay absent.
+    // Missing source fields stay absent. Rotated panorama canvases use the default 0.
     static int32_t replaceExif(std::vector<uint8_t> &jpeg, const Metadata &metadata);
 
     // EXIF orientation value (TIFF Orientation tag) for the config.

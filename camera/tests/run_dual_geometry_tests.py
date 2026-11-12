@@ -13,11 +13,18 @@ SOURCES = ["QCamera3DualGeometry.cpp", "QCamera3DualCapture.cpp",
 def main():
     out = Path(tempfile.mkdtemp(prefix="ocam-dual-geometry-"))
     test = out / "dual_geometry_test"
+    library = out / "libarcsoft_dualcam_refocus.so"
+    command = [CXX, *FLAGS, "-shared", "-fPIC", str(HERE / "fake_arcsoft_dualcam.cpp"),
+               "-o", str(library)]
+    print("+ " + " ".join(command))
+    if subprocess.run(command).returncode: return 1
     command = [CXX, *FLAGS, str(HERE / "dual_geometry_test.cpp"),
                *[str(HAL3 / name) for name in SOURCES],
                "-o", str(test), "-lcrypto", "-ldl"]
     print("+ " + " ".join(command))
     if subprocess.run(command).returncode: return 1
     print("+ " + str(test))
-    return subprocess.run([str(test)]).returncode
+    environment = os.environ.copy()
+    environment["LD_LIBRARY_PATH"] = str(out)
+    return subprocess.run([str(test)], env=environment).returncode
 if __name__ == "__main__": sys.exit(main())

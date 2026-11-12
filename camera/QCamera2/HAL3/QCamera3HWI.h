@@ -332,8 +332,11 @@ public:
     // Per-physical overridable request keys; 0 when none is honoured.
     static size_t logicalPhysicalRequestKeys(uint32_t physicalCameraId, uint32_t *keys,
             size_t capacity);
-    int32_t beginVerifiedDualRequest(uint32_t frameNumber, const CameraMetadata &settings);
+    int32_t beginVerifiedDualRequest(uint32_t frameNumber, const CameraMetadata &settings,
+            const uint32_t *wideFrameIds = nullptr, unsigned wideCount = 1);
     int32_t configureVerifiedDualCapture();
+    int32_t preparePreviewBokehRequest(const camera3_capture_request_t *request);
+    QCamera3RegularChannel *findPreviewBokehChannel();
     int32_t orchestrateMultiFrameCapture(camera3_capture_request_t *request);
     int32_t orchestrateMFCRawCapture(camera3_capture_request_t *request);
     int32_t orchestrateAdvancedCapture(camera3_capture_request_t *request, bool &isAdvancedCapture);
@@ -482,6 +485,14 @@ public:
     uint32_t getCameraID() {return mCameraId;}
     bool isDualCamera() { return mDualCamera; };
     bool isVideoSession() const { return m_bIsVideo; }
+    bool isFrontCamera() const;
+    bool isHighResolutionOutput(const camera3_stream_t *stream) const;
+    int32_t orchestrateHighResolutionCapture(camera3_capture_request_t *request);
+    bool processRealtimeFrame(uint32_t internalFrame, mm_camera_buf_def_t *frame,
+            const cam_dimension_t &dim, const cam_frame_len_offset_t &offset, bool nv12,
+            const camera3_stream_t *output, QCamera3StreamMem *memory = nullptr);
+    void noteRealtimeFailure(uint32_t internalFrame, const camera3_stream_t *output,
+            int32_t status, bool includePreviewBokeh = true);
     bool isSuperZoomFullFieldOfView(const metadata_buffer_t *metadata);
     int32_t getNativeStillMode() { return mNativeStillMode; }
     int32_t getNativeDualBindStatus() { return mNativeDualBindStatus; }
@@ -715,6 +726,8 @@ private:
     bool m_bEisSupportedSize;
     bool m_bEisEnable;
     bool mMmsVideoConfigured = false;
+    bool mRealtimeLinearConfigured = false;
+    int32_t mSessionPreviewBokehStrength = 0;
     bool mSensorVideoHdrChosen = false;
     int32_t mSensorVideoHdrMode = 0;
     uint8_t mMmsRequestedMode = ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF;
@@ -1083,6 +1096,10 @@ private:
         CameraMetadata settings;
         CameraMetadata deferredMetadata;
         bool deferFinalMetadata = false;
+        int64_t captureWaitNs = 30000000000LL;
+        camera3_stream_t *mmsOutput = nullptr;
+        camera3_stream_t *realtimeOutput = nullptr;
+        camera3_stream_t *previewBokehOutput = nullptr;
         std::vector<buffer_handle_t> handles;
         std::vector<camera3_stream_buffer_t> outputs;
         buffer_handle_t inputHandle = nullptr;
@@ -1110,6 +1127,12 @@ private:
     std::condition_variable mAsyncCondition;
     std::deque<std::shared_ptr<AcceptedRequest>> mAsyncQueue;
     std::map<uint32_t, std::shared_ptr<AcceptedRequest>> mAcceptedRequests;
+    struct RealtimeSource { int64_t timestampNs; int32_t sensitivity; };
+    void cacheRealtimeSource(uint32_t frameNumber, uint32_t cameraHandle,
+            int64_t timestampNs, int32_t sensitivity);
+    std::mutex mRealtimeSourceLock;
+    std::condition_variable mRealtimeSourceCondition;
+    std::map<uint32_t, RealtimeSource> mRealtimeSources;
     CameraMetadata mAcceptedSettings;
     bool mAcceptedVideoHdrChosen = false;
     int32_t mAcceptedVideoHdrMode = 0;
@@ -1120,6 +1143,8 @@ private:
     bool mAsyncBusy = false;
     static constexpr size_t kMaxAcceptedRequests = 128;
     uint32_t mSubmittingBurstFrameNumber = UINT32_MAX;
+    uint32_t mDualBurstFrameIds[3] = {};
+    bool mDualBurstPending = false;
     uint32_t sync_counter;
 
     // Joined stage trace ring keyed by internal frame number; a miss is normal.

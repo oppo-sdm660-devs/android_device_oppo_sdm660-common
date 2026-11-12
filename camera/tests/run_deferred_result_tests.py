@@ -25,7 +25,10 @@ out = Path(tempfile.mkdtemp(prefix='ocam-deferred-result-'))
 (out / 'wait.inc').write_text(function('int32_t QCamera3HardwareInterface::waitForAsyncResult('))
 jpeg = channel[channel.index('void QCamera3PicChannel::jpegEvtHandle('):]
 assert jpeg.index('hw->stopZslSnapshotMode();') < jpeg.index('obj->mChannelCB(NULL,')
-assert source.count('deferAsyncFinalMetadata(request->frame_number);') == 2
+for capture in ('orchestrateHighResolutionCapture', 'orchestrateStillCapture',
+                'orchestrateBurstCapture'):
+    assert 'deferAsyncFinalMetadata(request->frame_number);' in function(
+        f'int32_t QCamera3HardwareInterface::{capture}(')
 flags = ['-std=gnu++17', '-Wall', '-Wextra', '-Werror', '-O1', '-g', '-pthread',
          '-fsanitize=address,undefined', '-fno-sanitize-recover=undefined']
 subprocess.run([os.environ.get('CXX', 'g++'), *flags, '-I', str(out), '-I', str(HAL3),

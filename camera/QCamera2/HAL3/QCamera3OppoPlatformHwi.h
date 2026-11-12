@@ -7,10 +7,7 @@
 #include <stdint.h>
 #include <errno.h>
 
-/*
- * In-process wiring of the OPPO platform algorithm layer (liboppo_platform_hwi.so).
- * Off by default: the persist.vendor.camera.oppo.platform_hwi[.process] gates enable it.
- */
+/* OPPO pixel backends; diagnostic probes retain their separate property gates. */
 
 constexpr int32_t kOppoPlatformMaxFaces = 10;
 constexpr int32_t kOppoPlatformMaxImages = 10;
@@ -82,6 +79,18 @@ public:
      */
     int32_t processStillFrame(int32_t stillMode, const QCamera3OppoPlatformFrame &frame);
 
+    // Explicit HAL3 stages. No probe properties or HAL1 capture state select them.
+    // Beauty uses the isolated ArcSoft pixel adapters; SCES uses its core wrapper.
+    // NV21 preview/video geometry is accepted too; the IMAGE engines make no
+    // guarantee of real-time throughput. -ENODATA means no active pixel changed.
+    static bool explicitAvailable(int32_t stillMode);
+    static bool imageAdjustAvailable(bool realtime = false);
+    int32_t processExplicitFrame(int32_t stillMode,
+            const QCamera3OppoPlatformFrame &frame, bool isFront);
+    // sensorSensitivity must belong to this source frame, not the latest 3A result.
+    int32_t processImageAdjustFrame(const QCamera3OppoPlatformFrame &frame,
+            bool isFront, int32_t sensorSensitivity, bool realtime = false);
+
     /* Last processStillFrame() result, for diagnostics. */
     int32_t lastStatus() const;
 
@@ -110,7 +119,7 @@ private:
 
     void onCloseCamera();
     /* NULL = stage 1 probe with zeroed geometry; else stage 2 with the real geometry. */
-    bool initializeLocked(const QCamera3OppoPlatformFrame *frame);
+    bool initializeLocked(const QCamera3OppoPlatformFrame *frame, bool realtime = false);
     void shutdownLocked();
     void buildPlatformParamLocked(const QCamera3OppoPlatformFrame *frame);
     void buildFrameCtxLocked(const QCamera3OppoPlatformFrame &frame);
@@ -157,6 +166,8 @@ private:
     size_t mScratchSize = 0x1000;
     bool ensureScratchLocked();
     void freeScratchLocked();
+    int32_t processPixelStage(uint64_t mask, const QCamera3OppoPlatformFrame &frame,
+            bool isFront, int32_t sensorSensitivity, bool realtime = false);
 };
 
 #endif /* QCAMERA3_OPPO_PLATFORM_HWI_H */

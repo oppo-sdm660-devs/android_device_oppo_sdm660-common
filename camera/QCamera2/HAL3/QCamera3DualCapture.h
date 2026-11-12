@@ -13,6 +13,7 @@ class QCamera3DualCapture {
 public:
     using Image = QCamera3DualBokehAlgo::Image;
     using Calibration = QCamera3DualBokehAlgo::UnitCalibration;
+    enum class PortraitFraming : int32_t { Half = 0, Full = 1 };
     struct Rect { int32_t left, top, width, height; };
     struct Sensor {
         uint32_t cameraHandle;
@@ -33,7 +34,7 @@ public:
     struct Config {
         Sensor sensors[2];
         float wideMaxFov;
-        // Stock bokeh narrows the output to the auxiliary FOV; 0 keeps full wide.
+        // Half framing requires a narrower auxiliary FOV; Full keeps the wide FOV.
         float teleMaxFov = 0.0f;
         int64_t maxTimestampDeltaNs;
         int64_t timeoutNs;
@@ -49,6 +50,7 @@ public:
         uint32_t frameIds[2];
         // AF point in wide sensor-output coordinates (see referenceCrop).
         int32_t focusX, focusY, blurLevel;
+        PortraitFraming framing = PortraitFraming::Half;
     };
 
     QCamera3DualCapture() = default;
@@ -56,6 +58,9 @@ public:
     static bool validConfig(const Config &config);
     static bool mapFocus(const Rect &crop, uint32_t width, uint32_t height,
             int32_t x, int32_t y, int32_t &imageX, int32_t &imageY);
+    // Derived from the bound optical FOVs; does not change stereo ordering or calibration.
+    static bool framingCrop(const Config &, PortraitFraming, uint32_t width,
+            uint32_t height, Rect &crop);
     int32_t begin(const Config &, const Request &, const Calibration &, uint64_t &token);
     uint64_t tokenFor(uint32_t cameraHandle, uint32_t frameNumber) const;
     int32_t submitMetadata(uint64_t token, uint32_t cameraHandle, uint32_t frameNumber,

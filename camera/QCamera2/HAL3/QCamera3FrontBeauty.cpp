@@ -22,15 +22,11 @@ struct ArcImage {
 static_assert(sizeof(ArcImage) == 44, "ARC_BS_IMAGE ARM32 descriptor");
 #endif
 
-// The exported ARC_BS_IMAGE_Process only accepts u32PixelArrayFormat 0x605 and
-// converts it to its internal planar 0x601 descriptor by swapping plane1/plane2;
-// 0x605 is therefore the Y/V/U planar layout (YV12) for this core. 0x802 (NV21)
-// belongs to the other ArcSoft API group and is not accepted here.
+// The stock caller uses 0x605; ARC_BS_IMAGE_Process converts it to internal
+// planar 0x601 by swapping plane1/plane2. Keep that evidenced Y/V/U layout.
 const uint32_t kYv12Format = 0x605;
 
-// Feature ids resolved with ARC_BS_IMAGE_SetFeatureLevel by the stock caller
-// (0xc9/0xec/0xca/0xcb/0xcd/0xcc/0xf0). Which beauty feature each id drives is
-// not established, so the requested strength is applied to all of them.
+// Order in ArcFaceBeauty::faceBeautyProcess, core 0x1c15c..0x1c1b4.
 const int32_t kFeatureIds[] = {0xc9, 0xec, 0xca, 0xcb, 0xcd, 0xcc, 0xf0};
 
 pthread_mutex_t gFrontBeautyLock = PTHREAD_MUTEX_INITIALIZER;
@@ -116,13 +112,37 @@ void joinChroma(uint8_t *dst, uint32_t dstStride, const uint8_t *v, const uint8_
 bool QCamera3FrontBeauty::isAvailable() {
     Lock lock;
     Api api;
-    return api.valid();
+    if (!api.valid()) return false;
+    void *handle = api.init();
+    return handle && api.uninit(handle) == 0;
+}
+
+QCamera3FrontBeauty::FeatureLevels QCamera3FrontBeauty::levelsForStrength(int32_t strength) {
+    FeatureLevels result;
+    if (strength <= 0) return result;
+    if (strength > 100) strength = 100;
+    const int32_t level = (strength * 6 + 50) / 100;
+    // R11/R11s core table 0x4cee4: profile 0, 0x3e bytes per level.
+    static constexpr uint8_t soften[] = {0, 10, 30, 50, 60, 70, 80};
+    result.levels[0] = soften[level > 0 ? level : 1];
+    result.levels[2] = 30;
+    return result;
 }
 
 int32_t QCamera3FrontBeauty::process(const Image &image, int32_t strength,
         const std::atomic<bool> *cancelFlag) {
     if (!QCamera3HdrAlgo::validImage(image) || strength < 0 || strength > 100)
         return -EINVAL;
+    if (stopped(cancelFlag)) return -ECANCELED;
+    if (strength == 0) return 0;
+    return process(image, levelsForStrength(strength), cancelFlag);
+}
+
+int32_t QCamera3FrontBeauty::process(const Image &image, const FeatureLevels &features,
+        const std::atomic<bool> *cancelFlag) {
+    if (!QCamera3HdrAlgo::validImage(image)) return -EINVAL;
+    for (uint8_t level : features.levels)
+        if (level > 100) return -EINVAL;
     // A planar YUV core needs an even luma stride and a chroma pitch of yStride/2.
     if (image.yStride & 1U) return -EINVAL;
     const uint32_t chromaStride = image.yStride / 2;
@@ -166,7 +186,7 @@ int32_t QCamera3FrontBeauty::process(const Image &image, int32_t strength,
     int32_t rc = 0;
     for (size_t i = 0; i < sizeof(kFeatureIds) / sizeof(kFeatureIds[0]); ++i) {
         if (stopped(cancelFlag)) { rc = -ECANCELED; break; }
-        api.setFeature(handle, kFeatureIds[i], strength);
+        api.setFeature(handle, kFeatureIds[i], features.levels[i]);
     }
     // No face hint is passed: the 0x284-byte face record the stock caller builds
     // is not decoded, and passing a fabricated record would be a layout guess.
@@ -174,10 +194,22 @@ int32_t QCamera3FrontBeauty::process(const Image &image, int32_t strength,
             nullptr, nullptr);
     const int32_t cleanup = api.uninit(handle);
     if (!rc) rc = cleanup;
-    if (rc) return rc;
+    if (rc) return rc < 0 ? rc : -EIO;
     if (stopped(cancelFlag)) return -ECANCELED;
     // In-place processing must keep the caller-provided descriptor.
     if (!sameImage(frame, expected)) return -EPROTO;
+
+    bool changed = false;
+    for (uint32_t row = 0; row < image.height && !changed; ++row)
+        changed = memcmp(image.data + image.yOffset + size_t(row) * image.yStride,
+                yPlane + size_t(row) * image.yStride, image.width) != 0;
+    for (uint32_t row = 0; row < chromaRows && !changed; ++row) {
+        const uint8_t *source = image.data + image.uvOffset + size_t(row) * image.uvStride;
+        for (uint32_t col = 0; col < chromaWidth && !changed; ++col)
+            changed = source[2 * col] != vPlane[size_t(row) * chromaStride + col] ||
+                    source[2 * col + 1] != uPlane[size_t(row) * chromaStride + col];
+    }
+    if (!changed) return -ENODATA;
 
     copyRows(image.data + image.yOffset, image.yStride, yPlane, image.yStride,
             image.width, image.height);

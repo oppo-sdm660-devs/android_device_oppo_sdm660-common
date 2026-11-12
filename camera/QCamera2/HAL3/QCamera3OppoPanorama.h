@@ -37,6 +37,9 @@ public:
         int32_t orientationDeg = 0; // device orientation: 0/90/180/270
         int32_t directionDeg = DIR_AUTO; // pan direction: 0/90/180/270 or AUTO
         bool crop = false;          // stock isDocPanoramaCropMode
+        bool verticalSweep = false; // sensor Y for an upright horizontal sweep
+        bool centerCanvas = false;
+        bool preserveCropSize = false;
         uint32_t maxFrames = 12;    // hard cap; stock had no explicit cap (D)
         uint32_t minFrames = 2;     // fewer frames => E_NOFRAME on stitch
         uint32_t featherPx = 24;    // linear feather width in canvas px
@@ -95,8 +98,8 @@ public:
         int64_t timestampUs = 0;
     };
 
-    // Accumulated angles from the HAL gyro path (task-139: degrees, rad/s input
-    // integrated over us time base). Both angles may be 0 if gyro is absent.
+    // Angular displacement from the preceding accepted frame to this frame,
+    // integrated from timestamped rad/s samples and mapped into image axes.
     struct GyroSample {
         float angleXDeg = 0.0f;
         float angleYDeg = 0.0f;
@@ -115,7 +118,7 @@ public:
         int32_t lastStatus = OK;
         size_t peakBytes = 0;
         float lastGain = 1.0f;
-        int32_t shiftPx = 0; // image-only estimate of the last frame
+        int32_t shiftPx = 0; // placement step of the last accepted frame
     };
 
     QCamera3OppoPanorama();

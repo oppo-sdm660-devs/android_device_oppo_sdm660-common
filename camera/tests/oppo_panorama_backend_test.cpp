@@ -232,7 +232,7 @@ void testHorizontalPan(const char *outDir) {
     CHECK_EQ(p.init(basicConfig()), QCamera3OppoPanorama::OK);
     Scene scene = makeScene(96, 56);
     std::vector<uint8_t> y;
-    const uint32_t bases[] = {24, 16, 8, 0};
+    const uint32_t bases[] = {0, 8, 16, 24};
     int32_t expected = 0;
     for (uint32_t i = 0; i < 4; i++) {
         QCamera3OppoPanorama::Frame f = cropFrame(scene, bases[i], 0, kPreviewW,
@@ -281,7 +281,7 @@ void testHorizontalPan(const char *outDir) {
 void testCropVsFullCanvas(const char *outDir) {
     Scene scene = makeScene(96, 56);
     std::vector<uint8_t> y;
-    const uint32_t bases[] = {24, 16, 8, 0};
+    const uint32_t bases[] = {0, 8, 16, 24};
 
     auto run = [&](bool crop, std::vector<uint8_t> *outBuf) {
         QCamera3OppoPanorama p;
@@ -330,6 +330,11 @@ void testGyroPriorOnly() {
         CHECK_EQ(p.addFrame(f, &g), QCamera3OppoPanorama::OK);
         CHECK_EQ(p.currentOffset().x, static_cast<int32_t>(i * kPanStep));
     }
+    CHECK_EQ(p.addGyro(g), QCamera3OppoPanorama::OK);
+    CHECK_EQ(p.addFrame(f, nullptr), QCamera3OppoPanorama::OK);
+    CHECK_EQ(p.currentOffset().x, 3 * int32_t(kPanStep));
+    CHECK_EQ(p.addFrame(f, nullptr), QCamera3OppoPanorama::OK);
+    CHECK_EQ(p.currentOffset().x, 3 * int32_t(kPanStep));
     p.deinit();
 
     // gyro absent: falls back to the image estimate, which is zero on identical
@@ -351,7 +356,7 @@ void testVerticalPan() {
     CHECK_EQ(p.init(c), QCamera3OppoPanorama::OK);
     Scene scene = makeScene(64, 64);
     std::vector<uint8_t> y;
-    const uint32_t bases[] = {16, 8, 0};
+    const uint32_t bases[] = {0, 8, 16};
     for (uint32_t i = 0; i < 3; i++) {
         QCamera3OppoPanorama::Frame f = cropFrame(scene, 0, bases[i], kPreviewW,
                 kPreviewH, &y);
@@ -362,6 +367,46 @@ void testVerticalPan() {
     p.deinit();
 }
 
+void testCenteredBidirectionalSweepPreservesSampledSize() {
+    Scene scene = makeScene(128, 112);
+    for (bool vertical : {false, true}) {
+        for (int sign : {-1, 1}) {
+            auto config = basicConfig();
+            config.verticalSweep = vertical;
+            config.canvasWidth = vertical ? kPreviewW : 3 * kPreviewW;
+            config.canvasHeight = vertical ? 3 * kPreviewH : kPreviewH;
+            config.centerCanvas = true;
+            config.crop = true;
+            config.preserveCropSize = true;
+            QCamera3OppoPanorama backend;
+            CHECK_EQ(backend.init(config), QCamera3OppoPanorama::OK);
+            std::vector<uint8_t> storage;
+            for (uint32_t n = 0; n < 4; ++n) {
+                const uint32_t base = sign > 0 ? n * kPanStep : (3 - n) * kPanStep;
+                const auto frame = cropFrame(scene, vertical ? 0 : base, vertical ? base : 0,
+                        kPreviewW, kPreviewH, &storage);
+                CHECK_EQ(backend.addFrame(frame, nullptr), QCamera3OppoPanorama::OK);
+                CHECK_EQ(backend.currentOffset().x, vertical ? 0 : int(kPreviewW) + sign * int(n * kPanStep));
+                CHECK_EQ(backend.currentOffset().y, vertical ? int(kPreviewH) + sign * int(n * kPanStep) : 0);
+            }
+            CHECK_EQ(backend.finetune(), QCamera3OppoPanorama::OK);
+            std::vector<uint8_t> output(backend.outputSize());
+            QCamera3OppoPanorama::Image image;
+            image.data = output.data();
+            image.length = output.size();
+            CHECK_EQ(backend.stitch(&image), QCamera3OppoPanorama::OK);
+            CHECK_EQ(image.width, kPreviewW + (vertical ? 0 : 3 * kPanStep));
+            CHECK_EQ(image.height, kPreviewH + (vertical ? 3 * kPanStep : 0));
+            uint32_t mismatches = 0;
+            for (uint32_t y = 0; y < image.height; ++y)
+                for (uint32_t x = 0; x < image.width; ++x)
+                    if (std::abs(int(output[size_t(y) * image.width + x]) -
+                            int(scene.y[size_t(y) * scene.width + x])) > 1) ++mismatches;
+            CHECK_EQ(mismatches, 0u);
+        }
+    }
+}
+
 void testOrientation(const char *outDir) {
     QCamera3OppoPanorama p;
     QCamera3OppoPanorama::Config c = basicConfig();
@@ -369,7 +414,7 @@ void testOrientation(const char *outDir) {
     CHECK_EQ(p.init(c), QCamera3OppoPanorama::OK);
     Scene scene = makeScene(96, 56);
     std::vector<uint8_t> y;
-    const uint32_t bases[] = {24, 16, 8, 0};
+    const uint32_t bases[] = {0, 8, 16, 24};
     for (uint32_t i = 0; i < 4; i++) {
         QCamera3OppoPanorama::Frame f = cropFrame(scene, bases[i], 0, kPreviewW,
                 kPreviewH, &y);
@@ -415,7 +460,7 @@ void testLimitOverflowCancel() {
     QCamera3OppoPanorama::Config c2 = basicConfig();
     c2.canvasWidth = 80; // first frame 64 fits; +24 overflows
     CHECK_EQ(p2.init(c2), QCamera3OppoPanorama::OK);
-    const uint32_t bases[] = {24, 16, 8, 0};
+    const uint32_t bases[] = {0, 8, 16, 24};
     int32_t rc = QCamera3OppoPanorama::OK;
     for (uint32_t i = 0; i < 4 && rc == QCamera3OppoPanorama::OK; i++) {
         QCamera3OppoPanorama::Frame ff = cropFrame(scene, bases[i], 0, kPreviewW,
@@ -449,6 +494,7 @@ int main(int argc, char **argv) {
     testCropVsFullCanvas(outDir);
     testGyroPriorOnly();
     testVerticalPan();
+    testCenteredBidirectionalSweepPreservesSampledSize();
     testOrientation(outDir);
     testLimitOverflowCancel();
 

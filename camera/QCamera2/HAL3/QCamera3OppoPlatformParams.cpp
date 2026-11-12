@@ -108,6 +108,9 @@ bool buildParam(uint8_t *param, size_t size, const Frame &frame)
     writeU32(param, ParamOffsets::kHeight, height);
     writeU32(param, ParamOffsets::kStride, stride);
     writeU32(param, ParamOffsets::kSlice, slice);
+    writeU32(param, ParamOffsets::kPitchY, stride);
+    writeU32(param, ParamOffsets::kPitchUv, stride);
+    writeU32(param, ParamOffsets::kStreamType, frame.realtime ? 1 : 0);
     writeU8(param, ParamOffsets::kIsFront, frame.isFront ? 1 : 0);
     writeU32(param, ParamOffsets::kJpegRotation, uint32_t(frame.jpegRotation));
     /* The HDR per-frame arrays and the unknown face-block arrays are not fully
@@ -119,6 +122,12 @@ bool buildParam(uint8_t *param, size_t size, const Frame &frame)
     }
     if (frame.beauty.enabled) buildBeautyParams(param, size, frame.beauty);
     writeU32(param, ParamOffsets::kScesParam, uint32_t(frame.scesParam));
+    if (frame.imageAdjust) {
+        if (frame.sensorSensitivity <= 0) return false;
+        writeU32(param, ParamOffsets::kSensorSensitivity,
+                uint32_t(frame.sensorSensitivity));
+        writeU8(param, ParamOffsets::kImageAdjustEnable, 1);
+    }
     return true;
 }
 

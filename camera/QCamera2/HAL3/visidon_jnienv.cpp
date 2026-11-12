@@ -1,13 +1,14 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "visidon_jnienv.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 namespace qcamera {
 
-VisidonJniEnv *VisidonJniEnv::sActive = nullptr;
+thread_local VisidonJniEnv *VisidonJniEnv::sActive = nullptr;
 
 VisidonJniEnv::VisidonJniEnv() { reset(); }
 
@@ -54,7 +55,7 @@ VisidonJniEnv::ByteArrayOut *VisidonJniEnv::newByteArrayOut(size_t capacity) {
     if (capacity == 0 || capacity > kMaxArrayBytes) return nullptr;
     auto *out = static_cast<ByteArrayOut *>(std::calloc(1, sizeof(ByteArrayOut)));
     if (out == nullptr) return nullptr;
-    out->data = static_cast<uint8_t *>(std::malloc(capacity));
+    out->data = static_cast<uint8_t *>(std::calloc(capacity, 1));
     if (out->data == nullptr) {
         std::free(out);
         return nullptr;
@@ -145,11 +146,13 @@ void VisidonJniEnv::slotSetByteArrayRegion(void *env, void *array, int start,
     (void)env;
     auto *out = static_cast<ByteArrayOut *>(array);
     if (out == nullptr || out->data == nullptr || buffer == nullptr ||
-            start < 0 || length < 0)
+            start < 0 || length < 0 || size_t(start) > out->length ||
+            size_t(start) > out->capacity || size_t(length) > out->capacity - size_t(start)) {
+        active()->slotError_ = true;
         return;
-    if (size_t(start) + size_t(length) > out->capacity) return;
+    }
     std::memcpy(out->data + start, buffer, size_t(length));
-    out->length = size_t(start) + size_t(length);
+    out->length = std::max(out->length, size_t(start) + size_t(length));
 }
 
 void VisidonJniEnv::slotSetIntArrayRegion(void *env, void *array, int start,
@@ -157,11 +160,13 @@ void VisidonJniEnv::slotSetIntArrayRegion(void *env, void *array, int start,
     (void)env;
     auto *out = static_cast<IntArrayOut *>(array);
     if (out == nullptr || out->data == nullptr || buffer == nullptr ||
-            start < 0 || length < 0)
+            start < 0 || length < 0 || size_t(start) > out->length ||
+            size_t(start) > out->capacity || size_t(length) > out->capacity - size_t(start)) {
+        active()->slotError_ = true;
         return;
-    if (size_t(start) + size_t(length) > out->capacity) return;
+    }
     std::memcpy(out->data + start, buffer, size_t(length) * sizeof(int32_t));
-    out->length = size_t(start) + size_t(length);
+    out->length = std::max(out->length, size_t(start) + size_t(length));
 }
 
 void VisidonJniEnv::slotSetFloatArrayRegion(void *env, void *array, int start,
@@ -169,11 +174,13 @@ void VisidonJniEnv::slotSetFloatArrayRegion(void *env, void *array, int start,
     (void)env;
     auto *out = static_cast<FloatArrayOut *>(array);
     if (out == nullptr || out->data == nullptr || buffer == nullptr ||
-            start < 0 || length < 0)
+            start < 0 || length < 0 || size_t(start) > out->length ||
+            size_t(start) > out->capacity || size_t(length) > out->capacity - size_t(start)) {
+        active()->slotError_ = true;
         return;
-    if (size_t(start) + size_t(length) > out->capacity) return;
+    }
     std::memcpy(out->data + start, buffer, size_t(length) * sizeof(float));
-    out->length = size_t(start) + size_t(length);
+    out->length = std::max(out->length, size_t(start) + size_t(length));
 }
 
 void *VisidonJniEnv::slotGetDirectBufferAddress(void *env, void *buffer) {
@@ -182,8 +189,10 @@ void *VisidonJniEnv::slotGetDirectBufferAddress(void *env, void *buffer) {
     return static_cast<DirectBufferIn *>(buffer)->addr;
 }
 
-void VisidonJniEnv::unsupportedSlot() {
+uintptr_t VisidonJniEnv::unsupportedSlot(void *env, ...) {
+    (void)env;
     if (sActive != nullptr) sActive->slotError_ = true;
+    return 0;
 }
 
 }  // namespace qcamera

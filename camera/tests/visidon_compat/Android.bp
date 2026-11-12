@@ -15,6 +15,7 @@ cc_library_shared {
     name: "libjnigraphics_visidon_stub",
     vendor: true,
     compile_multilib: "32",
+    stl: "none",
     srcs: ["libjnigraphics_stub.cpp"],
     stem: "libjnigraphics",
     ldflags: ["-Wl,-soname,libjnigraphics.so"],

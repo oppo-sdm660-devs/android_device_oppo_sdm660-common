@@ -3,6 +3,7 @@
 // Verifies the evidenced call sequence, YV12 scratch layout and error paths; it
 // does not execute or validate the proprietary algorithm.
 #include "QCamera3FrontBeauty.h"
+#include "QCamera3StockBeauty.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -15,6 +16,7 @@
 namespace {
 
 using qcamera::QCamera3FrontBeauty;
+using qcamera::QCamera3StockBeauty;
 using Image = QCamera3FrontBeauty::Image;
 
 int g_failures = 0;
@@ -29,6 +31,7 @@ struct Fake {
     void (*failUninit)(int32_t) = nullptr;
     void (*tamper)(int32_t) = nullptr;
     int32_t (*initCalls)() = nullptr;
+    int32_t (*initArgument)() = nullptr;
     int32_t (*uninitCalls)() = nullptr;
     int32_t (*processCalls)() = nullptr;
     int32_t (*featureCalls)() = nullptr;
@@ -57,6 +60,7 @@ struct Fake {
         LOAD(failUninit, "fake_fail_uninit");
         LOAD(tamper, "fake_tamper_descriptor");
         LOAD(initCalls, "fake_init_calls");
+        LOAD(initArgument, "fake_init_argument");
         LOAD(uninitCalls, "fake_uninit_calls");
         LOAD(processCalls, "fake_process_calls");
         LOAD(featureCalls, "fake_feature_calls");
@@ -75,7 +79,7 @@ struct Fake {
         LOAD(chromaV, "fake_chroma_v");
         LOAD(chromaU, "fake_chroma_u");
 #undef LOAD
-        return reset && failInit && failProcess && failUninit && tamper && initCalls &&
+        return reset && failInit && failProcess && failUninit && tamper && initCalls && initArgument &&
                 uninitCalls && processCalls && featureCalls && featureId && featureLevel &&
                 sameImage && faceArgNull && arg5Null && format && width && height && pitch &&
                 planesNonNull && chromaStride && chromaRows && chromaV && chromaU;
@@ -118,6 +122,12 @@ struct Nv21Image {
 void testAvailability(Fake &fake) {
     fake.reset();
     CHECK(QCamera3FrontBeauty::isAvailable());
+    CHECK(fake.initCalls() == 1 && fake.uninitCalls() == 1);
+    fake.failInit(1);
+    CHECK(!QCamera3FrontBeauty::isAvailable());
+    fake.failInit(0);
+    fake.failUninit(-EIO);
+    CHECK(!QCamera3FrontBeauty::isAvailable());
 }
 
 void testSuccess(Fake &fake) {
@@ -130,9 +140,10 @@ void testSuccess(Fake &fake) {
     CHECK(fake.processCalls() == 1);
     CHECK(fake.featureCalls() == 7);
     const int32_t expectedIds[] = {0xc9, 0xec, 0xca, 0xcb, 0xcd, 0xcc, 0xf0};
+    const int32_t expectedLevels[] = {60, 0, 30, 0, 0, 0, 0};
     for (int i = 0; i < 7; ++i) {
         CHECK(fake.featureId(i) == expectedIds[i]);
-        CHECK(fake.featureLevel(i) == 60);
+        CHECK(fake.featureLevel(i) == expectedLevels[i]);
     }
     CHECK(fake.sameImage() == 1);
     CHECK(fake.faceArgNull() == 1);
@@ -162,6 +173,96 @@ void testSuccess(Fake &fake) {
             CHECK(image.uv()[row * kWidth + 2 * col + 1] == uint8_t(0x80 + row));
         }
     }
+}
+
+void testStrengthProfile(Fake &fake) {
+    fake.reset();
+    const int strengths[] = {0, 17, 33, 50, 67, 83, 100};
+    const int soften[] = {0, 10, 30, 50, 60, 70, 80};
+    for (int i = 0; i < 7; ++i) {
+        const auto features = QCamera3FrontBeauty::levelsForStrength(strengths[i]);
+        CHECK(features.levels[0] == soften[i]);
+        CHECK(features.levels[2] == (i == 0 ? 0 : 30));
+        CHECK(features.levels[1] == 0 && features.levels[3] == 0 &&
+                features.levels[4] == 0 && features.levels[5] == 0 && features.levels[6] == 0);
+    }
+    Nv21Image image;
+    const auto before = image.storage;
+    CHECK(QCamera3FrontBeauty::process(image.image, 0) == 0);
+    CHECK(image.storage == before && fake.initCalls() == 0);
+}
+
+void testNoChangeAndStreamingGeometry(Fake &fake) {
+    fake.reset();
+    Nv21Image unchanged;
+    memset(unchanged.storage.data(), 0xAA, size_t(kWidth) * kHeight);
+    const auto before = unchanged.storage;
+    CHECK(QCamera3FrontBeauty::process(unchanged.image, 50) == -ENODATA);
+    CHECK(unchanged.storage == before);
+
+    const uint32_t geometry[][4] = {
+        {640, 480, 672, 512}, {1280, 720, 1344, 736}, {1920, 1080, 1920, 1088},
+    };
+    for (const auto &size : geometry) {
+        fake.reset();
+        Image image = {};
+        image.width = size[0];
+        image.height = size[1];
+        image.yStride = image.uvStride = size[2];
+        image.yScanline = size[3];
+        image.uvScanline = size[3] / 2;
+        image.uvOffset = size_t(image.yStride) * image.yScanline;
+        image.length = image.uvOffset + size_t(image.uvStride) * image.uvScanline;
+        std::vector<uint8_t> pixels(image.length, 0x33);
+        image.data = pixels.data();
+        CHECK(QCamera3FrontBeauty::process(image, 83) == 0);
+        CHECK(fake.width() == int32_t(size[0]) && fake.height() == int32_t(size[1]));
+        CHECK(fake.pitch(0) == int32_t(size[2]));
+        for (uint32_t row = 0; row < image.height; ++row) {
+            CHECK(pixels[size_t(row) * image.yStride] == 0xAA);
+            if (image.yStride > image.width)
+                CHECK(pixels[size_t(row) * image.yStride + image.width] == 0x33);
+        }
+        CHECK(pixels[size_t(image.height) * image.yStride] == 0x33);
+        CHECK(pixels[image.uvOffset] == 0x33);
+    }
+}
+
+void testRearBeauty(Fake &fake) {
+    fake.reset();
+    CHECK(QCamera3StockBeauty::isAvailable());
+    CHECK(fake.initCalls() == 1 && fake.uninitCalls() == 1 && fake.initArgument() == 0);
+    fake.failInit(1);
+    CHECK(!QCamera3StockBeauty::isAvailable());
+    fake.failInit(0);
+    fake.failUninit(-EIO);
+    CHECK(!QCamera3StockBeauty::isAvailable());
+
+    fake.reset();
+    Nv21Image image;
+    QCamera3StockBeauty::Options options;
+    options.soften = 40;
+    options.skinBright = 20;
+    options.skinStyle = 30;
+    options.softenSharp = 10;
+    CHECK(QCamera3StockBeauty::process(image.image, options) == 0);
+    const int ids[] = {201, 231, 234, 229};
+    const int levels[] = {40, 20, 30, 10};
+    CHECK(fake.featureCalls() == 4 && fake.format() == 0x802 && fake.sameImage());
+    for (int i = 0; i < 4; ++i) {
+        CHECK(fake.featureId(i) == ids[i]);
+        CHECK(fake.featureLevel(i) == levels[i]);
+    }
+    const auto before = image.storage;
+    CHECK(QCamera3StockBeauty::process(image.image, options) == -ENODATA);
+    CHECK(image.storage == before);
+    fake.failProcess(1);
+    CHECK(QCamera3StockBeauty::process(image.image, options) == -EIO);
+    CHECK(image.storage == before);
+    fake.reset();
+    std::atomic<bool> cancelled{true};
+    CHECK(QCamera3StockBeauty::process(image.image, options, &cancelled) == -ECANCELED);
+    CHECK(fake.initCalls() == 0 && image.storage == before);
 }
 
 void testCancelBeforeStart(Fake &fake) {
@@ -245,6 +346,9 @@ int main() {
     }
     testAvailability(fake);
     testSuccess(fake);
+    testStrengthProfile(fake);
+    testNoChangeAndStreamingGeometry(fake);
+    testRearBeauty(fake);
     testCancelBeforeStart(fake);
     testInitFailure(fake);
     testProcessFailure(fake);

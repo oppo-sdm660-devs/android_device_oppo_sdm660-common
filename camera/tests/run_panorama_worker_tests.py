@@ -12,8 +12,10 @@ with tempfile.TemporaryDirectory(prefix="ocam-panorama-worker-") as output:
     command = [os.environ.get("CXX", "g++"), "-std=gnu++17", "-Wall", "-Wextra", "-Werror",
                "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=undefined",
                "-pthread", "-I", str(HAL3), str(HERE / "panorama_worker_test.cpp"),
+               str(HERE / "fake_panorama_gyro_source.cpp"),
                *[str(HAL3 / name) for name in ("QCamera3PanoramaWorker.cpp", "QCamera3OppoPanorama.cpp",
-                                               "QCamera3PanoramaJpeg.cpp")],
-               "-ljpeg", "-o", str(binary)]
+                                               "QCamera3PanoramaJpeg.cpp", "QCamera3OppoVisidonPanorama.cpp",
+                                               "visidon_jnienv.cpp")],
+               "-ljpeg", "-ldl", "-o", str(binary)]
     subprocess.run(command, check=True)
     subprocess.run([str(binary)], check=True)

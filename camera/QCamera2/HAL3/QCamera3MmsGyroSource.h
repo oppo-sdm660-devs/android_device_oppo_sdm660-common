@@ -36,6 +36,7 @@ public:
     static int32_t probe(Identity &identity);
     // engine is configured before start; notify cannot call stop()/flush().
     int32_t start(QCamera3MmsVstab &engine, Notify notify, void *user);
+    int32_t start(Listener &listener, int64_t periodNs);
     // Drains the active callback before clearing the engine pointers.
     void stop();
     // Registration survives flush()/start(); -ENOSPC or -EALREADY on failure.
@@ -58,6 +59,8 @@ public:
 private:
     struct Impl;
     Impl *mImpl;
+    int32_t startFeed(QCamera3MmsVstab *engine, Notify notify, void *user,
+            Listener *listener, int64_t periodNs);
     QCamera3MmsGyroSource(const QCamera3MmsGyroSource &) = delete;
     QCamera3MmsGyroSource &operator=(const QCamera3MmsGyroSource &) = delete;
 };

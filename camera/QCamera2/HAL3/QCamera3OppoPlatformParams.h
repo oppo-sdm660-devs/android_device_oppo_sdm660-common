@@ -50,6 +50,12 @@ struct ParamOffsets {
     static constexpr size_t kHeight = 0x004;
     static constexpr size_t kStride = 0x008;
     static constexpr size_t kSlice = 0x00c;
+    static constexpr size_t kPitchY = 0x010;
+    static constexpr size_t kPitchUv = 0x014;
+    static constexpr size_t kPitchUnused = 0x018;
+    static constexpr size_t kStreamType = 0x01c;
+    static constexpr size_t kSensorSensitivity = 0x024;
+    static constexpr size_t kImageAdjustEnable = 0x01f8;
     static constexpr size_t kFlipMode = 0x054;
     static constexpr size_t kVisiontechFilterType = 0x160;
     static constexpr size_t kIsFront = 0x168;          /* u8 */
@@ -97,7 +103,8 @@ struct FrameCtxOffsets {
      * setup_ocam_input_buffers stride 0x40, valid/primary byte at +0x38, count
      * at +0x280). Slot 0 is also the legacy single-frame set. */
     static constexpr size_t kImageSlotStride = 0x40;
-    static constexpr size_t kImagePtr = 0x00;      /* void*: NV21 buffer */
+    // Core SCES 0x2949c and ImageAdjust 0x3021e read slot+4, not slot+0.
+    static constexpr size_t kImagePtr = 0x04;      /* void*: NV21 buffer */
     static constexpr size_t kWidth = 0x10;
     static constexpr size_t kHeight = 0x14;
     static constexpr size_t kStride = 0x18;
@@ -182,6 +189,9 @@ struct Frame {
     FaceInfo faceInfo;
     BeautyParams beauty;
     int32_t scesParam = 0;               /* param+0x10BC (SCES) */
+    bool imageAdjust = false;
+    bool realtime = false;
+    int32_t sensorSensitivity = 0;
     /* P3 multi-frame inputs: current-capture bracket only (never ZSL history).
      * imageCount==0 falls back to the legacy single-image fields above. */
     int32_t imageCount = 0;

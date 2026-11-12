@@ -2,6 +2,7 @@
 #define LOG_TAG "VSTAB_MMS"
 
 #include "QCamera3MmsChannel.h"
+#include "QCamera3HWI.h"
 #include "QCamera3EisSnapshot.h"
 #include "QCamera3MmsGl.h"
 
@@ -71,6 +72,9 @@ int32_t QCamera3MmsChannel::start() {
     property_get("persist.vendor.camera.oppo.vstab.debug", debugValue, "1");
     pthread_mutex_lock(&mLock);
     mVstabDiagnosticsValid = false;
+    mVstabResultCount = mVstabResultNext = 0;
+    mEisCandidateCount = mEisCandidateNext = 0;
+    mEisSelectionValid = false;
     mDebugLog.store(atoi(debugValue) != 0);
     mLogCounter = 0;
     pthread_mutex_unlock(&mLock);
@@ -79,9 +83,7 @@ int32_t QCamera3MmsChannel::start() {
     int32_t status = mMms.gyroPeriodNs() ? 0 : prepare();
     if (status) {
         // Stock MMS engine unusable: run the native gyro stabiliser for this session.
-        mNativeVstab = true;
-        mGyroVstab.reset();
-        mMms.flush();
+        (void)prepareNative();
     }
     pthread_mutex_lock(&mLock);
     mStopping = false;
@@ -94,14 +96,51 @@ int32_t QCamera3MmsChannel::start() {
     if (status) stop();
     return status;
 }
+int32_t QCamera3MmsChannel::probeProfile(const QCamera3MmsProfile &profile) {
+    const QCamera3MmsVstab::Configuration config = {profile.path, profile.inputWidth,
+        profile.inputHeight, profile.outputWidth, profile.outputHeight, kBuffers, 250000000};
+    return QCamera3MmsVstab::probe(config);
+}
 int32_t QCamera3MmsChannel::prepare() {
+    mGyro.stop();
+    mGyroVstab.reset();
+    mGyroVstab.setEnabled(true);
+    mNativeVstab = false;
+    mLastVstabStatus = 0;
     QCamera3MmsVstab::Configuration config = {mProfile.path, mProfile.inputWidth,
         mProfile.inputHeight, mProfile.outputWidth, mProfile.outputHeight, kBuffers, 250000000};
     int32_t status = mMms.configure(config);
     if (status) return status;
     status = mGyro.start(mMms, wake, this);
-    if (status) { mMms.flush(); return status; }
+    if (!status) {
+        status = mGyro.addListener(this);
+        if (status == -EALREADY) status = 0;
+    }
+    if (status) { mGyro.stop(); mMms.flush(); return status; }
     return status;
+}
+int32_t QCamera3MmsChannel::prepareNative() {
+    mGyro.stop();
+    mMms.flush();
+    mGyroVstab.reset();
+    mGyroVstab.setEnabled(true);
+    mNativeVstab = true;
+    mLastVstabStatus = mGyro.start(*this, 5000000);
+    return mLastVstabStatus;
+}
+int32_t QCamera3MmsChannel::onGyro(int64_t timestampNs, const float velocity[3]) {
+    const int32_t status = mGyroVstab.addGyro(timestampNs, velocity);
+    if (!status) wake(this);
+    return status;
+}
+bool QCamera3MmsChannel::stabilizationReady() const {
+    if (!mGyro.started()) return false;
+    if (!mNativeVstab) return mMms.gyroPeriodNs() > 0 && !mMms.coreDegraded();
+    pthread_mutex_lock(&mLock);
+    const float focal = mFocalLengthPx;
+    pthread_mutex_unlock(&mLock);
+    return focal >= QCamera3GyroVstab::kMinFocalPx &&
+            focal <= QCamera3GyroVstab::kMaxFocalPx && mGyroVstab.gyroSamples() > 0;
 }
 int32_t QCamera3MmsChannel::stop() {
     mEffectCancelled.store(true);
@@ -119,6 +158,11 @@ int32_t QCamera3MmsChannel::stop() {
     pthread_mutex_lock(&mLock);
     for (Pending &pending : mPending) pending = {};
     memset(mInputBusy, 0, sizeof(mInputBusy));
+    mEnabled = false;
+    mVstabDiagnosticsValid = false;
+    mVstabResultCount = mVstabResultNext = 0;
+    mEisCandidateCount = mEisCandidateNext = 0;
+    mEisSelectionValid = false;
     pthread_mutex_unlock(&mLock);
     mGyroVstab.reset();
     mMemory.unregisterBuffers();
@@ -129,15 +173,25 @@ int32_t QCamera3MmsChannel::flush() {
     // Called after pending buffers drain; keep the stream, drop pre-flush gyro history.
     mMms.flush();
     mGyro.stop();
-    QCamera3MmsVstab::Configuration config = {mProfile.path, mProfile.inputWidth,
-        mProfile.inputHeight, mProfile.outputWidth, mProfile.outputHeight, kBuffers, 250000000};
-    int32_t status = mMms.configure(config);
-    if (status) return status;
-    status = mGyro.start(mMms, wake, this);
+    pthread_mutex_lock(&mLock);
+    mVstabDiagnosticsValid = false;
+    mVstabResultCount = mVstabResultNext = 0;
+    mEisCandidateCount = mEisCandidateNext = 0;
+    mEisSelectionValid = false;
+    pthread_mutex_unlock(&mLock);
+    int32_t status = prepare();
+    if (status) status = prepareNative();
     return status;
 }
 void QCamera3MmsChannel::setStabilizationEnabled(bool enabled, float zoom) {
-    pthread_mutex_lock(&mLock); mEnabled = enabled; mZoom = zoom; pthread_mutex_unlock(&mLock);
+    pthread_mutex_lock(&mLock);
+    mEnabled = enabled;
+    mZoom = zoom;
+    if (!enabled) {
+        mEisCandidateCount = mEisCandidateNext = 0;
+        mEisSelectionValid = false;
+    }
+    pthread_mutex_unlock(&mLock);
 }
 void QCamera3MmsChannel::setStabilizationCalibration(float focalLengthPx) {
     pthread_mutex_lock(&mLock); mFocalLengthPx = focalLengthPx; pthread_mutex_unlock(&mLock);
@@ -312,6 +366,9 @@ bool QCamera3MmsChannel::getEisSelection(QCamera3EisSnapshot::Selection &selecti
 int32_t QCamera3MmsChannel::runNativeVstab(Pending &pending,
         const QCamera3MmsVstab::Image &work, int64_t nowNs) {
     (void)nowNs;
+    const int32_t copied = QCamera3MmsVstab::renderPassthrough(pending.image, work,
+            &mEffectCancelled);
+    if (copied) return copied;
     QCamera3GyroVstab::Options options;
     options.strength = 100;
     options.maxCropPercent = 8;
@@ -326,7 +383,7 @@ int32_t QCamera3MmsChannel::runNativeVstab(Pending &pending,
     const int32_t status = mGyroVstab.process(work, work, options, result, &mEffectCancelled);
     // Native path is CPU-only: renderer 0, gpuStatus 0.
     recordVstabDiagnostics(result.path, result.reason, result.gyroCount, result.coreStatus,
-            0, 0);
+            0, 0, pending.frameNumber);
     return status;
 }
 
@@ -338,10 +395,27 @@ bool QCamera3MmsChannel::getVstabDiagnostics(VstabDiagnostics &diagnostics) cons
     return valid;
 }
 
+bool QCamera3MmsChannel::getVstabDiagnostics(uint32_t frameNumber,
+        VstabDiagnostics &diagnostics) const {
+    pthread_mutex_lock(&mLock);
+    bool valid = false;
+    for (uint32_t i = 0; i < mVstabResultCount; ++i) {
+        const uint32_t index = (mVstabResultNext + kBuffers * 2 - 1 - i) % (kBuffers * 2);
+        if (mVstabResults[index].frameNumber != frameNumber) continue;
+        diagnostics = mVstabResults[index];
+        valid = true;
+        break;
+    }
+    pthread_mutex_unlock(&mLock);
+    return valid;
+}
+
 void QCamera3MmsChannel::recordVstabDiagnostics(int32_t path, int32_t reason,
-        int32_t gyroCount, int32_t coreStatus, int32_t renderer, int32_t gpuStatus) {
+        int32_t gyroCount, int32_t coreStatus, int32_t renderer, int32_t gpuStatus,
+        uint32_t frameNumber) {
     // One lock: path and execution unit always describe the same frame.
     pthread_mutex_lock(&mLock);
+    mVstabDiagnostics.frameNumber = frameNumber;
     mVstabDiagnostics.path = path;
     mVstabDiagnostics.reason = reason;
     mVstabDiagnostics.gyroCount = gyroCount;
@@ -349,13 +423,9 @@ void QCamera3MmsChannel::recordVstabDiagnostics(int32_t path, int32_t reason,
     mVstabDiagnostics.renderer = renderer;
     mVstabDiagnostics.gpuStatus = gpuStatus;
     mVstabDiagnosticsValid = true;
-    pthread_mutex_unlock(&mLock);
-}
-
-void QCamera3MmsChannel::recordVstabUnit(int32_t renderer, int32_t gpuStatus) {
-    pthread_mutex_lock(&mLock);
-    mVstabDiagnostics.renderer = renderer;
-    mVstabDiagnostics.gpuStatus = gpuStatus;
+    mVstabResults[mVstabResultNext] = mVstabDiagnostics;
+    mVstabResultNext = (mVstabResultNext + 1) % (kBuffers * 2);
+    if (mVstabResultCount < kBuffers * 2) ++mVstabResultCount;
     pthread_mutex_unlock(&mLock);
 }
 
@@ -364,10 +434,10 @@ bool QCamera3MmsChannel::getEisState(native_eis_state_t &state) {
     pthread_mutex_lock(&mLock);
     const bool enabled = mEnabled;
     pthread_mutex_unlock(&mLock);
-    const int64_t periodNs = mMms.gyroPeriodNs();
+    const int64_t periodNs = mNativeVstab ? mGyro.periodNs() : mMms.gyroPeriodNs();
     const bool gyro = mGyro.started();
     state.valid = 1;
-    state.enabled = (enabled || mNativeVstab) ? 1 : 0;
+    state.enabled = enabled ? 1 : 0;
     state.configured = periodNs > 0 ? 1 : 0;
     // -EUCLEAN marks a session that latched into pass-through.
     state.coreStatus = mNativeVstab ? mLastVstabStatus :
@@ -399,6 +469,12 @@ int32_t QCamera3MmsChannel::output(Pending &pending, int64_t nowNs) {
         free(data);
         return outputPassthrough(pending, -EUCLEAN);
     }
+    if (pending.enabled) {
+        const int64_t delta = pending.imageTimestampNs - pending.frame.timestampNs;
+        if (pending.imageTimestampNs <= 0 || delta < -1000 || delta > 1000) {
+            free(data); return -EPROTO;
+        }
+    }
     int32_t status;
     bool logWanted = false, logDegraded = false, logGyroValid = false;
     int32_t logPath = QCamera3GyroVstab::PATH_STOCK;
@@ -415,11 +491,6 @@ int32_t QCamera3MmsChannel::output(Pending &pending, int64_t nowNs) {
         logPath = QCamera3GyroVstab::PATH_NATIVE;
         logFallback = vstabStatus;
     } else if (pending.enabled) {
-        // Verify the metadata association against the buffer SOF time (1 us tolerance).
-        const int64_t delta = pending.imageTimestampNs - pending.frame.timestampNs;
-        if (pending.imageTimestampNs <= 0 || delta < -1000 || delta > 1000) {
-            free(data); return -EPROTO;
-        }
         if (!pending.enqueued) {
             status = mMms.enqueue(pending.image, pending.frame, nowNs);
             if (status) { free(data); return status; }
@@ -444,7 +515,7 @@ int32_t QCamera3MmsChannel::output(Pending &pending, int64_t nowNs) {
                         static_cast<int32_t>(stats.gyroEvents);
             recordVstabDiagnostics(QCamera3GyroVstab::PATH_STOCK, reason, gyroCount,
                     result.coreStatus, status == 0 ? gl.renderer : 0,
-                    status == 0 ? gl.gpuStatus : 0);
+                    status == 0 ? gl.gpuStatus : 0, pending.frameNumber);
             if (status != -ECANCELED) {
                 logWanted = true;
                 logPath = QCamera3GyroVstab::PATH_STOCK;
@@ -462,12 +533,17 @@ int32_t QCamera3MmsChannel::output(Pending &pending, int64_t nowNs) {
     } else {
         // EIS OFF: un-stabilised pass-through.
         status = QCamera3MmsVstab::renderPassthrough(pending.image, destination);
+        int32_t renderer = 0, gpuStatus = 0;
         if (QCamera3MmsGl::enabled()) {
             const QCamera3MmsGl::Status gl = QCamera3MmsGl::lastStatus();
-            recordVstabUnit(gl.renderer, gl.gpuStatus);
+            renderer = gl.renderer;
+            gpuStatus = gl.gpuStatus;
             logRenderer = gl.renderer;
             logGpuStatus = gl.gpuStatus;
         }
+        recordVstabDiagnostics(QCamera3GyroVstab::PATH_NONE,
+                QCamera3GyroVstab::REASON_DISABLED, 0, 0, renderer, gpuStatus,
+                pending.frameNumber);
         logWanted = true;
         logPath = QCamera3GyroVstab::PATH_STOCK;
         logFallback = status < 0 ? status : 0;
@@ -483,7 +559,20 @@ int32_t QCamera3MmsChannel::output(Pending &pending, int64_t nowNs) {
     free(data);
     return completed;
 }
-int32_t QCamera3MmsChannel::writeBack(Pending &pending, const uint8_t *data) {
+int32_t QCamera3MmsChannel::writeBack(Pending &pending, uint8_t *data) {
+    const uint32_t yBytes = mProfile.outputWidth * mProfile.outputHeight;
+    mm_camera_buf_def_t frame = {};
+    frame.buffer = data;
+    frame.frame_len = yBytes * 3 / 2;
+    frame.ts.tv_sec = pending.imageTimestampNs / 1000000000LL;
+    frame.ts.tv_nsec = pending.imageTimestampNs % 1000000000LL;
+    cam_dimension_t dimensions = {int32_t(mProfile.outputWidth), int32_t(mProfile.outputHeight)};
+    cam_frame_len_offset_t offset = {};
+    offset.num_planes = 2;
+    offset.mp[0].len = yBytes;
+    offset.mp[0].stride = offset.mp[1].stride = mProfile.outputWidth;
+    static_cast<QCamera3HardwareInterface *>(mUserData)->processRealtimeFrame(
+            pending.frameNumber, &frame, dimensions, offset, true, mCamera3Stream);
     auto &mapper = android::GraphicBufferMapper::get();
     android_ycbcr layout = {};
     int32_t status = mapper.lockYCbCr(*pending.buffer, GRALLOC_USAGE_SW_WRITE_OFTEN,
@@ -540,7 +629,7 @@ int32_t QCamera3MmsChannel::outputPassthrough(Pending &pending, int32_t reason) 
             gyroCount = stats.gyroEvents > uint64_t(INT32_MAX) ? INT32_MAX :
                     static_cast<int32_t>(stats.gyroEvents);
         recordVstabDiagnostics(QCamera3GyroVstab::PATH_STOCK, reason, gyroCount,
-                mMms.lastCoreStatus(), renderer, gpuStatus);
+                mMms.lastCoreStatus(), renderer, gpuStatus, pending.frameNumber);
         status = writeBack(pending, data);
         if (!mEffectCancelled.load())
             logVstabFrame(pending, QCamera3GyroVstab::PATH_STOCK, mMms.lastCoreStatus(),
@@ -615,6 +704,8 @@ void QCamera3MmsChannel::run() {
                     mMemory.markFrameNumber(outputIndex, -1);
                     if (!mInputBusy[index]) mMemory.unregisterBuffer(outputIndex);
                     pthread_mutex_unlock(&mLock);
+                    if (status) recordVstabDiagnostics(QCamera3GyroVstab::PATH_NONE,
+                            status, 0, status, 0, 0, frameNumber);
                     issueChannelCb(buffer, frameNumber, status ? CAMERA3_BUFFER_STATUS_ERROR : CAMERA3_BUFFER_STATUS_OK);
                     pthread_mutex_lock(&mLock);
                     continue;

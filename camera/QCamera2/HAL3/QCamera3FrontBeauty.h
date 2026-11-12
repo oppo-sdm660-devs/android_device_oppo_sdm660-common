@@ -11,18 +11,25 @@ namespace qcamera {
 // ARC_BS_IMAGE_UnInit / ARC_BS_IMAGE_SetFeatureLevel / ARC_BS_IMAGE_Process and
 // calls the latter with the same image as
 // source and destination, a face hint as the 4th argument and NULL as the 5th.
-// The face-hint record layout and per-feature semantics are not established, so
-// this adapter passes no face hint and the HWI keeps it behind
-// persist.vendor.camera.oppo.front_beauty.enable until it is device-verified.
+// Face hints are optional; the core performs its own detection.
 class QCamera3FrontBeauty {
 public:
     using Image = QCamera3HdrAlgo::Image;
+    struct FeatureLevels {
+        uint8_t levels[7] = {};
+    };
 
-    // dlopen + resolve the evidenced exports; false means "do not announce".
+    // Includes a real Init/UnInit round trip, without an external Venus model.
     static bool isAvailable();
-    // NV21 only. strength is 0..100 and is passed to every evidenced feature id.
+    // Default front-camera profile from the stock core's six-level table.
+    // Face-dependent brightening/shape parameters need their own measured input.
+    static FeatureLevels levelsForStrength(int32_t strength);
+    // NV21 only. strength is 0..100; zero leaves the frame untouched.
     // Owns a YV12 scratch image: the destination is unchanged on error/cancel.
+    // -ENODATA distinguishes an unchanged output (e.g. no usable face).
     static int32_t process(const Image &image, int32_t strength,
+            const std::atomic<bool> *cancelled = nullptr);
+    static int32_t process(const Image &image, const FeatureLevels &features,
             const std::atomic<bool> *cancelled = nullptr);
 };
 

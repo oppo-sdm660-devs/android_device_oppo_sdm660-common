@@ -28,6 +28,7 @@ struct FakeOppoPlatformStats *fake_oppo_platform_stats(void);
 void fake_oppo_platform_reset(void);
 void fake_oppo_platform_set_process_rc(int rc);
 void fake_oppo_platform_set_init_rc(int rc);
+void fake_oppo_platform_set_mutate(int value);
 
 #ifdef __cplusplus
 }

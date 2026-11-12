@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Static consistency checks for the T06 HAL port round (grep level, not a build).
+"""Static protocol, dependency and evidenced ABI checks (not a build).
 
 Verifies that the coupled edits stay coupled: standard-entry predicates, scene
-mode announcement, template defaults, 4K/vstab property wiring, front beauty
+mode announcement, template defaults, 4K/profile wiring, front beauty
 protocol/consumer and the Android.bp source list.
 """
 
@@ -47,6 +47,23 @@ header = HAL3 / "QCamera3HALHeader.h"
 hwih = HAL3 / "QCamera3HWI.h"
 bp = CAMERA / "Android.bp"
 
+# The paired vendor pipeline does not implement Camera2 physical output streams.
+absent(hwi, "ANDROID_REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA",
+       "unsupported standard logical capability")
+absent(hwi, "oppoPublishLogicalMetadata", "unsupported physical metadata publication")
+for key in ("ANDROID_LOGICAL_MULTI_CAMERA_PHYSICAL_IDS",
+            "ANDROID_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE",
+            "ANDROID_LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID",
+            "ANDROID_REQUEST_AVAILABLE_PHYSICAL_CAMERA_REQUEST_KEYS"):
+    need(hwi, f"info.erase({key});", f"remove unsupported physical metadata {key}")
+need(hwi, "nativeModes.add(OPPO_NATIVE_DUAL_BOKEH)", "preserve real paired vendor capture")
+need(hwi, "basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PORTRAIT_FRAMING)",
+     "paired vendor framing request")
+need(hwi, "basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH)",
+     "paired vendor preview request")
+need(hwi, "CAMERA_DEVICE_API_VERSION_3_5", "session parameter contract version")
+need(hwi, "ANDROID_REQUEST_AVAILABLE_SESSION_KEYS", "public session parameter manifest")
+
 # task-124: no fake reprocessing capabilities; CameraX must not select
 # YUV-reprocessing ZSL. Pseudo-ZSL HAL path is off unless explicitly enabled.
 absent(hwi, "ANDROID_REQUEST_AVAILABLE_CAPABILITIES_PRIVATE_REPROCESSING",
@@ -76,7 +93,7 @@ need(channel, "snapshot buffer invalid: errFlag=%d zeroSource=%d",
 need(hwi, 'property_get("persist.vendor.camera.halzsl.enable", prop, "1")',
      "pseudo-ZSL transitional default on")
 
-# A. 4K property wiring and the final video-stabilization removal.
+# A. 4K property wiring and genuine profile-based stabilization availability.
 for prop in ("persist.vendor.camera.oppo.video.allow_4k=1",
              "persist.vendor.camera.oppo.video.picture_overlap=1",
              "persist.vendor.camera.oppo.eis.extension=0",
@@ -84,21 +101,25 @@ for prop in ("persist.vendor.camera.oppo.video.allow_4k=1",
     need(VENDOR_PROP, prop, "device property")
 absent(VENDOR_PROP, "vstab.publish", "removed publish property")
 need(hwi, "persist.vendor.camera.oppo.video.allow_4k", "4K gate")
-need(hwi, "persist.vendor.camera.oppo.vstab.mms", "MMS gate")
 need(hwi, "persist.vendor.camera.oppo.eis.extension", "EIS2 extension gate")
-need(hwi, "const bool mmsCandidate = oppoMmsVstabEnabled()", "MMS candidate gate")
+absent(hwi, "oppoMmsVstabEnabled", "obsolete global MMS permission gate")
+need(hwi, "QCamera3MmsChannel::probeProfile", "MMS real engine/profile probe")
+need(hwi, "QCamera3MmsGyroSource::probe", "MMS actual sensor identity probe")
 
-# Video stabilization: standard path is OFF only (no EIS2/MMS by default).
+# MMS consumes the standard request; legacy EIS2 stays an explicit diagnostic.
 absent(hwi, "oppoVstabPublishEnabled", "removed publish helper")
-absent(hwi, "availableVstabModes.add(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_ON)",
-       "ON announcement")
+need(hwi, "oppoMmsVstabSupported(gCamCapability[cameraId])", "probed ON announcement")
+need(hwi, "availableVstabModes.add(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_ON)",
+     "standard ON announcement after real probe")
 need(hwi, "availableVstabModes.add(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF)",
-     "OFF-only announcement")
+     "OFF remains available")
 need(hwi, "ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION",
      "accept values without enabling")
 absent(hwi, "!oppoEisSupported(capability)", "old EIS availability rejection")
 need(hwi, "uint8_t fwk_videoStab = ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF;",
-     "standard result forced OFF")
+     "standard result starts OFF without evidence")
+need(hwi, "getVstabDiagnostics(internalFrameNumber, diagnostics)",
+     "final metadata uses matching-frame diagnostics")
 need(hwi, "if (oppoVideoStabExtensionEnabled())", "result extension gate")
 need(hwi, "m_bEisEnable = m_bEisSupported && oppoEisExtensionEnabled();",
      "EIS2 disabled by default")
@@ -142,7 +163,7 @@ need(hwi, "static bool oppoFrontBeautySupported", "front beauty capability helpe
 need(hwi, "nativeModes.add(OPPO_NATIVE_FRONT_BEAUTY)", "front beauty mode announcement")
 need(hwi, "basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH)",
      "front beauty strength request key")
-need(hwi, "persist.vendor.camera.oppo.front_beauty.enable", "front beauty opt-in gate")
+absent(hwi, "persist.vendor.camera.oppo.front_beauty.enable", "obsolete beauty global permission gate")
 need(hwi, "mNativeFrontBeautyStrength", "front beauty strength capture")
 need(hwih, "getNativeFrontBeautyStrength", "front beauty strength getter")
 need(channel, "settings->native_front_beauty_strength", "front beauty settings copy")
@@ -212,7 +233,6 @@ need(platform_hwi, "sessionAlgorithmMask", "platform register mask")
 need(platform_hwi, "persist.vendor.camera.oppo.platform_hwi.run", "explicit run gate")
 need(platform_hwi, "persist.vendor.camera.oppo.platform_hwi.update", "updateparameters gate")
 need(post, "processStillFrame", "PostProc uses the platform entry")
-need(post, "ArcFaceBeauty", "original face-beauty stage name")
 need(post, "VDSces", "original SCES stage name")
 need(HAL3 / "QCamera3OppoPlatformParams.h", "maskForStillMode", "reversed mask mapping")
 need(HAL3 / "QCamera3OppoPlatformParams.h", "kFaceInfoBase", "reversed face-info block")
@@ -254,7 +274,7 @@ params_h = HAL3 / "QCamera3OppoPlatformParams.h"
 params_cpp = HAL3 / "QCamera3OppoPlatformParams.cpp"
 platform_hwi_h = HAL3 / "QCamera3OppoPlatformHwi.h"
 for text, note in (
-        ("kImagePtr = 0x00", "ctx image ptr"),
+        ("kImagePtr = 0x04", "evidenced ctx image ptr"),
         ("kImageFormat = 0x30", "ctx image format"),
         ("kImageValid = 0x38", "ctx image valid flag"),
         ("kImageCount = 0x280", "ctx image count"),
@@ -293,8 +313,8 @@ need(tests / "platform_hwi_host_test.cpp", "FrameCtxOffsets::kImagePtr",
      "platform host test image ptr")
 need(tests / "platform_hwi_host_test.cpp", "readU8(ctx, FrameCtxOffsets::kImageValid)",
      "platform host test valid flag")
-# task-63/100: SCES(9)/front beauty(10)/rear beauty(5) are wired; SUPER(4) only
-# as the property-gated single-frame probe. HDR/LLHDR/MFNR/bokeh never enter.
+# Explicit normalized pixel adapters own beauty/SCES processing; the old
+# platform state machine remains an isolated diagnostic, covered by host tests.
 params_h_text = read(params_h)
 need(params_h, "kSupportedPlatformMask", "wired platform mask")
 need(params_h, "isPlatformStillMode", "platform mode whitelist")
@@ -311,30 +331,12 @@ for mode in ("OPPO_NATIVE_HDR", "OPPO_NATIVE_LLHDR", "OPPO_NATIVE_MFNR",
     if f"processStillFrame(\n                    {mode}" in post_text or \
             f"processStillFrame({mode}" in post_text:
         failures.append(f"QCamera3PostProc.cpp: {mode} must not enter the platform block")
-checks += 4
-if post_text.count("processStillFrame(") != 4:
-    failures.append("QCamera3PostProc.cpp: platform block must be SCENE+FRONT_BEAUTY+REAR_BEAUTY+SUPER")
-if "OPPO_NATIVE_SUPERPHOTO, platformFrame" not in post_text:
-    failures.append("QCamera3PostProc.cpp: SUPER probe is not wired to platform")
-if "VDSuperPhotoPlatform" not in post_text:
-    failures.append("QCamera3PostProc.cpp: SUPER probe trace name missing")
-if "HAL3 SUPER platform probe" not in post_text:
-    failures.append("QCamera3PostProc.cpp: SUPER probe log missing")
-if "OPPO_NATIVE_REAR_BEAUTY, platformFrame" not in post_text:
-    failures.append("QCamera3PostProc.cpp: rear beauty is not wired to platform")
-if '"FaceBeauty"' not in post_text:
-    failures.append("QCamera3PostProc.cpp: original rear-beauty trace name missing")
-# Rear beauty platform-first, StockBeauty only as fallback (no double processing).
-checks += 2
-if "rearHandledByPlatform" not in post_text or "if (!rearHandledByPlatform)" not in post_text:
-    failures.append("QCamera3PostProc.cpp: rear beauty fallback is not exclusive")
-if post_text.count("QCamera3StockBeauty::process") != 1:
-    failures.append("QCamera3PostProc.cpp: stock beauty must run only in the fallback")
-# ZSL past frames must not enter any platform algorithm.
-checks += 1
-if post_text.count("!jpeg_settings->zsl_snapshot") != 3 and \
-        post_text.count("!job->jpeg_settings->zsl_snapshot") != 1:
-    failures.append("QCamera3PostProc.cpp: missing ZSL/platform mutual exclusion")
+need(post, "processExplicitFrame", "isolated stock pixel adapter")
+need(post, "processImageAdjustFrame", "isolated ImageAdjust pixel adapter")
+need(platform_hwi_h, "imageAdjustAvailable", "ImageAdjust symbol probe API")
+need(platform_hwi_h, "explicitAvailable", "explicit pixel capability probe API")
+need(tests / "run_front_beauty_tests.py", "fake_arcsoft_beautyshot.cpp", "beauty behavior harness")
+need(tests / "run_platform_hwi_tests.py", "fake_oppo_platform_hwi.cpp", "platform behavior harness")
 
 # task-65 build risks: explicit errno include and no memset on ZslFrameState.
 need(hwi, "#include <errno.h>", "errno include for strtoll")
@@ -629,8 +631,6 @@ need(platform_hwi_h, "sceneStrength", "SCES strength input")
 need(platform_hwi, "oppo hwi sces strength=%d param=%u", "SCES strength log")
 need(platform_hwi, "mScesParamOverrideValid", "SCES property override")
 need(platform_hwi, "mScesParamOverrideValid ? mScesParam", "SCES override precedence")
-need(post, "platformFrame.sceneStrength = jpeg_settings->native_scene_strength",
-     "PostProc passes scene strength")
 need(params_h, "struct BeautyParams", "beauty params type")
 need(params_h, "kBeautyModelPath = 0x0060", "beauty model path offset")
 need(params_h, "kBeautyStrength = 0x0164", "beauty strength offset")
@@ -646,23 +646,8 @@ need(hwi, "QCamera3OppoPlatformHwi::setFaceInfo", "HWI result feeds face cache")
 need(hwi, "CAM_INTF_META_FACE_DETECTION, metadata)", "HWI reads face detection")
 need(hwi, "mCropRegionMapper.toActiveArray(rect.left, rect.top, rect.width,",
      "HWI maps faces to active array")
-post_text = read(post)
-checks += 4
-if post_text.count("QCamera3OppoPlatformHwi::getFaceInfo") != 3:
-    failures.append("QCamera3PostProc.cpp: platform paths must fetch face info")
-# task-75 A: beauty must NOT be gated on face count (RE: face block is bokeh/picbest only).
-if "platformFaces.count > 0" in post_text:
-    failures.append("QCamera3PostProc.cpp: beauty must not gate on face count")
-# task-75 D/E: beauty enabled per mode only when the model path is ready, with
-# the user strength mapped into the platform frame; missing path falls back.
-if post_text.count("beautyParamsReady(") != 2:
-    failures.append("QCamera3PostProc.cpp: per-mode beauty readiness missing")
-if post_text.count("platformFrame.beautyStrength") != 2:
-    failures.append("QCamera3PostProc.cpp: beauty strength not passed")
-if post_text.count("beauty model path unavailable") != 2:
-    failures.append("QCamera3PostProc.cpp: beauty fallback log missing")
-if "platformFrame.faceInfo = platformFaces;" not in post_text:
-    failures.append("QCamera3PostProc.cpp: face info is not passed to platform frame")
+# Face payload layout and real six-level beauty behavior are exercised by
+# platform_hwi_host_test/front_beauty_host_test, independent of helper/log layout.
 
 # Tests exist and are Python-parseable.
 for name in ("run_front_beauty_tests.py", "run_auto_capture_tests.py",

@@ -211,6 +211,22 @@ bool QCamera3DualGeometry::matchesCapabilities(const Profile &profile, const Sen
         if (!sameInfo(profile.sensors[i].info, sensors[i])) return false;
     return true;
 }
+int32_t QCamera3DualGeometry::portraitCrop(const SensorInfo sensors[2],
+        QCamera3DualCapture::PortraitFraming framing, const Rect &wideCrop, Rect &result) {
+    result = {};
+    if (!sensors || !validInfo(sensors[0]) || !validInfo(sensors[1]) ||
+            !contained(wideCrop, sensors[0].activeArray)) return -EINVAL;
+    QCamera3DualCapture::Config config = {};
+    config.wideMaxFov = fmaxf(sensors[0].horizontalFov, sensors[0].verticalFov);
+    config.teleMaxFov = fmaxf(sensors[1].horizontalFov, sensors[1].verticalFov);
+    Rect relative;
+    if (!QCamera3DualCapture::framingCrop(config, framing, wideCrop.width,
+            wideCrop.height, relative)) return -ERANGE;
+    relative.left += wideCrop.left;
+    relative.top += wideCrop.top;
+    result = relative;
+    return 0;
+}
 int32_t QCamera3DualGeometry::bind(const Profile &profile, const Calibration &calibration,
         const SensorInfo sensors[2], const uint32_t handles[2], const uint32_t widths[2],
         const uint32_t heights[2], QCamera3DualCapture::Config &result) {

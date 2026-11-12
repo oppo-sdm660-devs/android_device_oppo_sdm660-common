@@ -39,6 +39,7 @@ static int32_t g_chromaRows;
 static int32_t g_tamperDescriptor;
 static uint8_t *g_processY;
 static int32_t g_processYSamples;
+static int32_t g_initArgument;
 
 void fake_reset(void) {
     g_failInit = g_failProcess = g_failUninit = 0;
@@ -56,6 +57,7 @@ void fake_reset(void) {
     g_tamperDescriptor = 0;
     g_processY = nullptr;
     g_processYSamples = 0;
+    g_initArgument = -1;
 }
 void fake_fail_init(int32_t enable) { g_failInit = enable; }
 void fake_fail_process(int32_t enable) { g_failProcess = enable; }
@@ -79,6 +81,7 @@ uint8_t fake_chroma_v(int32_t offset) { return g_chromaV[offset]; }
 uint8_t fake_chroma_u(int32_t offset) { return g_chromaU[offset]; }
 int32_t fake_chroma_stride(void) { return g_chromaStride; }
 int32_t fake_chroma_rows(void) { return g_chromaRows; }
+int32_t fake_init_argument(void) { return g_initArgument; }
 
 void *ARC_BS_IMAGE_Init(void) {
     ++g_initCalls;
@@ -129,10 +132,24 @@ int32_t ARC_BS_IMAGE_Process(void *handle, FakeArcImage *in, FakeArcImage *out,
         // In-place processing: mutate the luma plane, keep chroma untouched.
         g_processY = in->planes[0];
         g_processYSamples = in->planes[0] ? in->width : 0;
-        if (in->planes[0]) memset(in->planes[0], 0xAA, size_t(in->width) * in->height);
+        if (in->planes[0])
+            for (int32_t row = 0; row < in->height; ++row)
+                memset(in->planes[0] + size_t(row) * in->pitches[0], 0xAA, in->width);
         if (g_tamperDescriptor) in->planes[0] = in->planes[0] + 4;
     }
     return g_failProcess ? -5 : 0;
+}
+
+void *ARCRLP_Init(int32_t argument) {
+    g_initArgument = argument;
+    return ARC_BS_IMAGE_Init();
+}
+int32_t ARCRLP_UnInit(void *handle) { return ARC_BS_IMAGE_UnInit(handle); }
+void ARCRLP_SetFeatureLevel(void *handle, int32_t featureId, int32_t level) {
+    ARC_BS_IMAGE_SetFeatureLevel(handle, featureId, level);
+}
+int32_t ARCRLP_Process(void *handle, FakeArcImage *in, FakeArcImage *out) {
+    return ARC_BS_IMAGE_Process(handle, in, out, nullptr, nullptr);
 }
 
 } // extern "C"

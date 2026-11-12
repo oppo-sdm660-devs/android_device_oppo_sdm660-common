@@ -43,11 +43,13 @@ def main():
     if rc:
         print("fake DSO build failed")
         return rc
+    (out / "libarcsoft_relighting_pro_image.so").symlink_to(fake.name)
 
     test = out / "front_beauty_host_test"
     rc = run([CXX, *FLAGS, "-I", HAL3,
               HERE / "front_beauty_host_test.cpp",
               HAL3 / "QCamera3FrontBeauty.cpp",
+              HAL3 / "QCamera3StockBeauty.cpp",
               HAL3 / "QCamera3HdrAlgo.cpp",
               "-o", test, "-ldl", "-lpthread"])
     if rc:

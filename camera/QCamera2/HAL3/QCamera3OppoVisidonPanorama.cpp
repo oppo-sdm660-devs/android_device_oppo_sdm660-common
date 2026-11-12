@@ -7,19 +7,24 @@
  * only inside init() when Config::testEngine is null; host tests inject the ABI.
  *
  * Stock engine facts used here (task-152/153, probe-verified on R11s):
- *  - nativeInit(width, height, focalPx, saveInput) -> engine (0 = failure);
- *  - nativeAddYUVFrame(byte[] NV21, width, height, frameDelay, engine) -> 0 ok;
+ *  - nativeInit(width, height, focalPx, transposed) -> engine (0 = failure);
+ *  - nativeAddYUVFrame(byte[] NV21, width, height, displacementPx, engine) -> 0 ok;
  *  - nativeProcess(engine) -> int[2] = [outWidth, outHeight] (1440,930);
  *  - nativeGetJPEGImage(engine) via nativeGetJPEGImage(outW, rotation, engine)
  *    where rotation is 0/90/180/270 (90/270 swap output dimensions);
  *  - nativeGetNV21Image(engine) -> NV21 of outW*outH*3/2;
- *  - nativeRelease(engine); engine MAX_FRAMES = 3.
+ *  - nativeMeasureOverlap returns normalized x/y, registration quality and frame count.
+ *  - nativeRelease(engine).
  */
 #include "QCamera3OppoVisidonPanorama.h"
 
 #include <dlfcn.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 #include <cstdio>
+#include <cmath>
 #include <new>
 #include <cstring>
 #include <mutex>
@@ -33,7 +38,7 @@ namespace qcamera {
 namespace {
 
 constexpr uint32_t kMaxDimension = 16384;
-constexpr uint32_t kMinStockFrames = 3; // stock Panorama.MAX_FRAMES
+constexpr uint32_t kMinStockFrames = 3;
 
 bool mulOverflow(size_t a, size_t b, size_t *out) {
     if (a != 0 && b > SIZE_MAX / a) return true;
@@ -56,7 +61,11 @@ bool loadVendorLibrary(const std::string &path, QCamera3OppoVisidonPanorama::Eng
     if (path.empty() || path[0] != '/') return false;
     void *lib = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
     if (lib == nullptr) {
+#ifdef __ANDROID__
+        __android_log_print(ANDROID_LOG_ERROR, "OCamVisidon", "dlopen(%s) failed: %s", path.c_str(), dlerror());
+#else
         std::fprintf(stderr, "visidon: dlopen(%s) failed: %s\n", path.c_str(), dlerror());
+#endif
         return false;
     }
     auto load = [lib](const char *name) {
@@ -67,6 +76,8 @@ bool loadVendorLibrary(const std::string &path, QCamera3OppoVisidonPanorama::Eng
             load("Java_visidon_Lib_Panorama_nativeInit"));
     api->addYuvFrame = reinterpret_cast<decltype(api->addYuvFrame)>(
             load("Java_visidon_Lib_Panorama_nativeAddYUVFrame"));
+    api->measureOverlap = reinterpret_cast<decltype(api->measureOverlap)>(
+            load("Java_visidon_Lib_Panorama_nativeMeasureOverlap"));
     api->addFrame = reinterpret_cast<decltype(api->addFrame)>(
             load("Java_visidon_Lib_Panorama_nativeAddFrame"));
     api->process = reinterpret_cast<decltype(api->process)>(
@@ -80,7 +91,11 @@ bool loadVendorLibrary(const std::string &path, QCamera3OppoVisidonPanorama::Eng
     api->release = reinterpret_cast<decltype(api->release)>(
             load("Java_visidon_Lib_Panorama_nativeRelease"));
     if (!api->valid()) {
+#ifdef __ANDROID__
+        __android_log_print(ANDROID_LOG_ERROR, "OCamVisidon", "%s missing required native symbols", path.c_str());
+#else
         std::fprintf(stderr, "visidon: %s missing native symbols\n", path.c_str());
+#endif
         dlclose(lib);
         return false;
     }
@@ -112,12 +127,12 @@ public:
         int32_t rotation = 0;
         if (!normalizeRotation(cfg.rotationDeg, &rotation)) return E_PARAM;
         if (cfg.previewWidth == 0 || cfg.previewHeight == 0 ||
-                (cfg.previewWidth & 1u) || (cfg.previewHeight & 1u) ||
+                (cfg.previewWidth & 7u) || (cfg.previewHeight & 7u) ||
                 cfg.previewWidth > kMaxDimension || cfg.previewHeight > kMaxDimension)
             return E_PARAM;
         if (cfg.focalPx <= 0) return E_PARAM;
         if (cfg.minFrames < kMinStockFrames || cfg.minFrames > cfg.maxFrames) return E_PARAM;
-        if (cfg.maxFrames > 8) return E_PARAM;
+        if (cfg.maxFrames > 12) return E_PARAM;
         if (!cfg.testEngine && !cfg.libPath.empty() && cfg.libPath[0] != '/') return E_PARAM;
         size_t frameBytes = 0;
         if (mulOverflow(cfg.previewWidth, cfg.previewHeight, &frameBytes)) return E_NOMEM;
@@ -129,6 +144,10 @@ public:
 
     Status loadEngine() {
         const Config &cfg = config;
+#ifdef __ANDROID__
+        __android_log_print(ANDROID_LOG_INFO, "OCamVisidon", "init input=%ux%u focal=%d transposed=%d",
+                cfg.previewWidth, cfg.previewHeight, cfg.focalPx, cfg.transposed);
+#endif
         if (cfg.testEngine != nullptr) {
             api = *cfg.testEngine;
             if (!api.valid()) return E_LOAD;
@@ -138,18 +157,8 @@ public:
         env = new (std::nothrow) VisidonJniEnv();
         if (env == nullptr) return E_NOMEM;
         engine = api.init(env->jniEnv(), VisidonJniEnv::fakeThis(),
-                int(cfg.previewWidth), int(cfg.previewHeight), cfg.focalPx, 0);
-        if (slotFault()) {
-            if (dlHandle != nullptr) {
-                dlclose(dlHandle);
-                dlHandle = nullptr;
-            }
-            api = EngineAbi();
-            engine = 0;
-            delete env;
-            env = nullptr;
-            return E_INTERNAL;
-        }
+                int(cfg.previewWidth), int(cfg.previewHeight), cfg.focalPx, cfg.transposed ? 1 : 0);
+        if (slotFault()) return E_INTERNAL;
         if (engine == 0) return E_LOAD;
         return OK;
     }
@@ -173,6 +182,33 @@ public:
         outHeight = 0;
     }
 
+    Status packFrame(const Frame &frame) {
+        if (frame.y == nullptr || frame.uv == nullptr || frame.width == 0 ||
+                frame.height == 0)
+            return E_PARAM;
+        if (frame.width != config.previewWidth || frame.height != config.previewHeight ||
+                (frame.width & 1u) || (frame.height & 1u))
+            return E_PARAM;
+        if (frame.yStride < frame.width || frame.uvStride < frame.width) return E_PARAM;
+        const uint64_t ySize64 = uint64_t(frame.width) * frame.height;
+        const uint64_t uvSize64 = uint64_t(frame.width) * (frame.height / 2);
+        const uint64_t total64 = ySize64 + uvSize64;
+        if (ySize64 > SIZE_MAX || uvSize64 > SIZE_MAX || total64 > SIZE_MAX) return E_NOMEM;
+        const size_t ySize = size_t(ySize64);
+        const size_t total = size_t(total64);
+        const size_t limit = config.maxFrameBytes != 0 ? config.maxFrameBytes :
+                (size_t(frame.width) * frame.height * 3 / 2);
+        if (total > limit) return E_NOMEM;
+        packed.resize(total);
+        for (uint32_t row = 0; row < frame.height; row++)
+            std::memcpy(packed.data() + size_t(row) * frame.width,
+                    frame.y + size_t(row) * frame.yStride, frame.width);
+        for (uint32_t row = 0; row < frame.height / 2; row++)
+            std::memcpy(packed.data() + ySize + size_t(row) * frame.width,
+                    frame.uv + size_t(row) * frame.uvStride, frame.width);
+        return OK;
+    }
+
     Status processLocked() {
         if (state != State::Capturing) return E_STATE;
         void *result = api.process(env->jniEnv(), VisidonJniEnv::fakeThis(), engine);
@@ -182,7 +218,9 @@ public:
             return E_INTERNAL;
         }
         if (dims == nullptr || dims->data == nullptr || dims->length < 2 ||
-                dims->data[0] <= 0 || dims->data[1] <= 0) {
+                dims->data[0] <= 0 || dims->data[1] <= 0 ||
+                (dims->data[0] & 1) || (dims->data[1] & 1) ||
+                dims->data[0] > int32_t(kMaxDimension) || dims->data[1] > int32_t(kMaxDimension)) {
             VisidonJniEnv::freeOutput(dims);
             return E_INTERNAL;
         }
@@ -238,38 +276,61 @@ QCamera3OppoVisidonPanorama::Status QCamera3OppoVisidonPanorama::addFrame(const 
     Impl &s = *impl_;
     if (s.state != State::Capturing) return E_STATE;
     if (s.accepted >= s.config.maxFrames) return E_LIMIT;
-    if (frame.y == nullptr || frame.uv == nullptr || frame.width == 0 ||
-            frame.height == 0)
-        return E_PARAM;
-    if (frame.width != s.config.previewWidth || frame.height != s.config.previewHeight ||
-            (frame.width & 1u) || (frame.height & 1u))
-        return E_PARAM;
-    if (frame.yStride < frame.width || frame.uvStride < frame.width) return E_PARAM;
-    const uint64_t ySize64 = uint64_t(frame.width) * frame.height;
-    const uint64_t uvSize64 = uint64_t(frame.width) * (frame.height / 2);
-    const uint64_t total64 = ySize64 + uvSize64;
-    if (ySize64 > SIZE_MAX || uvSize64 > SIZE_MAX || total64 > SIZE_MAX) return E_NOMEM;
-    const size_t ySize = size_t(ySize64);
-    const size_t total = size_t(total64);
-    const size_t limit = s.config.maxFrameBytes != 0 ? s.config.maxFrameBytes :
-            (size_t(frame.width) * frame.height * 3 / 2);
-    if (total > limit) return E_NOMEM;
-    s.packed.resize(total);
-    for (uint32_t row = 0; row < frame.height; row++)
-        std::memcpy(s.packed.data() + size_t(row) * frame.width,
-                frame.y + size_t(row) * frame.yStride, frame.width);
-    for (uint32_t row = 0; row < frame.height / 2; row++)
-        std::memcpy(s.packed.data() + ySize + size_t(row) * frame.width,
-                frame.uv + size_t(row) * frame.uvStride, frame.width);
+    const Status packed = s.packFrame(frame);
+    if (packed != OK) return packed;
     VisidonJniEnv::ByteArrayIn in;
     in.data = s.packed.data();
     in.size = s.packed.size();
     const int rc = s.api.addYuvFrame(s.env->jniEnv(), VisidonJniEnv::fakeThis(), &in,
-            int(frame.width), int(frame.height), 0, s.engine);
+            int(frame.width), int(frame.height), frame.displacementPx, s.engine);
     if (s.slotFault()) return impl_->fail(E_INTERNAL);
     if (rc != 0) return impl_->fail(E_INTERNAL);
     s.accepted++;
     return OK;
+}
+
+QCamera3OppoVisidonPanorama::Status QCamera3OppoVisidonPanorama::measureOverlap(
+        const Frame &frame, Position *position) {
+    std::lock_guard<std::mutex> guard(impl_->lock);
+    Impl &s = *impl_;
+    if (s.state != State::Capturing) return E_STATE;
+    if (position == nullptr) return E_PARAM;
+    const Status packed = s.packFrame(frame);
+    if (packed != OK) return packed;
+    VisidonJniEnv::ByteArrayIn in{s.packed.data(), s.packed.size()};
+    auto *output = static_cast<VisidonJniEnv::FloatArrayOut *>(s.api.measureOverlap(
+            s.env->jniEnv(), VisidonJniEnv::fakeThis(), &in, int(frame.width),
+            int(frame.height), position->x, position->y, s.engine));
+    if (s.slotFault()) {
+        VisidonJniEnv::freeOutput(output);
+        return s.fail(E_INTERNAL);
+    }
+    if (output == nullptr || output->data == nullptr || output->length != 4 ||
+            !std::isfinite(output->data[0]) || !std::isfinite(output->data[1]) ||
+            !std::isfinite(output->data[2]) || std::abs(output->data[0]) > 2.0f ||
+            std::abs(output->data[1]) > 2.0f || output->data[2] < -1.0f) {
+        VisidonJniEnv::freeOutput(output);
+        return s.fail(E_INTERNAL);
+    }
+    position->x = output->data[0];
+    position->y = output->data[1];
+    position->quality = output->data[2];
+    VisidonJniEnv::freeOutput(output);
+    return OK;
+}
+
+bool QCamera3OppoVisidonPanorama::isAvailable() {
+    static const bool available = [] {
+        QCamera3OppoVisidonPanorama probe;
+        const Status status = probe.init(Config());
+#ifdef __ANDROID__
+        __android_log_print(status == OK ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+                "OCamVisidon", "front capability probe status=%d failureReason=%d",
+                int(status), halFailureReason(status));
+#endif
+        return status == OK;
+    }();
+    return available;
 }
 
 QCamera3OppoVisidonPanorama::Status QCamera3OppoVisidonPanorama::process(
@@ -277,7 +338,7 @@ QCamera3OppoVisidonPanorama::Status QCamera3OppoVisidonPanorama::process(
     std::lock_guard<std::mutex> guard(impl_->lock);
     if (outWidth == nullptr || outHeight == nullptr) return E_PARAM;
     const Status rc = impl_->processLocked();
-    if (rc != OK) return rc;
+    if (rc != OK) return impl_->fail(rc);
     *outWidth = impl_->outWidth;
     *outHeight = impl_->outHeight;
     return OK;
@@ -352,7 +413,11 @@ QCamera3OppoVisidonPanorama::Status QCamera3OppoVisidonPanorama::captureNv21(Ima
         return impl_->fail(E_NOMEM);
     }
     const size_t expected = size_t(expected64);
-    if (nv21->length < expected || nv21->length > s.config.maxOutputBytes) {
+    if (nv21->length != expected) {
+        VisidonJniEnv::freeOutput(nv21);
+        return impl_->fail(E_JPEG);
+    }
+    if (expected > s.config.maxOutputBytes) {
         VisidonJniEnv::freeOutput(nv21);
         return impl_->fail(E_NOMEM);
     }

@@ -302,6 +302,15 @@ int32_t QCamera3StillAlgo::process(const Image *images, uint32_t count,
         if (usedDonor) ++report.replacedFaces;
     }
     if (stopped(cancel)) return -ECANCELED;
+    report.pixelsChanged = scale != 1;
+    if (scale == 1) {
+        for (unsigned y = 0; y < dst.height; ++y)
+            report.pixelsChanged |= memcmp(ref.data + ref.yOffset + size_t(y) * ref.yStride,
+                    output.data + size_t(y) * dst.width, dst.width) != 0;
+        for (unsigned y = 0; y < dst.height / 2; ++y)
+            report.pixelsChanged |= memcmp(ref.data + ref.uvOffset + size_t(y) * ref.uvStride,
+                    output.data + output.uvOffset + size_t(y) * dst.width, dst.width) != 0;
+    }
     for (unsigned y=0;y<dst.height;++y)
         memcpy(dst.data+dst.yOffset+size_t(y)*dst.yStride,output.data+size_t(y)*dst.width,dst.width);
     for (unsigned y=0;y<dst.height/2;++y)

@@ -37,6 +37,7 @@ public:
         uint32_t acceptedFrames = 0;
         uint32_t replacedFaces = 0;
         bool reconstructed = false;
+        bool pixelsChanged = false;
     };
     static bool isAvailable() { return true; }
     static int32_t process(const Image *images, uint32_t count,

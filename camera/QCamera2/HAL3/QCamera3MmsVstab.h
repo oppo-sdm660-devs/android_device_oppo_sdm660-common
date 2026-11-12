@@ -41,6 +41,9 @@ public:
     QCamera3MmsVstab();
     ~QCamera3MmsVstab();
     static bool isAvailable();
+    // Creates, checks and destroys a real engine with this installed calibration.
+    // Does not synthesize gyro or claim a successful frame warp.
+    static int32_t probe(const Configuration &config);
     // Profile frame and gyro timers are both CLOCK_BOOTTIME (7).
     int32_t configure(const Configuration &config);
     int32_t addGyro(int64_t timestampNs, const float angularVelocity[3]);

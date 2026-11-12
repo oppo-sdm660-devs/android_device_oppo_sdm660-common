@@ -156,6 +156,17 @@ void testSourceExif() {
     tiff = jpeg.data() + 12;
     CHECK(ifdValue(tiff, ifdValue(tiff, 8, 0x8769), 0x829a) == 0);
     CHECK(ifdValue(tiff, ifdValue(tiff, 8, 0x8769), 0x8827) == 0);
+    for (const int orientation : {0, 90, 180, 270}) {
+        metadata.orientationDeg = orientation;
+        CHECK(QCamera3PanoramaJpeg::replaceExif(jpeg, metadata) == 0);
+        CHECK(ifdValue(jpeg.data() + 12, 8, 0x112) ==
+                uint32_t(QCamera3PanoramaJpeg::exifOrientation(orientation)));
+        CHECK(decodesTo(jpeg, 64, 48));
+    }
+    const auto rotated = jpeg;
+    metadata.orientationDeg = 45;
+    CHECK(QCamera3PanoramaJpeg::replaceExif(jpeg, metadata) == QCamera3PanoramaJpeg::E_PARAM);
+    CHECK(jpeg == rotated);
 }
 
 }  // namespace

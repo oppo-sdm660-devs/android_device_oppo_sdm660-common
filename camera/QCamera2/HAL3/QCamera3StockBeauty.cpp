@@ -66,7 +66,9 @@ bool sameImage(const ArcImage &actual, const ArcImage &expected) {
 bool QCamera3StockBeauty::isAvailable() {
     Lock lock;
     Api api;
-    return api.valid();
+    if (!api.valid()) return false;
+    void *handle = api.init(0);
+    return handle && api.uninit(handle) == 0;
 }
 
 int32_t QCamera3StockBeauty::process(const Image &image, const Options &options,
@@ -116,9 +118,18 @@ int32_t QCamera3StockBeauty::process(const Image &image, const Options &options,
     if (!rc) rc = stopped(cancelFlag) ? -ECANCELED : api.process(handle, &frame, &frame);
     const int32_t cleanup = api.uninit(handle);
     if (!rc) rc = cleanup;
-    if (rc) return rc;
+    if (rc) return rc < 0 ? rc : -EIO;
     if (stopped(cancelFlag)) return -ECANCELED;
     if (!sameImage(frame, expected)) return -EPROTO;
+
+    bool changed = false;
+    for (uint32_t row = 0; row < image.height && !changed; ++row)
+        changed = memcmp(image.data + image.yOffset + size_t(row) * image.yStride,
+                memory.data + size_t(row) * stride, image.width) != 0;
+    for (uint32_t row = 0; row < image.height / 2 && !changed; ++row)
+        changed = memcmp(image.data + image.uvOffset + size_t(row) * image.uvStride,
+                memory.data + size_t(ySize) + size_t(row) * stride, image.width) != 0;
+    if (!changed) return -ENODATA;
 
     copyRows(image.data + image.yOffset, image.yStride, memory.data,
             stride, image.width, image.height);

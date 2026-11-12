@@ -12,7 +12,8 @@
 namespace qcamera {
 // Video-only channel; HWI sends this stream IS_TYPE_NONE so MMS and backend EIS
 // do not both crop it.
-class QCamera3MmsChannel : public QCamera3RegularChannel {
+class QCamera3MmsChannel : public QCamera3RegularChannel,
+        private QCamera3MmsGyroSource::Listener {
 public:
     QCamera3MmsChannel(uint32_t cameraHandle, uint32_t channelHandle,
             mm_camera_ops_t *ops, channel_cb_routine callback,
@@ -20,10 +21,16 @@ public:
             void *user, camera3_stream_t *stream, cam_feature_mask_t features,
             QCamera3Channel *metadataChannel, const QCamera3MmsProfile &profile);
     ~QCamera3MmsChannel() override;
+    // HWI first selects by real rear sensor + gyro identity, then probes this profile.
+    static int32_t probeProfile(const QCamera3MmsProfile &profile);
     int32_t prepare();
+    // Session readiness includes the live gyro queue; frame diagnostics still
+    // decide whether a particular returned buffer was actually stabilized.
+    bool stabilizationReady() const;
     // Per-frame stabiliser diagnostics for the vstab* result keys.
     // path 1 = HAL3-native gyro warper, path 2 = stock MMS core.
     struct VstabDiagnostics {
+        uint32_t frameNumber = UINT32_MAX;
         int32_t path = 0;
         int32_t reason = 0;
         int32_t gyroCount = -1;
@@ -33,8 +40,9 @@ public:
         int32_t gpuStatus = 0;
     };
     bool getVstabDiagnostics(VstabDiagnostics &diagnostics) const;
+    bool getVstabDiagnostics(uint32_t frameNumber, VstabDiagnostics &diagnostics) const;
     void recordVstabDiagnostics(int32_t path, int32_t reason, int32_t gyroCount,
-            int32_t coreStatus, int32_t renderer, int32_t gpuStatus);
+            int32_t coreStatus, int32_t renderer, int32_t gpuStatus, uint32_t frameNumber);
     bool usesMmsVstab() const override { return true; }
     // Focal length in destination pixels; 0 = not decoded (frames are refused).
     void setStabilizationCalibration(float focalLengthPx);
@@ -87,6 +95,8 @@ private:
     bool mEisSelectionValid = false;
     VstabDiagnostics mVstabDiagnostics = {};
     bool mVstabDiagnosticsValid = false;
+    VstabDiagnostics mVstabResults[kBuffers * 2] = {};
+    uint32_t mVstabResultCount = 0, mVstabResultNext = 0;
     mutable pthread_mutex_t mLock = PTHREAD_MUTEX_INITIALIZER;
     pthread_cond_t mCondition = PTHREAD_COND_INITIALIZER;
     pthread_t mWorker = {};
@@ -97,18 +107,18 @@ private:
     uint64_t mOrder = 0;
     static void *workerEntry(void *user);
     static void wake(void *user);
+    int32_t onGyro(int64_t timestampNs, const float angularVelocity[3]) override;
+    int32_t prepareNative();
     void run();
     int32_t output(Pending &pending, int64_t nowNs);
     // Records one warped frame as an EIS candidate and runs the selection.
     void recordEisCandidate(const QCamera3MmsVstab::Result &result, const Pending &pending);
     int32_t runNativeVstab(Pending &pending, const QCamera3MmsVstab::Image &image,
             int64_t nowNs);
-    // Records the execution unit of a pass-through frame.
-    void recordVstabUnit(int32_t renderer, int32_t gpuStatus);
     // Delivers the frame un-stabilised instead of an ERROR buffer.
     int32_t outputPassthrough(Pending &pending, int32_t reason);
     // Locks the destination gralloc buffer and writes the rendered NV12 frame back.
-    int32_t writeBack(Pending &pending, const uint8_t *data);
+    int32_t writeBack(Pending &pending, uint8_t *data);
     // Rate-limited log (persist.vendor.camera.oppo.vstab.debug, default 1).
     void logVstabFrame(const Pending &pending, int32_t path, int32_t coreStatus,
             int32_t fallbackReason, bool degraded, int32_t renderer, int32_t gpuStatus,

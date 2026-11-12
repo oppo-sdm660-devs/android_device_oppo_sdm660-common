@@ -10,7 +10,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 HAL3 = HERE.parent / "QCamera2" / "HAL3"
 CXX = os.environ.get("CXX", "g++")
-FLAGS = ["-std=gnu++17", "-Wall", "-Wextra", "-Werror", "-O1", "-g"]
+FLAGS = ["-std=gnu++17", "-Wall", "-Wextra", "-Werror", "-O1", "-g", "-pthread"]
 if os.environ.get("HOST_SANITIZE", "1") == "1":
     FLAGS += ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"]
 

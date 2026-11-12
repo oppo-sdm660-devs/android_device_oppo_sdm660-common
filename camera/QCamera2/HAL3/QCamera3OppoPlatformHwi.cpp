@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "QCamera3OppoPlatformHwi.h"
 #include "QCamera3OppoPlatformParams.h"
+#include "QCamera3FrontBeauty.h"
+#include "QCamera3StockBeauty.h"
 
 namespace oppo_platform = qcamera::oppo_platform;
 
@@ -21,6 +23,7 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <vector>
 
 /* In-process wiring of the OPPO platform algorithm layer. The layer keeps one
  * .bss singleton per algorithm, so one process-wide mutex covers every call. */
@@ -211,6 +214,59 @@ bool oppoHwiPrimaryImage(const QCamera3OppoPlatformFrame &frame,
             image.width > 0 && image.height > 0;
 }
 
+bool oppoHwiPixelImage(const QCamera3OppoPlatformFrame &frame,
+        qcamera::QCamera3HdrAlgo::Image &image)
+{
+    if (frame.imageCount != 0) return false;
+    image.data = const_cast<uint8_t *>(frame.data);
+    image.length = frame.length;
+    image.width = frame.width;
+    image.height = frame.height;
+    image.yStride = image.uvStride = frame.stride;
+    image.yScanline = frame.slice;
+    image.uvScanline = frame.slice / 2;
+    image.uvOffset = size_t(frame.stride) * frame.slice;
+    return qcamera::QCamera3HdrAlgo::validImage(image);
+}
+
+bool oppoHwiPixelLibraryAvailable(uint64_t mask, bool realtime = false)
+{
+    const bool scene = mask == oppo_platform::kAlgoVdSces;
+    const char *name = scene ? "libSCES.so" :
+            (realtime ? "libVDRTImageAdjustment.so" : "libVDImageAdjustment.so");
+    const char *sceneSymbols[] = {"Sces_initialize_gpu_engine", "Sces_process_snapshot",
+            "Sces_release_gpu_engine"};
+    const char *adjustSymbols[] = {"VDImageAdjustmentCreateAPI", "VDImageAdjustmentSetInputData",
+            "VDImageAdjustmentApply", "VDImageAdjustmentUpdateResultBuffer",
+            "VDImageAdjustmentReleaseAPI"};
+    const char *realtimeSymbols[] = {"VDRTImageAdjustmentInitWithMode",
+            "VDRTImageAdjustmentInit", "VDRTImageAdjustmentRelease",
+            "VDRTImageAdjustmentProcess", "VDRTImageAdjustmentSetFilters",
+            "VDRTImageAdjustmentSetVignetting", "VDRTImageAdjustmentSetGlobalFilterStrength",
+            "VDRTImageAdjustmentResetOutput", "VDRTImageAdjustmentSetMaskParameters"};
+    void *library = dlopen(name, RTLD_NOW | RTLD_LOCAL);
+    if (!library) return false;
+    const char **symbols = scene ? sceneSymbols : (realtime ? realtimeSymbols : adjustSymbols);
+    const size_t count = scene ? 3 : (realtime ? 9 : 5);
+    bool ready = true;
+    for (size_t i = 0; i < count; ++i) ready = ready && dlsym(library, symbols[i]);
+    dlclose(library);
+    return ready;
+}
+
+bool oppoHwiPlatformLibraryAvailable()
+{
+    char path[PROPERTY_VALUE_MAX] = {};
+    property_get(kOppoHwiPathProp, path, kOppoHwiDefaultPath);
+    void *library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!library) return false;
+    const bool ready = dlsym(library, "_Z18oppo_platform_initPvyPyS0_S0_") &&
+            dlsym(library, "_Z21oppo_platform_processPvS_y") &&
+            dlsym(library, "_Z20oppo_platform_uninitPvy");
+    dlclose(library);
+    return ready;
+}
+
 /* Property override wins (existence still required); otherwise first candidate
  * that exists on this device. Empty result means "do not register beauty". */
 bool oppoHwiPathIsDirectory(const char *path)
@@ -253,6 +309,126 @@ bool oppoHwiResolveModelPath(const char *propName, char *out, size_t outSize,
 }
 
 }  // namespace
+
+bool QCamera3OppoPlatformHwi::explicitAvailable(int32_t stillMode)
+{
+    if (stillMode == 5) return qcamera::QCamera3StockBeauty::isAvailable();
+    if (stillMode == 10) return qcamera::QCamera3FrontBeauty::isAvailable();
+    if (stillMode != 9) return false;
+    return oppoHwiPixelLibraryAvailable(oppo_platform::kAlgoVdSces) &&
+            oppoHwiPlatformLibraryAvailable();
+}
+
+bool QCamera3OppoPlatformHwi::imageAdjustAvailable(bool realtime)
+{
+    return oppoHwiPixelLibraryAvailable(oppo_platform::kAlgoImageAdjust, realtime) &&
+            oppoHwiPlatformLibraryAvailable();
+}
+
+int32_t QCamera3OppoPlatformHwi::processExplicitFrame(int32_t stillMode,
+        const QCamera3OppoPlatformFrame &frame, bool isFront)
+{
+    if (stillMode == 9)
+        return processPixelStage(oppo_platform::kAlgoVdSces, frame, isFront, 0);
+    qcamera::QCamera3HdrAlgo::Image image;
+    if (!oppoHwiPixelImage(frame, image)) return -EINVAL;
+    if (stillMode == 10 && isFront)
+        return qcamera::QCamera3FrontBeauty::process(image, frame.beautyStrength);
+    if (stillMode == 5 && !isFront) {
+        if (frame.beautyStrength < 0 || frame.beautyStrength > 100) return -EINVAL;
+        qcamera::QCamera3StockBeauty::Options options;
+        options.soften = frame.beautyStrength;
+        return qcamera::QCamera3StockBeauty::process(image, options);
+    }
+    return -EOPNOTSUPP;
+}
+
+int32_t QCamera3OppoPlatformHwi::processImageAdjustFrame(
+        const QCamera3OppoPlatformFrame &frame, bool isFront, int32_t sensorSensitivity,
+        bool realtime)
+{
+    if (sensorSensitivity <= 0) return -EINVAL;
+    return processPixelStage(oppo_platform::kAlgoImageAdjust, frame, isFront,
+            sensorSensitivity, realtime);
+}
+
+int32_t QCamera3OppoPlatformHwi::processPixelStage(uint64_t mask,
+        const QCamera3OppoPlatformFrame &frame, bool isFront, int32_t sensorSensitivity,
+        bool realtime)
+{
+    qcamera::QCamera3HdrAlgo::Image image;
+    if (!oppoHwiPixelImage(frame, image)) return -EINVAL;
+    if (frame.length > 64U * 1024U * 1024U) return -E2BIG;
+    if (mask == oppo_platform::kAlgoVdSces &&
+            (frame.sceneStrength < 0 || frame.sceneStrength > 100)) return -EINVAL;
+    if (!oppoHwiPixelLibraryAvailable(mask, realtime)) return -EOPNOTSUPP;
+    std::vector<uint8_t> pixels(frame.data, frame.data + frame.length);
+    QCamera3OppoPlatformFrame working = frame;
+    working.data = pixels.data();
+    pthread_mutex_lock(&mLock);
+    shutdownLocked();
+    if (mUnavailable) {
+        if (mLib) dlclose(mLib);
+        mLib = nullptr;
+        mUnavailable = false;
+    }
+    mMask = mask;
+    mIsFront = isFront;
+    int32_t rc = -ENODEV;
+    // SCES uses stream_type bit0 to initialize its GPU, even for snapshots.
+    const bool initializeRealtime = realtime || mask == oppo_platform::kAlgoVdSces;
+    if (initializeLocked(&working, initializeRealtime)) {
+        oppo_platform::Frame params;
+        params.data = pixels.data();
+        params.length = pixels.size();
+        params.width = frame.width;
+        params.height = frame.height;
+        params.stride = frame.stride;
+        params.slice = frame.slice;
+        params.isFront = isFront;
+        params.scesParam = frame.sceneStrength;
+        params.imageAdjust = mask == oppo_platform::kAlgoImageAdjust;
+        params.realtime = realtime;
+        params.sensorSensitivity = sensorSensitivity;
+        params.scratchFd = mScratchFd;
+        params.scratchPtr = mScratch;
+        params.scratchSize = mScratchSize;
+        if (!oppo_platform::buildParam(mParam, mParamSize, params) ||
+                !oppo_platform::buildFrameCtx(mFrameCtx, mFrameCtxSize, params)) {
+            rc = -EINVAL;
+        } else {
+            typedef int32_t (*ProcessFn)(void *, void *, uint64_t);
+            rc = reinterpret_cast<ProcessFn>(mProcess)(mFrameCtx, mParam,
+                    mask | oppo_platform::kInProcessBackend);
+            if (rc > 0) rc = -EIO;
+            // SCES and the VD snapshot wrapper can swallow their library errors.
+            // An unchanged output must be reported as bypassed, never applied.
+            if (rc == 0) {
+                bool changed = false;
+                for (int row = 0; row < frame.height && !changed; ++row)
+                    changed = memcmp(frame.data + size_t(row) * image.yStride,
+                            pixels.data() + size_t(row) * image.yStride, image.width) != 0;
+                for (int row = 0; row < frame.height / 2 && !changed; ++row)
+                    changed = memcmp(frame.data + image.uvOffset + size_t(row) * image.uvStride,
+                            pixels.data() + image.uvOffset + size_t(row) * image.uvStride,
+                            image.width) != 0;
+                if (!changed) rc = -ENODATA;
+            }
+        }
+        shutdownLocked();
+    }
+    mLastStatus = rc;
+    pthread_mutex_unlock(&mLock);
+    if (rc == 0) {
+        for (int row = 0; row < frame.height; ++row)
+            memcpy(image.data + size_t(row) * image.yStride,
+                    pixels.data() + size_t(row) * image.yStride, image.width);
+        for (int row = 0; row < frame.height / 2; ++row)
+            memcpy(image.data + image.uvOffset + size_t(row) * image.uvStride,
+                    pixels.data() + image.uvOffset + size_t(row) * image.uvStride, image.width);
+    }
+    return rc;
+}
 
 bool QCamera3OppoPlatformHwi::configured()
 {
@@ -472,7 +648,7 @@ void QCamera3OppoPlatformHwi::onCloseCamera()
 }
 
 bool QCamera3OppoPlatformHwi::initializeLocked(
-        const QCamera3OppoPlatformFrame *frame)
+        const QCamera3OppoPlatformFrame *frame, bool realtime)
 {
     if (mInitialized) return true;
     if (mUnavailable) return false;
@@ -525,6 +701,8 @@ bool QCamera3OppoPlatformHwi::initializeLocked(
 
     /* Stage 1 passes NULL, stage 2 the first frame with real geometry. */
     buildPlatformParamLocked(frame);
+    oppo_platform::writeU32(mParam, oppo_platform::ParamOffsets::kStreamType,
+            realtime ? 1 : 0);
     /* out1 = offline mask, out2 = single-frame/preview mask, out3 =
      * multi-frame/paired mask (platform_hwi init disassembly, bits 0x1ffb8 /
      * 0x10047); they are diagnostics here: the caller still passes the mask. */

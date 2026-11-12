@@ -72,6 +72,8 @@ class QCamera3ProcessingChannel;
 
     // Request snapshot taken under the HWI mutex; still processing outlives it.
     typedef struct {
+        int32_t processing_enable;
+        int32_t portrait_framing;
         int32_t auto_hdr_enable;
         int32_t auto_night_enable;
         uint8_t auto_capture_valid;

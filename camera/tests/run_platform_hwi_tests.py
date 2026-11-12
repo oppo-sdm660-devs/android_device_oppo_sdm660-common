@@ -16,13 +16,15 @@ HERE = Path(__file__).resolve().parent
 HAL3 = HERE.parent / "QCamera2" / "HAL3"
 CXX = os.environ.get("CXX", "g++")
 FLAGS = ["-std=gnu++17", "-Wall", "-Wextra", "-Werror", "-O1", "-g"]
+if os.environ.get("HOST_M32", "0") == "1":
+    FLAGS += ["-m32"]
 if os.environ.get("HOST_SANITIZE", "1") == "1":
     FLAGS += ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"]
 
 
-def run(cmd):
+def run(cmd, env=None):
     print("+ " + " ".join(str(c) for c in cmd))
-    return subprocess.run([str(c) for c in cmd]).returncode
+    return subprocess.run([str(c) for c in cmd], env=env).returncode
 
 
 def main():
@@ -31,6 +33,8 @@ def main():
     if run([CXX, *FLAGS, "-shared", "-fPIC", "-I", HERE / "host_stubs",
             HERE / "fake_oppo_platform_hwi.cpp", "-o", fake]):
         return 1
+    for name in ("libSCES.so", "libVDImageAdjustment.so", "libVDRTImageAdjustment.so"):
+        (out / name).symlink_to(fake.name)
     test = out / "platform_hwi_host_test"
     build = [CXX, *FLAGS,
              "-I", HAL3,
@@ -40,10 +44,15 @@ def main():
              HERE / "host_stubs" / "fs_stub.cpp",
              HAL3 / "QCamera3OppoPlatformHwi.cpp",
              HAL3 / "QCamera3OppoPlatformParams.cpp",
-             "-ldl", "-o", test]
+             HAL3 / "QCamera3FrontBeauty.cpp",
+             HAL3 / "QCamera3StockBeauty.cpp",
+             HAL3 / "QCamera3HdrAlgo.cpp",
+             "-ldl", "-lpthread", "-o", test]
     if run(build):
         return 1
-    rc = run([test, fake])
+    env = dict(os.environ)
+    env["LD_LIBRARY_PATH"] = str(out) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+    rc = run([test, fake], env=env)
     print(f"artifacts: {out}")
     return rc
 

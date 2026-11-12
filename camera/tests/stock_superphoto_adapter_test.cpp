@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <vector>
 using Algo = qcamera::QCamera3StockSuperPhoto;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); abort(); } } while (0)
@@ -20,6 +21,23 @@ struct Frame {
             for (unsigned x = 0; x < 64; x += 2) {
                 bytes[80 * 60 + 8 + row * 80 + x] = y + 1;
                 bytes[80 * 60 + 8 + row * 80 + x + 1] = y + 2;
+            }
+    }
+};
+struct SizedFrame {
+    std::vector<uint8_t> bytes;
+    Algo::Image image;
+    SizedFrame(uint32_t width, uint32_t height, uint8_t y = 44) :
+            bytes(size_t(width + 16) * (height + 12) * 3 / 2 + 32, 0xEE),
+            image{bytes.data(), bytes.size(), width, height, 8,
+                size_t(width + 16) * (height + 12) + 8,
+                width + 16, width + 16, height + 12, (height + 12) / 2} {
+        for (uint32_t row = 0; row < height; ++row)
+            memset(bytes.data() + image.yOffset + size_t(row) * image.yStride, y, width);
+        for (uint32_t row = 0; row < height / 2; ++row)
+            for (uint32_t x = 0; x < width; x += 2) {
+                bytes[image.uvOffset + size_t(row) * image.uvStride + x] = y + 1;
+                bytes[image.uvOffset + size_t(row) * image.uvStride + x + 1] = y + 2;
             }
     }
 };
@@ -94,6 +112,108 @@ void testExplicitSuperIsStill1x() {
     CHECK(superphoto_fixture()->initZoom == 1 && superphoto_fixture()->tuningZoom == 1);
     CHECK(superphoto_fixture()->tuningFront == 1 && superphoto_fixture()->count == 2);
 }
+void testHighResolution() {
+    superphoto_reset();
+    Frame inputs[5] = {Frame(30), Frame(31), Frame(32), Frame(33), Frame(34)};
+    SizedFrame output(128, 96);
+    Algo::Image images[5];
+    Algo::Source sources[5];
+    for (unsigned i = 0; i < 5; ++i) {
+        images[i] = inputs[i].image;
+        sources[i] = {200 + i, 2000000000 + int64_t(i) * 33333333, 10000000, 200};
+    }
+    const auto original = inputs[4].bytes;
+    Algo::HighResolutionOptions options;
+    Algo::HighResolutionResult result;
+    CHECK(Algo::isHighResolutionAvailable());
+    CHECK(Algo::processHighResolution(images, sources, 5, output.image,
+            "s5k2p7sq", options, &result) == -EINVAL);
+    options.fullFieldOfView = true;
+    CHECK(Algo::processHighResolution(images, sources, 5, output.image,
+            "s5k2p7sq", options, &result) == 0);
+    const auto &stats = *superphoto_fixture();
+    CHECK(stats.initZoom == 1 && stats.tuningZoom == 1);
+    CHECK(stats.count == 5 && stats.addedFrames == 5 && stats.baseIndex == 0);
+    CHECK(stats.width == 64 && stats.height == 48 && stats.outWidth == 128 && stats.outHeight == 96);
+    CHECK(stats.tuningFront == 0 && stats.tuningDisableCrop == 0 && stats.tuningIso == 200);
+    CHECK(stats.releaseCalls == 1 && result.algorithmApplied && result.submittedFrames == 5);
+    CHECK(result.referenceIndex == 0 && result.sources[4].frameNumber == 204);
+    CHECK(result.sources[4].timestampNs == sources[4].timestampNs && inputs[4].bytes == original);
+    for (unsigned i = 0; i < 5; ++i) {
+        CHECK(stats.inputs[i] != reinterpret_cast<uintptr_t>(images[i].data));
+        CHECK(stats.firstLuma[i] == 30 + i && stats.firstV[i] == 31 + i && stats.firstU[i] == 32 + i);
+    }
+    CHECK(output.bytes[output.image.yOffset] == 0xAB &&
+            output.bytes[output.image.uvOffset] == 0xCD);
+    CHECK(output.bytes[output.image.yOffset + 95 * output.image.yStride + 127] == 0xAB);
+    CHECK(output.bytes[output.image.uvOffset + 47 * output.image.uvStride + 127] == 0xCD);
+    CHECK(output.bytes[0] == 0xEE && output.bytes[output.image.yOffset + 128] == 0xEE);
+    for (int fail = 1; fail <= 7; ++fail) {
+        superphoto_reset();
+        superphoto_fixture()->failAt = fail;
+        SizedFrame failed(128, 96);
+        const auto previous = failed.bytes;
+        Algo::HighResolutionResult untouched;
+        untouched.submittedFrames = 9;
+        CHECK(Algo::processHighResolution(images, sources, 5, failed.image,
+                "s5k2p7sq", options, &untouched) < 0);
+        CHECK(failed.bytes == previous && untouched.submittedFrames == 9 && !untouched.algorithmApplied);
+        CHECK(superphoto_fixture()->releaseCalls == 1);
+    }
+    superphoto_reset();
+    CHECK(Algo::processHighResolution(images, sources, 4, output.image,
+            "s5k2p7sq", options, nullptr) == -EINVAL);
+    CHECK(Algo::processHighResolution(images, sources, 5, inputs[0].image,
+            "s5k2p7sq", options, nullptr) == -EINVAL);
+    sources[4].timestampNs = sources[0].timestampNs;
+    CHECK(Algo::processHighResolution(images, sources, 5, output.image,
+            "s5k2p7sq", options, nullptr) == -EINVAL);
+    sources[4].timestampNs = 2200000000;
+    sources[4].sensitivity = 400;
+    CHECK(Algo::processHighResolution(images, sources, 5, output.image,
+            "s5k2p7sq", options, nullptr) == -EINVAL);
+    sources[4].sensitivity = 200;
+    sources[4].exposureTimeNs = 20000000;
+    CHECK(Algo::processHighResolution(images, sources, 5, output.image,
+            "s5k2p7sq", options, nullptr) == -EINVAL);
+    sources[4].exposureTimeNs = 10000000;
+    images[4].width -= 2;
+    CHECK(Algo::processHighResolution(images, sources, 5, output.image,
+            "s5k2p7sq", options, nullptr) == -EINVAL);
+    images[4] = inputs[4].image;
+    CHECK(superphoto_fixture()->initCalls == 0);
+    std::atomic<bool> canceled(true);
+    CHECK(Algo::processHighResolution(images, sources, 5, output.image,
+            "s5k2p7sq", options, nullptr, &canceled) == -ECANCELED);
+    CHECK(superphoto_fixture()->initCalls == 0);
+    canceled = false;
+    superphoto_fixture()->cancelAfterProcess = reinterpret_cast<uintptr_t>(&canceled);
+    SizedFrame canceledOutput(128, 96);
+    const auto previous = canceledOutput.bytes;
+    Algo::HighResolutionResult untouched;
+    CHECK(Algo::processHighResolution(images, sources, 5, canceledOutput.image,
+            "s5k2p7sq", options, &untouched, &canceled) == -ECANCELED);
+    CHECK(canceledOutput.bytes == previous && !untouched.algorithmApplied);
+    CHECK(superphoto_fixture()->releaseCalls == 1);
+}
+void test64MpBudget() {
+    superphoto_reset();
+    SizedFrame input(4608, 3456, 27), output(9216, 6912);
+    Algo::Image images[5];
+    Algo::Source sources[5];
+    for (unsigned i = 0; i < 5; ++i) {
+        images[i] = input.image;
+        sources[i] = {300 + i, 3000000000 + int64_t(i) * 33333333, 10000000, 100};
+    }
+    Algo::HighResolutionOptions options;
+    options.fullFieldOfView = true;
+    CHECK(Algo::processHighResolution(images, sources, 5, output.image,
+            "s5k2p7sq", options, nullptr) == 0);
+    CHECK(superphoto_fixture()->outWidth == 9216 && superphoto_fixture()->outHeight == 6912);
+    CHECK(output.bytes[output.image.yOffset + 6911 * output.image.yStride + 9215] == 0xAB);
+    CHECK(output.bytes[output.image.uvOffset + 3455 * output.image.uvStride + 9215] == 0xCD);
+    CHECK(input.bytes[input.image.yOffset] == 27);
+}
 void testCapturePlan() {
     using Plan = qcamera::QCamera3SuperZoomPlan;
     Plan::Conditions conditions;
@@ -140,9 +260,17 @@ void testCapturePlan() {
     }
 }
 }
-int main() {
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--missing-symbol") == 0) {
+        CHECK(Algo::isAvailable());
+        CHECK(!Algo::is2xAvailable() && !Algo::isHighResolutionAvailable());
+        puts("stock SuperPhoto incomplete-symbol capability probe passed");
+        return 0;
+    }
     test2x();
     testExplicitSuperIsStill1x();
+    testHighResolution();
+    test64MpBudget();
     testCapturePlan();
-    puts("stock SuperPhoto 2x adapter tests passed (ABI fixture only)");
+    puts("stock SuperPhoto 2x/high-resolution adapter tests passed (ABI fixture only)");
 }

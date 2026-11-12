@@ -36,6 +36,7 @@ struct Harness {
     void (*reset)() = nullptr;
     void (*setProcessRc)(int) = nullptr;
     void (*setInitRc)(int) = nullptr;
+    void (*setMutate)(int) = nullptr;
     void *handle = nullptr;
 
     bool load(const char *path) {
@@ -52,7 +53,9 @@ struct Harness {
                 dlsym(handle, "fake_oppo_platform_set_process_rc"));
         setInitRc = reinterpret_cast<void (*)(int)>(
                 dlsym(handle, "fake_oppo_platform_set_init_rc"));
-        return stats && reset && setProcessRc && setInitRc;
+        setMutate = reinterpret_cast<void (*)(int)>(
+                dlsym(handle, "fake_oppo_platform_set_mutate"));
+        return stats && reset && setProcessRc && setInitRc && setMutate;
     }
 };
 
@@ -515,6 +518,57 @@ int main(int argc, char **argv) {
     const int uninitBeforeClose = stats->uninitCount;
     QCamera3OppoPlatformHwi::shutdownOnClose();
     CHECK(stats->uninitCount == uninitBeforeClose + 1);
+
+    // Production stages work with all probe properties off and commit only success.
+    host_prop_clear_all();
+    host_prop_set("persist.vendor.camera.oppo.platform_hwi.path", argv[1]);
+    CHECK(!QCamera3OppoPlatformHwi::runEnabled());
+    CHECK(QCamera3OppoPlatformHwi::explicitAvailable(9));
+    CHECK(QCamera3OppoPlatformHwi::imageAdjustAvailable());
+    CHECK(QCamera3OppoPlatformHwi::imageAdjustAvailable(true));
+    uint8_t padded[128 * 64 * 3 / 2] = {};
+    QCamera3OppoPlatformFrame pixelFrame = frame;
+    pixelFrame.data = padded;
+    pixelFrame.length = sizeof(padded);
+    pixelFrame.sceneStrength = 50;
+    harness.setMutate(1);
+    CHECK(QCamera3OppoPlatformHwi::get().processExplicitFrame(9, pixelFrame, false) == 0);
+    CHECK(padded[0] == 123);
+    CHECK((stats->initMask & ~kInProcessBackend) == kAlgoVdSces);
+    CHECK((stats->processMask & ~kInProcessBackend) == kAlgoVdSces);
+    CHECK(readPtr(stats->frameCtx, FrameCtxOffsets::kImagePtr) != padded);
+    CHECK(readU32(stats->initParam, ParamOffsets::kStreamType) == 1);
+    CHECK(readU32(stats->processParam, ParamOffsets::kScesParam) == 50);
+    padded[0] = 42;
+    harness.setProcessRc(-EIO);
+    CHECK(QCamera3OppoPlatformHwi::get().processExplicitFrame(9, pixelFrame, false) == -EIO);
+    CHECK(padded[0] == 42);
+    harness.setProcessRc(0);
+    CHECK(QCamera3OppoPlatformHwi::get().processImageAdjustFrame(pixelFrame, true, 400) == 0);
+    CHECK(padded[0] == 123);
+    CHECK((stats->processMask & ~kInProcessBackend) == kAlgoImageAdjust);
+    CHECK(readU32(stats->processParam, ParamOffsets::kStreamType) == 0);
+    CHECK(readU32(stats->processParam, ParamOffsets::kSensorSensitivity) == 400);
+    CHECK(readU8(stats->processParam, ParamOffsets::kImageAdjustEnable) == 1);
+    CHECK(readU8(stats->processParam, ParamOffsets::kIsFront) == 1);
+    CHECK(readU32(stats->processParam, ParamOffsets::kPitchY) == 128);
+    CHECK(readU32(stats->processParam, ParamOffsets::kPitchUv) == 128);
+    CHECK(readU32(stats->processParam, ParamOffsets::kPitchUnused) == 0);
+    padded[0] = 42;
+    CHECK(QCamera3OppoPlatformHwi::get().processImageAdjustFrame(pixelFrame,
+            false, 200, true) == 0);
+    CHECK(readU32(stats->initParam, ParamOffsets::kStreamType) == 1);
+    CHECK(readU32(stats->processParam, ParamOffsets::kStreamType) == 1);
+    harness.setMutate(0);
+    CHECK(QCamera3OppoPlatformHwi::get().processExplicitFrame(9,
+            pixelFrame, false) == -ENODATA);
+    CHECK(QCamera3OppoPlatformHwi::get().processImageAdjustFrame(pixelFrame,
+            false, 200) == -ENODATA);
+    const int processed = stats->processCount;
+    CHECK(QCamera3OppoPlatformHwi::get().processImageAdjustFrame(pixelFrame, false, 0) == -EINVAL);
+    pixelFrame.length = 5;
+    CHECK(QCamera3OppoPlatformHwi::get().processExplicitFrame(9, pixelFrame, false) == -EINVAL);
+    CHECK(stats->processCount == processed);
 
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);

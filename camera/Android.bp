@@ -96,10 +96,15 @@ cc_library_shared {
         "QCamera2/HAL3/QCamera3OppoPanorama.cpp",
         "QCamera2/HAL3/QCamera3PanoramaJpeg.cpp",
         "QCamera2/HAL3/QCamera3PanoramaWorker.cpp",
+        "QCamera2/HAL3/QCamera3OppoVisidonPanorama.cpp",
+        "QCamera2/HAL3/visidon_jnienv.cpp",
         "QCamera2/HAL3/QCamera3MmsGl.cpp",
         "QCamera2/HAL3/QCamera3MmsGyroSource.cpp",
         "QCamera2/HAL3/QCamera3MmsChannel.cpp",
         "QCamera2/HAL3/QCamera3StockScene.cpp",
+        "QCamera2/HAL3/QCamera3StockPicBest.cpp",
+        "QCamera2/HAL3/QCamera3StockPreviewBokeh.cpp",
+        "QCamera2/HAL3/QCamera3PreviewBokehWorker.cpp",
         "QCamera2/HAL3/QCamera3StillAlgo.cpp",
         "QCamera2/HAL3/QCamera3StockBeauty.cpp",
         "QCamera2/HAL3/QCamera3FrontBeauty.cpp",
@@ -187,7 +192,7 @@ cc_library_shared {
         "libutils",
     ],
     static_libs: ["android.hardware.camera.common-helper"],
-    required: ["cameraconfig.txt", "libui_vstab_shim"],
+    required: ["cameraconfig.txt", "libui_vstab_shim", "libjnigraphics_visidon_stub"],
 }
 
 cc_library_shared {

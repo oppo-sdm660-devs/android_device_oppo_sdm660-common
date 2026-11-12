@@ -323,7 +323,12 @@ int32_t triangle(const Image &source, const Image &destination, uint8_t *coverag
 } // namespace
 
 struct QCamera3MmsVstab::Impl {
-    struct Pending { Image image; Frame frame; int64_t queuedNs; } frames[8] = {};
+    struct Pending {
+        Image image;
+        Frame frame;
+        int64_t queuedNs;
+        uint32_t sessionFrameIndex;
+    } frames[8] = {};
     mutable pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
     std::atomic<bool> cancelled{false};
     Api api;
@@ -370,6 +375,10 @@ bool QCamera3MmsVstab::isAvailable() {
     if (sizeof(void *) != 4) return false;
     Api api;
     return api.valid();
+}
+int32_t QCamera3MmsVstab::probe(const Configuration &config) {
+    QCamera3MmsVstab engine;
+    return engine.configure(config);
 }
 int32_t QCamera3MmsVstab::configure(const Configuration &config) {
     if (!mImpl) return -ENOMEM;
@@ -446,7 +455,8 @@ int32_t QCamera3MmsVstab::enqueue(const Image &source, const Frame &frame, int64
     if (!data) return -ENOMEM;
     Image copy = packed(data, source.width, source.height);
     copyImage(source, copy);
-    mImpl->frames[mImpl->count++] = {copy, frame, nowNs};
+    mImpl->frames[mImpl->count++] = {copy, frame, nowNs,
+            static_cast<uint32_t>(++mImpl->sessionFrameIndex)};
     mImpl->bytes += length; mImpl->lastFrameNs = frame.timestampNs;
     return 0;
 }
@@ -460,7 +470,7 @@ int32_t QCamera3MmsVstab::processNext(const Image &destination, int64_t nowNs, R
     if (!validImage(destination) || destination.width != mImpl->config.outputWidth ||
             destination.height != mImpl->config.outputHeight || nowNs < pending.queuedNs) return -EINVAL;
     result.frame = pending.frame;
-    result.sessionFrameIndex = static_cast<uint32_t>(++mImpl->sessionFrameIndex);
+    result.sessionFrameIndex = pending.sessionFrameIndex;
     result.gyroDeltaNs = mImpl->lastGyroNs ?
             pending.frame.timestampNs - mImpl->lastGyroNs : INT64_MIN;
     result.addGyroFailures = static_cast<int32_t>(mImpl->addGyroFailures);

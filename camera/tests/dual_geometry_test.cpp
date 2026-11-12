@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <dlfcn.h>
 #include <vector>
 
 using namespace qcamera;
@@ -153,12 +154,149 @@ static void testFullResAux() {
     CHECK(!QCamera3DualCapture::validConfig(invalid));
 }
 
+static void testPortraitFramingUsesOpticalGeometry() {
+    using Framing = QCamera3DualCapture::PortraitFraming;
+    const QCamera3DualGeometry::SensorInfo sensors[2] = {
+        sensor(4640, 3488, {8, 8, 4624, 3472}, 4.27f, 62.0f, 48.5f),
+        sensor(5200, 3896, {8, 8, 5184, 3880}, 5.47f, 49.9f, 38.6f)};
+    const QCamera3DualCapture::Rect source = {108, 208, 4000, 3000};
+    QCamera3DualCapture::Rect half, full;
+    CHECK(QCamera3DualGeometry::portraitCrop(sensors, Framing::Half, source, half) == 0);
+    CHECK(QCamera3DualGeometry::portraitCrop(sensors, Framing::Full, source, full) == 0);
+    CHECK(full.left == source.left && full.top == source.top &&
+            full.width == source.width && full.height == source.height);
+    const float ratio = tanf(49.9f * float(M_PI / 360)) / tanf(62.0f * float(M_PI / 360));
+    CHECK(half.width == (int32_t(source.width * ratio) & ~1));
+    CHECK(half.height == (int32_t(source.height * ratio) & ~1));
+    CHECK((half.left | half.top | half.width | half.height) % 2 == 0);
+    CHECK(half.left > source.left && half.top > source.top);
+    CHECK(QCamera3DualGeometry::portraitCrop(sensors, Framing(2), source, full) == -ERANGE);
+    CHECK(full.width == 0);
+    CHECK(QCamera3DualGeometry::portraitCrop(sensors, Framing::Half,
+            {0, 0, 4000, 3000}, full) == -EINVAL);
+    QCamera3DualCapture::Config config = {};
+    config.wideMaxFov = 62; config.teleMaxFov = 49.9f;
+    QCamera3DualCapture::Rect imageCrop;
+    CHECK(QCamera3DualCapture::framingCrop(config, Framing::Half, 64, 48, imageCrop));
+    std::vector<uint8_t> sourceBytes, halfBytes, fullBytes;
+    const auto input = makeImage(sourceBytes, 64, 48);
+    const auto halfImage = makeImage(halfBytes, 64, 48);
+    const auto fullImage = makeImage(fullBytes, 64, 48);
+    for (uint32_t y = 0; y < input.height; ++y)
+        for (uint32_t x = 0; x < input.width; ++x) sourceBytes[y * 64 + x] = uint8_t(x + 2 * y);
+    CHECK(QCamera3DualCapture::resize(input, halfImage, true, ratio));
+    CHECK(QCamera3DualCapture::resize(input, fullImage, false));
+    CHECK(fullBytes[0] == 0 && fullBytes[47 * 64 + 63] == 157);
+    CHECK(halfBytes[0] == sourceBytes[imageCrop.top * 64 + imageCrop.left]);
+    CHECK(halfBytes[0] > fullBytes[0]);
+    CHECK(halfImage.width == fullImage.width && halfImage.height == fullImage.height);
+    CHECK(halfBytes[64 * 48] == 0x80 && halfBytes[64 * 48 + 1] == 0x40);
+    config.teleMaxFov = 0;
+    CHECK(!QCamera3DualCapture::framingCrop(config, Framing::Half, 64, 48, imageCrop));
+    CHECK(QCamera3DualCapture::framingCrop(config, Framing::Full, 64, 48, imageCrop));
+}
+
+static void testPairedProcessFraming() {
+    using Capture = QCamera3DualCapture;
+    using Framing = Capture::PortraitFraming;
+    void *library = dlopen("libarcsoft_dualcam_refocus.so", RTLD_NOW);
+    CHECK(library != nullptr);
+    if (!library) return;
+    auto mode = reinterpret_cast<void (*)(int)>(dlsym(library, "fake_dual_mode"));
+    auto inits = reinterpret_cast<int (*)()>(dlsym(library, "fake_dual_inits"));
+    auto uninits = reinterpret_cast<int (*)()>(dlsym(library, "fake_dual_uninits"));
+    auto calculates = reinterpret_cast<int (*)()>(dlsym(library, "fake_dual_calculates"));
+    auto processes = reinterpret_cast<int (*)()>(dlsym(library, "fake_dual_processes"));
+    CHECK(mode && inits && uninits && calculates && processes);
+    if (!mode || !inits || !uninits || !calculates || !processes) {
+        dlclose(library);
+        return;
+    }
+    Capture::Config config = {};
+    for (int i = 0; i < 2; ++i) {
+        auto &sensor = config.sensors[i];
+        sensor.cameraHandle = i + 11;
+        sensor.referenceWidth = sensor.imageWidth = sensor.sourceWidth = 64;
+        sensor.referenceHeight = sensor.imageHeight = sensor.sourceHeight = 48;
+        sensor.referenceCrop = sensor.activeArrayCrop = {0, 0, 64, 48};
+    }
+    config.wideMaxFov = 62; config.teleMaxFov = 49.9f;
+    config.maxTimestampDeltaNs = 10000000; config.timeoutNs = 2000000000;
+    const auto calibration = fakeCalibration();
+    Capture capture;
+    Capture::Request request = {{7, 8}, 32, 24, 20};
+    uint64_t token = 0;
+    std::vector<uint8_t> wideBytes, auxBytes, destinationBytes, expectedBytes;
+    const auto wide = makeImage(wideBytes, 64, 48);
+    const auto aux = makeImage(auxBytes, 64, 48);
+    const auto destination = makeImage(destinationBytes, 64, 48);
+    const auto expected = makeImage(expectedBytes, 64, 48);
+    for (uint32_t y = 0; y < 48; ++y)
+        for (uint32_t x = 0; x < 64; ++x) wideBytes[y * 64 + x] = uint8_t(x + 2 * y);
+    for (uint32_t y = 0; y < 24; ++y)
+        for (uint32_t x = 0; x < 64; x += 2) {
+            wideBytes[64 * 48 + y * 64 + x] = uint8_t(x + y);
+            wideBytes[64 * 48 + y * 64 + x + 1] = uint8_t(200 - x - y);
+        }
+    std::fill(auxBytes.begin(), auxBytes.end(), 200);
+    const auto original = wideBytes;
+    const auto submit = [&](int64_t delta) {
+        for (int i = 0; i < 2; ++i) {
+            Capture::Metadata metadata = {};
+            metadata.timestampNs = 1000000000 + i * delta;
+            metadata.exposureNs = 10000000; metadata.frameDurationNs = 33000000;
+            metadata.sensitivity = 100; metadata.crop = {0, 0, 64, 48};
+            CHECK(capture.submitMetadata(token, i + 11, request.frameIds[i], metadata) == 0);
+            CHECK(capture.submitImage(token, i + 11, request.frameIds[i], i ? aux : wide) == 0);
+        }
+    };
+    const float ratio = tanf(49.9f * float(M_PI / 360)) / tanf(62.0f * float(M_PI / 360));
+    for (const auto framing : {Framing::Half, Framing::Full}) {
+        request.framing = framing;
+        mode(0);
+        wideBytes = original;
+        CHECK(capture.begin(config, request, calibration, token) == 0 && token);
+        CHECK(capture.tokenFor(11, 7) == token && !capture.tokenFor(11, 8));
+        CHECK(capture.process(token, destination) == -EAGAIN);
+        submit(1000000);
+        CHECK(capture.submitImage(token, 11, 7, wide) == -EALREADY);
+        CHECK(capture.isReady(token));
+        std::fill(wideBytes.begin(), wideBytes.end(), 0);
+        CHECK(capture.process(token, destination) == 0);
+        wideBytes = original;
+        CHECK(Capture::resize(wide, expected, framing == Framing::Half, ratio));
+        CHECK(destinationBytes == expectedBytes);
+        CHECK(inits() == 1 && uninits() == 1 && calculates() == 1 && processes() == 1);
+        CHECK(!capture.hasActiveCapture() && !capture.tokenFor(11, 7));
+    }
+    for (int failure : {0, 1}) {
+        mode(failure);
+        CHECK(capture.begin(config, request, calibration, token) == 0);
+        submit(failure == 0 ? 11000000 : 1000000);
+        std::fill(destinationBytes.begin(), destinationBytes.end(), 0x5a);
+        const auto before = destinationBytes;
+        CHECK(capture.process(token, destination) == (failure == 0 ? -ERANGE : -EIO));
+        CHECK(destinationBytes == before && !capture.hasActiveCapture());
+        CHECK(inits() == failure && uninits() == failure && processes() == 0);
+    }
+    mode(0);
+    CHECK(capture.begin(config, request, calibration, token) == 0);
+    submit(1000000);
+    CHECK(capture.cancel(token));
+    CHECK(capture.process(token, destination) == -ECANCELED && inits() == 0);
+    request.framing = Framing(2);
+    CHECK(capture.begin(config, request, calibration, token) == -EINVAL && token == 0);
+    dlclose(library);
+}
+
 int main() {
     testBindBinnedAux();
     testRejectBadAux();
     testFocusRoiOrigin();
     testResizeNv12();
     testFullResAux();
+    testPortraitFramingUsesOpticalGeometry();
+    testPairedProcessFraming();
     if (failures) { fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     printf("Dual geometry host tests: PASS\n");
     return 0;

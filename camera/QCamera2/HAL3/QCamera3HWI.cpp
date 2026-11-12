@@ -70,6 +70,8 @@
 #include "QCamera3StockBeauty.h"
 #include "QCamera3FrontBeauty.h"
 #include "QCamera3StockSuperPhoto.h"
+#include "QCamera3StockPicBest.h"
+#include "QCamera3StillAlgo.h"
 #include "QCamera3StockScene.h"
 #include "QCamera3ExifExtras.h"
 #include "QCamera3EisSnapshot.h"
@@ -235,11 +237,15 @@ static bool oppoEisSupported(const cam_capability_t *capability)
 // Stock MMS VStab rewrites the 720p/1080p video geometry and needs per-device
 // calibration. It is opt-in for device A/B runs; the standard session must not be
 // silently replaced by the vendor pipeline (see docs/stabilization-eval.md).
-static bool oppoMmsVstabEnabled()
+static bool oppoMmsVstabSupported(const cam_capability_t *cap)
 {
-    char prop[PROPERTY_VALUE_MAX];
-    property_get("persist.vendor.camera.oppo.vstab.mms", prop, "0");
-    return atoi(prop) == 1;
+    if (!cap || cap->position != CAM_POSITION_BACK || cap->aux_cam_cap != NULL)
+        return false;
+    QCamera3MmsGyroSource::Identity gyro = {};
+    if (QCamera3MmsGyroSource::probe(gyro) != NO_ERROR) return false;
+    QCamera3MmsProfile profile = {};
+    return QCamera3MmsProfile::select(cap->oppo_sensor_name, gyro.name, gyro.vendor,
+            1920, 1080, profile) && QCamera3MmsChannel::probeProfile(profile) == NO_ERROR;
 }
 
 // task-178 diagnostic A/B gates. Both default to 0 so a stock session keeps the
@@ -264,9 +270,8 @@ static bool oppoAfOpEnabled()
     return atoi(prop) == 1;
 }
 
-// Standard Camera2 video stabilization is removed from this port (user decision):
-// EIS2 and MMS are kept only as explicit candidates for device A/B or a future
-// OCam extension protocol. Standard sessions leave both disabled.
+// Legacy daemon EIS remains an opt-in diagnostic path. MMS has its own
+// capability/profile probe and consumes the standard per-request control.
 static bool oppoEisExtensionEnabled()
 {
     char prop[PROPERTY_VALUE_MAX];
@@ -276,7 +281,7 @@ static bool oppoEisExtensionEnabled()
 
 static bool oppoVideoStabExtensionEnabled()
 {
-    return oppoEisExtensionEnabled() || oppoMmsVstabEnabled();
+    return oppoEisExtensionEnabled();
 }
 
 /*
@@ -311,19 +316,10 @@ static bool oppoIs4kVideoSize(const cam_dimension_t &dim)
     return (shortSide == 2160 && (longSide == 3840 || longSide == 4096));
 }
 
-// Front beauty uses the ARC_BS_IMAGE_* core whose face-hint record is not
-// decoded yet, so it stays opt-in until the device run validates the ABI.
-static bool oppoFrontBeautyEnabled()
-{
-    char prop[PROPERTY_VALUE_MAX];
-    property_get("persist.vendor.camera.oppo.front_beauty.enable", prop, "0");
-    return atoi(prop) == 1;
-}
-
 static bool oppoFrontBeautySupported(const cam_capability_t *capability)
 {
     return capability != NULL && capability->position == CAM_POSITION_FRONT &&
-            oppoFrontBeautyEnabled() && QCamera3FrontBeauty::isAvailable();
+            QCamera3FrontBeauty::isAvailable();
 }
 
 // Vendor-only ZSL path (stock HAL ZSL snapshot channel). All defaults closed.
@@ -334,18 +330,10 @@ static bool oppoZslMasterEnabled()
     return atoi(prop) == 1;
 }
 
-/* Camera2 treats CONTROL_ENABLE_ZSL as a hint: a HAL may decline it. The stock
- * HAL-ZSL snapshot channel on this device is a frame-specific (pseudo-ZSL)
- * picture channel; taking the past-frame branch returns no JPEG on current
- * builds (5s App timeout), while the frame-specific path is the one proven on
- * device. Default: decline the hint when vendor ZSL is not in use; 1 restores
- * the stock past-frame request for A/B. */
+/* The standard hint selects retained snapshot sources. Selection must keep
+ * the source image and its exposure metadata together; the App owns no ring. */
 static bool oppoStandardZslPastFrameAllowed()
 {
-    /* Stock HAL1 ZSL semantics: the ZSL snapshot stream is kept alive with
-     * request_super_buf() and standard still captures take the latest retained
-     * past frame. The frame-specific request path does not align with this
-     * daemon's snapshot super-buffer matching and yields zero-filled sources. */
     return true;
 }
 
@@ -791,9 +779,7 @@ static bool oppoBasicRequestSettings(const camera_metadata_t *settings,
             return false;
         }
     }
-    // Standard video stabilization is removed from this build: accept the
-    // documented values without enabling anything so that a recording request can
-    // never fail because of this optional control. The result reports OFF.
+    // Execution and the reported mode are determined for each output frame.
     if (find_camera_metadata_ro_entry(settings,
             ANDROID_CONTROL_VIDEO_STABILIZATION_MODE, &entry) == 0 &&
             (entry.count != 1 ||
@@ -854,7 +840,6 @@ static bool oppoBasicRequestSettings(const camera_metadata_t *settings,
         QCAMERA3_NATIVE_ALGORITHM_RELIGHT_ELEVATION,
         QCAMERA3_NATIVE_ALGORITHM_FILTER_TYPE,
         QCAMERA3_NATIVE_ALGORITHM_FILTER_FLIP_MODE,
-        QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH,
         QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_TEMPORAL_SMOOTHING,
         QCAMERA3_AR_TRACKING_ENABLE,
         QCAMERA3_AR_TRACKING_MODE,
@@ -917,6 +902,19 @@ static bool oppoBasicRequestSettings(const camera_metadata_t *settings,
     if (find_camera_metadata_ro_entry(settings,
             QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH, &entry) == 0 &&
             (entry.count != 1 || entry.data.i32[0] < 0 || entry.data.i32[0] > 100)) return false;
+    if (find_camera_metadata_ro_entry(settings,
+            QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH, &entry) == 0 &&
+            (entry.count != 1 || entry.data.i32[0] < 0 || entry.data.i32[0] > 100 ||
+             reprocess || !capability || !capability->aux_cam_cap ||
+             !QCamera3StockPreviewBokeh::isAvailable())) return false;
+    const uint32_t switches[] = {uint32_t(QCAMERA3_NATIVE_ALGORITHM_PROCESSING_ENABLE),
+            uint32_t(QCAMERA3_NATIVE_ALGORITHM_PORTRAIT_FRAMING)};
+    for (size_t i = 0; i < 2; ++i) {
+        if (find_camera_metadata_ro_entry(settings, switches[i], &entry) == 0 &&
+                (entry.count != 1 || entry.data.i32[0] < 0 || entry.data.i32[0] > 1 ||
+                 reprocess || (i == 1 && (capability == NULL || capability->aux_cam_cap == NULL))))
+            return false;
+    }
     // Front beauty strength is only valid where stillMode=FRONT_BEAUTY is announced.
     if (find_camera_metadata_ro_entry(settings,
             QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH, &entry) == 0 &&
@@ -1118,6 +1116,11 @@ static bool oppoBasicHiddenKey(int32_t key, bool raw, bool reprocess)
     case ANDROID_LOGICAL_MULTI_CAMERA_PHYSICAL_IDS:
     case ANDROID_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE:
     case ANDROID_REQUEST_AVAILABLE_PHYSICAL_CAMERA_REQUEST_KEYS:
+    case ANDROID_LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID:
+    case QCAMERA3_LOGICAL_CAM_MODE:
+    case QCAMERA3_SAT_MODE_ON:
+    case QCAMERA3_STREAM_LOW_POWER_MODE:
+    case QCAMERA3_STREAM_ACTIVE_PHYSICAL_ID:
         return true;
     default:
         return false;
@@ -1160,18 +1163,247 @@ static void oppoAdvertisedFpsRanges(const cam_capability_t *capability,
 
 extern cam_capability_t *gCamCapability[MM_CAMERA_MAX_NUM_SENSORS];
 
+bool QCamera3HardwareInterface::isFrontCamera() const
+{
+    return gCamCapability[mCameraId] != NULL &&
+            gCamCapability[mCameraId]->position == CAM_POSITION_FRONT;
+}
+
+static bool oppoHighResolutionSupported(const cam_capability_t *cap)
+{
+    if (!cap || cap->position != CAM_POSITION_BACK || cap->aux_cam_cap ||
+            !cap->auto_exposure_lock_supported || !cap->auto_wb_lock_supported) return false;
+    bool source = false;
+    for (size_t i = 0; i < MIN(cap->picture_sizes_tbl_cnt, MAX_SIZES_CNT); ++i)
+        source |= cap->picture_sizes_tbl[i].width == 4608 &&
+                cap->picture_sizes_tbl[i].height == 3456;
+    return source && QCamera3StockSuperPhoto::isHighResolutionAvailable();
+}
+
+bool QCamera3HardwareInterface::isHighResolutionOutput(const camera3_stream_t *stream) const
+{
+    return stream && stream->stream_type == CAMERA3_STREAM_OUTPUT &&
+            stream->format == HAL_PIXEL_FORMAT_BLOB && stream->width == 9216 &&
+            stream->height == 6912 && oppoHighResolutionSupported(gCamCapability[mCameraId]);
+}
+
+static bool oppoRealtimeRequested(const CameraMetadata &settings)
+{
+    const int32_t keys[] = {QCAMERA3_NATIVE_ALGORITHM_PROCESSING_ENABLE,
+            QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH,
+            QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH};
+    for (uint32_t key : keys) {
+        const auto entry = settings.find(key);
+        if (entry.count == 1 && entry.data.i32[0] > 0) return true;
+    }
+    return false;
+}
+
+static bool oppoRealtimeSession(const CameraMetadata &settings,
+        const CameraMetadata &characteristics, bool &linear, int32_t &previewBokeh)
+{
+    linear = false;
+    previewBokeh = 0;
+    const int32_t keys[] = {QCAMERA3_NATIVE_ALGORITHM_PROCESSING_ENABLE,
+            QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH,
+            QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH,
+            QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH};
+    const auto available = characteristics.find(ANDROID_REQUEST_AVAILABLE_SESSION_KEYS);
+    for (unsigned i = 0; i < 4; ++i) {
+        const auto entry = settings.find(keys[i]);
+        if (entry.count == 0) continue;
+        bool announced = false;
+        for (size_t j = 0; j < available.count; ++j)
+            announced |= available.data.i32[j] == keys[i];
+        if (!announced || entry.count != 1 || entry.data.i32[0] < 0 ||
+                entry.data.i32[0] > (i == 0 ? 1 : 100)) return false;
+        linear |= entry.data.i32[0] > 0;
+        if (i == 3) previewBokeh = entry.data.i32[0];
+    }
+    return true;
+}
+
+void QCamera3HardwareInterface::cacheRealtimeSource(uint32_t frameNumber,
+        uint32_t cameraHandle, int64_t timestampNs, int32_t sensitivity)
+{
+    if (cameraHandle != get_main_camera_handle(mCameraHandle->camera_handle) ||
+            timestampNs <= 0 || sensitivity <= 0) return;
+    {
+        std::lock_guard<std::mutex> lock(mRealtimeSourceLock);
+        mRealtimeSources[frameNumber] = {timestampNs, sensitivity};
+        while (mRealtimeSources.size() > 32) mRealtimeSources.erase(mRealtimeSources.begin());
+    }
+    mRealtimeSourceCondition.notify_all();
+}
+
+void QCamera3HardwareInterface::noteRealtimeFailure(uint32_t internalFrame,
+        const camera3_stream_t *output, int32_t status, bool includePreviewBokeh)
+{
+    uint32_t frameworkFrame;
+    if (_orchestrationDb.getFrameworkFrameNumber(internalFrame, frameworkFrame) != NO_ERROR) return;
+    std::shared_ptr<AcceptedRequest> request;
+    {
+        std::lock_guard<std::mutex> lock(mAsyncLock);
+        const auto it = mAcceptedRequests.find(frameworkFrame);
+        if (it == mAcceptedRequests.end() || (it->second->realtimeOutput != output &&
+                it->second->previewBokehOutput != output)) return;
+        request = it->second;
+    }
+    const CameraMetadata &settings = request->settings;
+    const int32_t keys[] = {QCAMERA3_NATIVE_ALGORITHM_PROCESSING_ENABLE,
+            QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH,
+            QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH};
+    const int32_t stages[] = {30, OPPO_NATIVE_FRONT_BEAUTY, OPPO_NATIVE_SCENE};
+    for (unsigned i = 0; request->realtimeOutput == output && i < 3; ++i) {
+        const auto entry = settings.find(keys[i]);
+        if (entry.count == 1 && entry.data.i32[0] > 0)
+            noteNativeStage(internalFrame, stages[i], status, 0);
+    }
+    const auto previewBokeh = settings.find(QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH);
+    if (includePreviewBokeh && request->previewBokehOutput == output &&
+            previewBokeh.count == 1 && previewBokeh.data.i32[0] > 0)
+        noteNativeStage(internalFrame, 23, status, 0);
+}
+
+bool QCamera3HardwareInterface::processRealtimeFrame(uint32_t internalFrame,
+        mm_camera_buf_def_t *buffer, const cam_dimension_t &dim,
+        const cam_frame_len_offset_t &offset, bool nv12, const camera3_stream_t *output,
+        QCamera3StreamMem *memory)
+{
+    uint32_t frameworkFrame;
+    if (_orchestrationDb.getFrameworkFrameNumber(internalFrame, frameworkFrame) != NO_ERROR)
+        return false;
+    std::shared_ptr<AcceptedRequest> request;
+    {
+        std::lock_guard<std::mutex> lock(mAsyncLock);
+        const auto it = mAcceptedRequests.find(frameworkFrame);
+        if (it == mAcceptedRequests.end() || it->second->realtimeOutput != output) return false;
+        request = it->second;
+    }
+    const CameraMetadata &settings = request->settings;
+    const auto strength = [&](uint32_t key) -> int32_t {
+        const auto entry = settings.find(key);
+        return entry.count == 1 ? entry.data.i32[0] : 0;
+    };
+    const int32_t beauty = strength(QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH);
+    const int32_t scene = strength(QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH);
+    const bool processing = strength(QCAMERA3_NATIVE_ALGORITHM_PROCESSING_ENABLE) != 0;
+    if (beauty == 0 && scene == 0 && !processing) return false;
+    if (isDualCamera() || !mRealtimeLinearConfigured) {
+        noteRealtimeFailure(internalFrame, output, -ENOTSUP, false);
+        return false;
+    }
+    if (!buffer || !buffer->buffer || offset.num_planes != 2 ||
+            dim.width <= 0 || dim.height <= 0 || (dim.width & 1) || (dim.height & 1)) {
+        noteRealtimeFailure(internalFrame, output, -EINVAL, false);
+        return false;
+    }
+    const size_t yStride = offset.mp[0].stride_in_bytes > 0 ?
+            offset.mp[0].stride_in_bytes : offset.mp[0].stride;
+    const size_t uvStride = offset.mp[1].stride_in_bytes > 0 ?
+            offset.mp[1].stride_in_bytes : offset.mp[1].stride;
+    const size_t yOffset = offset.mp[0].offset;
+    const size_t uvOffset = size_t(offset.mp[0].len) + offset.mp[1].offset;
+    if (yStride < size_t(dim.width) || uvStride < size_t(dim.width) ||
+            yOffset + yStride * (dim.height - 1) + dim.width > buffer->frame_len ||
+            uvOffset + uvStride * (dim.height / 2 - 1) + dim.width > buffer->frame_len) {
+        noteRealtimeFailure(internalFrame, output, -EINVAL, false);
+        return false;
+    }
+    std::vector<uint8_t> pixels(size_t(dim.width) * dim.height * 3 / 2);
+    uint8_t *source = static_cast<uint8_t *>(buffer->buffer);
+    const size_t yBytes = size_t(dim.width) * dim.height;
+    for (int y = 0; y < dim.height; ++y)
+        memcpy(pixels.data() + size_t(y) * dim.width, source + yOffset + y * yStride, dim.width);
+    for (int y = 0; y < dim.height / 2; ++y)
+        memcpy(pixels.data() + yBytes + size_t(y) * dim.width,
+                source + uvOffset + y * uvStride, dim.width);
+    if (nv12)
+        for (size_t i = yBytes; i < pixels.size(); i += 2)
+            std::swap(pixels[i], pixels[i + 1]);
+    QCamera3OppoPlatformFrame frame = {};
+    frame.data = pixels.data();
+    frame.length = pixels.size();
+    frame.width = frame.stride = dim.width;
+    frame.height = frame.slice = dim.height;
+    frame.beautyStrength = beauty;
+    frame.sceneStrength = scene;
+    int32_t statuses[3] = {-ENODATA, -ENODATA, -ENODATA};
+    const bool enabled[] = {processing, beauty > 0, scene > 0};
+    if (processing) {
+        RealtimeSource sourceMetadata = {};
+        const int64_t imageTime = int64_t(buffer->ts.tv_sec) * 1000000000LL + buffer->ts.tv_nsec;
+        {
+            std::unique_lock<std::mutex> lock(mRealtimeSourceLock);
+            mRealtimeSourceCondition.wait_for(lock, std::chrono::milliseconds(40), [&] {
+                return mAsyncCancelled.load() || mRealtimeSources.count(internalFrame) != 0;
+            });
+            const auto it = mRealtimeSources.find(internalFrame);
+            if (it != mRealtimeSources.end()) sourceMetadata = it->second;
+        }
+        if (mAsyncCancelled.load()) statuses[0] = -ECANCELED;
+        else if (sourceMetadata.sensitivity > 0 && sourceMetadata.timestampNs > 0 && imageTime > 0 &&
+                llabs(sourceMetadata.timestampNs - imageTime) <= 1000)
+            statuses[0] = QCamera3OppoPlatformHwi::get().processImageAdjustFrame(
+                    frame, isFrontCamera(), sourceMetadata.sensitivity, true);
+    }
+    if (beauty > 0)
+        statuses[1] = mAsyncCancelled.load() ? -ECANCELED : !isFrontCamera() ? -ENOTSUP :
+                QCamera3OppoPlatformHwi::get().processExplicitFrame(OPPO_NATIVE_FRONT_BEAUTY, frame, true);
+    if (scene > 0)
+        statuses[2] = mAsyncCancelled.load() ? -ECANCELED :
+                QCamera3OppoPlatformHwi::get().processExplicitFrame(OPPO_NATIVE_SCENE, frame, isFrontCamera());
+    bool changed = false;
+    for (unsigned i = 0; i < 3; ++i) changed |= enabled[i] && statuses[i] == NO_ERROR;
+    int32_t commitStatus = mAsyncCancelled.load() ? -ECANCELED : NO_ERROR;
+    if (changed && commitStatus == NO_ERROR) {
+        if (nv12)
+            for (size_t i = yBytes; i < pixels.size(); i += 2)
+                std::swap(pixels[i], pixels[i + 1]);
+        for (int y = 0; y < dim.height; ++y)
+            memcpy(source + yOffset + y * yStride, pixels.data() + size_t(y) * dim.width, dim.width);
+        for (int y = 0; y < dim.height / 2; ++y)
+            memcpy(source + uvOffset + y * uvStride,
+                    pixels.data() + yBytes + size_t(y) * dim.width, dim.width);
+        if (memory) commitStatus = memory->cleanCache(buffer->buf_idx);
+    }
+    const int32_t stages[] = {30, OPPO_NATIVE_FRONT_BEAUTY, OPPO_NATIVE_SCENE};
+    for (unsigned i = 0; i < 3; ++i)
+        if (enabled[i]) {
+            const int32_t status = commitStatus != NO_ERROR ? commitStatus : statuses[i];
+            noteNativeStage(internalFrame, stages[i], status, status == NO_ERROR ? 1 : 0);
+        }
+    return changed && commitStatus == NO_ERROR;
+}
+
+static int64_t oppoManualCaptureDurationNs(const CameraMetadata &settings,
+        const cam_capability_t *capability)
+{
+    const auto ae = settings.find(ANDROID_CONTROL_AE_MODE);
+    const auto exposure = settings.find(ANDROID_SENSOR_EXPOSURE_TIME);
+    if (!capability || ae.count != 1 || ae.data.u8[0] != ANDROID_CONTROL_AE_MODE_OFF ||
+            exposure.count != 1 || !oppoManualLimits(capability).validExposure(exposure.data.i64[0]))
+        return 0;
+    const auto duration = settings.find(ANDROID_SENSOR_FRAME_DURATION);
+    const int64_t frameDuration = duration.count == 1 ? duration.data.i64[0] : 0;
+    return std::max(exposure.data.i64[0], std::min(frameDuration, capability->exposure_time_range[1]));
+}
+
 static bool oppoPanoramaSupported(uint32_t cameraId)
 {
     if (cameraId >= MM_CAMERA_MAX_NUM_SENSORS || gCamCapability[cameraId] == NULL)
         return false;
     const cam_capability_t *cap = gCamCapability[cameraId];
-    return cap->position == CAM_POSITION_BACK &&
-            cap->sensor_type.sens_type != CAM_SENSOR_YUV;
+    if (cap->position == CAM_POSITION_FRONT) return QCamera3OppoVisidonPanorama::isAvailable();
+    return cap->position == CAM_POSITION_BACK && cap->sensor_type.sens_type != CAM_SENSOR_YUV;
 }
 
 static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
-        const cam_capability_t *sensorCapability, uint32_t cameraId, bool logical)
+        const cam_capability_t *sensorCapability, uint32_t cameraId)
 {
+    QCamera3DualGeometry::Profile pairedProfile;
+    const bool paired = sensorCapability &&
+            oppoPairedProfile(sensorCapability->main_cam_cap, sensorCapability->aux_cam_cap, pairedProfile);
     const uint8_t level = ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED;
     const bool manualSensor = oppoManualSensorSupported(sensorCapability);
     const bool manualColor = oppoManualColorSupported(sensorCapability);
@@ -1190,7 +1422,6 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
     // The ON hot-pixel map remains unadvertised (no DPC record in this ABI).
     if (rawDecision != NULL && raw && rawDecision->completeRawCapability == 1)
         capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_RAW);
-    if (logical) capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA);
     const uint8_t off = 0;
     Vector<uint8_t> controlModes;
     controlModes.add(ANDROID_CONTROL_MODE_AUTO);
@@ -1217,9 +1448,10 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
             nativeModes.add(OPPO_NATIVE_REAR_BEAUTY);
         if (oppoFrontBeautySupported(sensorCapability))
             nativeModes.add(OPPO_NATIVE_FRONT_BEAUTY);
-        if (QCamera3StockScene::isAvailable()) nativeModes.add(OPPO_NATIVE_SCENE);
+        if (QCamera3OppoPlatformHwi::explicitAvailable(OPPO_NATIVE_SCENE) ||
+                QCamera3StockScene::isAvailable()) nativeModes.add(OPPO_NATIVE_SCENE);
     }
-    if (sensorCapability != NULL && sensorCapability->aux_cam_cap != NULL) {
+    if (paired) {
         nativeModes.add(OPPO_NATIVE_DUAL_BOKEH);
         const uint8_t focus = ANDROID_CONTROL_AF_MODE_AUTO;
         info.update(ANDROID_CONTROL_AF_AVAILABLE_MODES, &focus, 1);
@@ -1245,7 +1477,10 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
             ANDROID_SYNC_MAX_LATENCY_PER_FRAME_CONTROL : ANDROID_SYNC_MAX_LATENCY_UNKNOWN;
     info.update(ANDROID_SYNC_MAX_LATENCY, &latency, 1);
     info.update(QCAMERA3_STATS_BSGC_AVAILABLE, &off, 1);
-    if (!logical) info.update(QCAMERA3_LOGICAL_CAM_MODE, &off, 1);
+    info.erase(QCAMERA3_LOGICAL_CAM_MODE);
+    info.erase(QCAMERA3_SAT_MODE_ON);
+    info.erase(QCAMERA3_STREAM_LOW_POWER_MODE);
+    info.erase(QCAMERA3_STREAM_ACTIVE_PHYSICAL_ID);
     if (!hasScenes) {
         info.erase(ANDROID_CONTROL_SCENE_MODE_OVERRIDES);
     }
@@ -1270,11 +1505,10 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
     info.erase(ANDROID_SENSOR_OPTICAL_BLACK_REGIONS);
     info.erase(ANDROID_CONTROL_AVAILABLE_HIGH_SPEED_VIDEO_CONFIGURATIONS);
     info.erase(ANDROID_SENSOR_OPAQUE_RAW_SIZE);
-    if (!logical) {
-        info.erase(ANDROID_LOGICAL_MULTI_CAMERA_PHYSICAL_IDS);
-        info.erase(ANDROID_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE);
-        info.erase(ANDROID_REQUEST_AVAILABLE_PHYSICAL_CAMERA_REQUEST_KEYS);
-    }
+    info.erase(ANDROID_LOGICAL_MULTI_CAMERA_PHYSICAL_IDS);
+    info.erase(ANDROID_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE);
+    info.erase(ANDROID_LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID);
+    info.erase(ANDROID_REQUEST_AVAILABLE_PHYSICAL_CAMERA_REQUEST_KEYS);
 
     const uint32_t modeTags[] = {ANDROID_CONTROL_AE_AVAILABLE_MODES,
             ANDROID_CONTROL_AWB_AVAILABLE_MODES};
@@ -1319,6 +1553,12 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
             if (superZoom) basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_SUPER_ZOOM);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_MODE);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH);
+            if (QCamera3OppoPlatformHwi::imageAdjustAvailable(false))
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PROCESSING_ENABLE);
+            if (paired)
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PORTRAIT_FRAMING);
+            if (paired && QCamera3StockPreviewBokeh::isAvailable())
+                basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH);
             if (oppoPanoramaSupported(cameraId)) {
                 basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_ENABLE);
                 basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_CAPTURE);
@@ -1351,7 +1591,6 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_MIRROR_PREVIEW);
             if (singleCamera && oppoMaxFaceCount(sensorCapability) > 0)
                 basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_FACE_PREVIEW_PARAM);
-            if (logical) basicKeys.add(ANDROID_CONTROL_ZOOM_RATIO);
         } else if (keyTags[i] == ANDROID_REQUEST_AVAILABLE_RESULT_KEYS) {
             if (oppoSensorVideoHdrSupported(sensorCapability))
                 basicKeys.add(QCAMERA3_VIDEO_HDR_MODE);
@@ -1396,11 +1635,8 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
                 basicKeys.add(QCAMERA3_HAL_PRIVATEDATA_REPROCESS_DATA_BLOB);
                 basicKeys.add(QCAMERA3_HAL_PRIVATEDATA_EXIF_DEBUG_DATA_BLOB);
             }
-            if (logical) {
-                basicKeys.add(ANDROID_LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID);
-                basicKeys.add(QCAMERA3_STREAM_ACTIVE_PHYSICAL_ID);
-            }
         } else if (keyTags[i] == ANDROID_REQUEST_AVAILABLE_CHARACTERISTICS_KEYS) {
+            basicKeys.add(ANDROID_REQUEST_AVAILABLE_SESSION_KEYS);
             if (oppoSensorVideoHdrSupported(sensorCapability))
                 basicKeys.add(QCAMERA3_AVAILABLE_VIDEO_HDR_MODES);
             basicKeys.add(ANDROID_SCALER_AVAILABLE_STALL_DURATIONS);
@@ -1411,16 +1647,23 @@ static void applyOppoBasicMetadataPolicy(CameraMetadata &info,
                 basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_SUPPORTED);
             basicKeys.add(QCAMERA3_NATIVE_ALGORITHM_PROFESSIONAL_VER);
             basicKeys.add(QCAMERA3_DIAGNOSTICS_HARDWARE_LEVEL_ADVERTISED);
-            if (logical) {
-                basicKeys.add(ANDROID_CONTROL_ZOOM_RATIO);
-                basicKeys.add(ANDROID_CONTROL_ZOOM_RATIO_RANGE);
-                basicKeys.add(ANDROID_LOGICAL_MULTI_CAMERA_PHYSICAL_IDS);
-                basicKeys.add(ANDROID_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE);
-                basicKeys.add(ANDROID_REQUEST_AVAILABLE_PHYSICAL_CAMERA_REQUEST_KEYS);
-            }
         }
         info.update(keyTags[i], basicKeys.array(), basicKeys.size());
     }
+    Vector<int32_t> sessionKeys;
+    const int32_t realtimeKeys[] = {QCAMERA3_NATIVE_ALGORITHM_PROCESSING_ENABLE,
+            QCAMERA3_NATIVE_ALGORITHM_FRONT_BEAUTY_STRENGTH,
+            QCAMERA3_NATIVE_ALGORITHM_SCENE_STRENGTH,
+            QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH};
+    const CameraMetadata &finalInfo = info;
+    const auto requestKeys = finalInfo.find(ANDROID_REQUEST_AVAILABLE_REQUEST_KEYS);
+    for (int32_t key : realtimeKeys)
+        for (size_t i = 0; i < requestKeys.count; ++i)
+            if (requestKeys.data.i32[i] == key) {
+                sessionKeys.add(key);
+                break;
+            }
+    info.update(ANDROID_REQUEST_AVAILABLE_SESSION_KEYS, sessionKeys.array(), sessionKeys.size());
 }
 
 #define CAM_QCOM_FEATURE_PP_SUPERSET_HAL3   ( CAM_QCOM_FEATURE_DENOISE2D |\
@@ -1663,20 +1906,6 @@ struct OppoPhysicalSettings {
 };
 }
 
-static bool oppoLogicalPlanForBackend(uint32_t backendCameraId,
-        QCamera3LogicalMultiCam::Plan &plan)
-{
-    if (!QCamera3HardwareInterface::logicalMultiCamPlan(plan)) return false;
-    if (!is_dual_camera_by_idx(backendCameraId)) return false;
-    uint32_t wideId = 0, teleId = 0;
-    if (!QCamera3LogicalMultiCam::publicIdForRole(plan,
-            QCamera3LogicalMultiCam::ROLE_WIDE, wideId) ||
-            !QCamera3LogicalMultiCam::publicIdForRole(plan,
-            QCamera3LogicalMultiCam::ROLE_TELE, teleId)) return false;
-    return get_main_camera_idx(backendCameraId) == wideId &&
-            get_aux_camera_idx(backendCameraId) == teleId;
-}
-
 int32_t QCamera3HardwareInterface::installLogicalMultiCamPlan(
         const QCamera3LogicalMultiCam::Plan &plan, uint32_t backendCameraId)
 {
@@ -1749,47 +1978,12 @@ size_t QCamera3HardwareInterface::logicalPhysicalRequestKeys(uint32_t pairedCame
     return count;
 }
 
-static bool oppoPublishLogicalMetadata(CameraMetadata &staticInfo,
-        const QCamera3LogicalMultiCam::Plan &plan)
-{
-    if (!plan.publish || plan.requestKeyCount == 0) return false;
-    uint8_t physicalIds[QCamera3LogicalMultiCam::kMaxPhysical *
-            (QCamera3LogicalMultiCam::kMaxIdLength + 1)] = {};
-    size_t used = 0;
-    for (size_t i = 0; i < plan.physicalCount; ++i) {
-        size_t length = 0;
-        if (used >= sizeof(physicalIds) ||
-                !QCamera3LogicalMultiCam::encodeId(plan.physicalIds[i],
-                    reinterpret_cast<char *>(physicalIds) + used,
-                    sizeof(physicalIds) - used, length) ||
-                used + length + 1 > sizeof(physicalIds)) return false;
-        used += length + 1;
-    }
-    if (used == 0) return false;
-    staticInfo.update(ANDROID_LOGICAL_MULTI_CAMERA_PHYSICAL_IDS, physicalIds, used);
-    const uint8_t syncType = plan.syncType == QCamera3LogicalMultiCam::SYNC_CALIBRATED ?
-            uint8_t(ANDROID_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE_CALIBRATED) :
-            uint8_t(ANDROID_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE_APPROXIMATE);
-    staticInfo.update(ANDROID_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE, &syncType, 1);
-    Vector<int32_t> physicalRequestKeys;
-    for (size_t i = 0; i < plan.requestKeyCount; ++i)
-        physicalRequestKeys.add(int32_t(plan.requestKeys[i]));
-    staticInfo.update(ANDROID_REQUEST_AVAILABLE_PHYSICAL_CAMERA_REQUEST_KEYS,
-            physicalRequestKeys.array(), physicalRequestKeys.size());
-    const float zoomRange[2] = {plan.zoomRatioMin, plan.zoomRatioMax};
-    staticInfo.update(ANDROID_CONTROL_ZOOM_RATIO_RANGE, zoomRange, 2);
-    if (std::isfinite(plan.maxDigitalZoom) && plan.maxDigitalZoom >= plan.zoomRatioMax)
-        staticInfo.update(ANDROID_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM,
-                &plan.maxDigitalZoom, 1);
-    const uint8_t logicalMode = plan.logicalId <= QCamera3LogicalMultiCam::kMaxPublicId ?
-            uint8_t(plan.logicalId) : 0;
-    staticInfo.update(QCAMERA3_LOGICAL_CAM_MODE, &logicalMode, 1);
-    return true;
-}
-
 bool QCamera3HardwareInterface::logicalSessionPlan(QCamera3LogicalMultiCam::Plan &plan)
 {
-    return oppoLogicalPlanForBackend(mCameraId, plan);
+    // The vendor paired capture owns its two inputs. Standard physical output
+    // routing and per-physical results are not implemented by this HAL3 path.
+    (void)plan;
+    return false;
 }
 
 bool QCamera3HardwareInterface::satInput(const QCamera3LogicalMultiCam::Plan &plan,
@@ -2396,13 +2590,7 @@ QCamera3HardwareInterface::QCamera3HardwareInterface(uint32_t cameraId,
         LOGE("camera %u capability is NULL; refusing to init HAL object", cameraId);
     }
     mCameraDevice.common.tag = HARDWARE_DEVICE_TAG;
-#ifdef USE_HAL_3_5
     mCameraDevice.common.version = CAMERA_DEVICE_API_VERSION_3_5;
-#elif defined(USE_HAL_3_3)
-    mCameraDevice.common.version = CAMERA_DEVICE_API_VERSION_3_4;
-#else
-    mCameraDevice.common.version = CAMERA_DEVICE_API_VERSION_3_3;
-#endif
     mCameraDevice.common.close = close_camera_device;
     mCameraDevice.ops = &mCameraOps;
     mCameraDevice.priv = this;
@@ -3316,6 +3504,10 @@ int QCamera3HardwareInterface::validateStreamDimensions(
             }
             break;
         case HAL_PIXEL_FORMAT_BLOB:
+            if (isHighResolutionOutput(newStream)) {
+                sizeFound = true;
+                break;
+            }
             if (newStream->data_space !=  HAL_DATASPACE_DEPTH) {
                 /* Verify set size against generated sizes table */
                 count = MIN(gCamCapability[mCameraId]->picture_sizes_tbl_cnt, MAX_SIZES_CNT);
@@ -4256,17 +4448,21 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                 gCamCapability[mCameraId]->aux_cam_cap, mPairedProfile)) return BAD_VALUE;
         mPairedProfileValid = true;
     }
-#ifdef USE_HAL_3_5
-    if (!oppoBasicRequestSettings(streamList->session_parameters, gCamCapability[mCameraId],
-            gStaticMetadata[mCameraId])) {
+    CameraMetadata sessionSettings, sessionCharacteristics;
+    if (streamList->session_parameters) sessionSettings = streamList->session_parameters;
+    sessionCharacteristics = gStaticMetadata[mCameraId];
+    bool realtimeLinear = false;
+    int32_t sessionPreviewBokeh = 0;
+    if (!oppoRealtimeSession(sessionSettings, sessionCharacteristics,
+            realtimeLinear, sessionPreviewBokeh)) {
         LOGE("Unsupported OPPO HAL3 session parameters");
         return BAD_VALUE;
     }
-#endif
     for (size_t i = 0; i < streamList->num_streams; ++i) {
         const camera3_stream_t *stream = streamList->streams[i];
         const bool input = stream && stream->stream_type == CAMERA3_STREAM_INPUT;
         if (stream == NULL ||
+                (realtimeLinear && IS_USAGE_SECURE(stream->usage)) ||
                 (stream->stream_type != CAMERA3_STREAM_OUTPUT && !input) ||
                 !oppoBasicOutputFormat(stream->format) ||
                 (stream->format == HAL_PIXEL_FORMAT_RAW16 &&
@@ -4299,6 +4495,12 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
     LOGD("mOpMode: %d", mOpMode);
 
     mCurrentSceneMode = 0;
+    mRealtimeLinearConfigured = realtimeLinear;
+    mSessionPreviewBokehStrength = sessionPreviewBokeh;
+    {
+        std::lock_guard<std::mutex> lock(mRealtimeSourceLock);
+        mRealtimeSources.clear();
+    }
     mMmsVideoConfigured = false;
     mSensorVideoHdrChosen = false;
     mSensorVideoHdrMode = 0;
@@ -4848,7 +5050,7 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
     // Fixed-lens video: MMS may only bind the rear main sensor of a plain session.
     // It never serves the aux/paired lens or a logical multi-camera session.
     QCamera3LogicalMultiCam::Plan videoLogicalPlan;
-    const bool mmsCandidate = oppoMmsVstabEnabled() && !isDualCamera() &&
+    const bool mmsCandidate = !isDualCamera() &&
             !isSecureMode() && !logicalSessionPlan(videoLogicalPlan) &&
             gCamCapability[mCameraId] != NULL &&
             gCamCapability[mCameraId]->position == CAM_POSITION_BACK &&
@@ -4939,6 +5141,8 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
         uint32_t &stream_index = mStreamConfigInfo[index].num_streams;
         mStreamConfigInfo[index].stream_sizes[stream_index].width = (int32_t)newStream->width;
         mStreamConfigInfo[index].stream_sizes[stream_index].height = (int32_t)newStream->height;
+        if (isHighResolutionOutput(newStream))
+            mStreamConfigInfo[index].stream_sizes[stream_index] = {4608, 3456};
         if (isVerifiedPairedSession() && newStream->format == HAL_PIXEL_FORMAT_BLOB) {
             const auto &input = mPairedProfile.sensors[0].capture;
             mStreamConfigInfo[index].stream_sizes[stream_index] =
@@ -5285,7 +5489,8 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                                 mStreamConfigInfo[index].type[stream_index] == CAM_STREAM_TYPE_VIDEO &&
                                 QCamera3MmsProfile::select(gCamCapability[mCameraId]->oppo_sensor_name,
                                     mmsGyro.name, mmsGyro.vendor, newStream->width,
-                                    newStream->height, mmsProfile)) {
+                                    newStream->height, mmsProfile) &&
+                                QCamera3MmsChannel::probeProfile(mmsProfile) == NO_ERROR) {
                             mmsChannel = new QCamera3MmsChannel(camHdl, channelHdl,
                                     mCameraHandle->ops, captureResultCb, setBufferErrorStatus,
                                     &l_padding, this, newStream,
@@ -5321,11 +5526,10 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                             pthread_mutex_unlock(&mMutex);
                             return -ENOMEM;
                         }
-                        /* disable UBWC for preview, though supported,
-                         * to take advantage of CPP duplication */
                         if (m_bEisEnable || (m_bIsVideo && (!mCommon.isVideoUBWCEnabled()) &&
                                 (previewSize.width == (int32_t)videoWidth)&&
-                                (previewSize.height == (int32_t)videoHeight))||isDualCamera()){
+                                (previewSize.height == (int32_t)videoHeight)) ||
+                                isDualCamera() || mRealtimeLinearConfigured) {
                             channel->setUBWCEnabled(false);
                         }else {
                             channel->setUBWCEnabled(true);
@@ -5435,6 +5639,10 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
                             }
                             mHALZSL = CAM_HAL3_ZSL_TYPE_NONE;
                         }
+                        if (isHighResolutionOutput(newStream)) {
+                            mHALZSL = CAM_HAL3_ZSL_TYPE_NONE;
+                            mOppoZslEnabled = false;
+                        }
                         LOGI("%s HAL ZSL : ",
                             (mHALZSL == CAM_HAL3_ZSL_TYPE_SNAPSHOT) ? "Enabling":"Disabling");
                         LOGH("isZsl %d, m_bIsVideo %d, numStreamsOnEncoder %d, bJpegOnEncoder %d",
@@ -5523,6 +5731,17 @@ int QCamera3HardwareInterface::configureStreamsPerfLocked(
             }
 
             QCamera3Channel *channel = (QCamera3Channel*) newStream->priv;
+            if (channel && mRealtimeLinearConfigured &&
+                    (mStreamConfigInfo[index].type[stream_index] == CAM_STREAM_TYPE_PREVIEW ||
+                     mStreamConfigInfo[index].type[stream_index] == CAM_STREAM_TYPE_VIDEO)) {
+                channel->setUBWCEnabled(false);
+                newStream->usage &= ~GRALLOC_USAGE_PRIVATE_ALLOC_UBWC;
+                newStream->usage |= GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN;
+                if (!channel->usesMmsVstab())
+                    mStreamConfigInfo[index].format[stream_index] = channel->getStreamDefaultFormat(
+                            mStreamConfigInfo[index].type[stream_index],
+                            newStream->width, newStream->height, newStream->usage);
+            }
             if (channel != NULL && channel->isUBWCEnabled()) {
                 cam_format_t fmt = channel->getStreamDefaultFormat(
                         mStreamConfigInfo[index].type[stream_index],
@@ -5965,6 +6184,25 @@ int QCamera3HardwareInterface::validateCaptureRequest(
     CameraMetadata frameworkSettings;
     if (request->settings != NULL) frameworkSettings = request->settings;
     else frameworkSettings = mLastFrameworkSettings;
+    bool highResolution = false;
+    for (uint32_t i = 0; i < request->num_output_buffers; ++i)
+        highResolution |= isHighResolutionOutput(request->output_buffers[i].stream);
+    if (highResolution && mSubmittingBurstFrameNumber == UINT32_MAX) {
+        if (reprocess || m_bIsVideo || request->num_output_buffers != 1 ||
+                oppoNativeMode(frameworkSettings) != OPPO_NATIVE_OFF ||
+                oppoSuperZoom(frameworkSettings)) return BAD_VALUE;
+        const auto flash = frameworkSettings.find(ANDROID_FLASH_MODE);
+        const auto ae = frameworkSettings.find(ANDROID_CONTROL_AE_MODE);
+        const auto crop = frameworkSettings.find(ANDROID_SCALER_CROP_REGION);
+        const auto zoom = frameworkSettings.find(ANDROID_CONTROL_ZOOM_RATIO);
+        const auto &active = gCamCapability[mCameraId]->active_array_size;
+        if ((flash.count && flash.data.u8[0] != ANDROID_FLASH_MODE_OFF) ||
+                (ae.count && ae.data.u8[0] != ANDROID_CONTROL_AE_MODE_ON &&
+                 ae.data.u8[0] != ANDROID_CONTROL_AE_MODE_OFF) ||
+                (zoom.count && zoom.data.f[0] != 1.0f) ||
+                (crop.count && (crop.data.i32[0] != active.left || crop.data.i32[1] != active.top ||
+                 crop.data.i32[2] != active.width || crop.data.i32[3] != active.height))) return BAD_VALUE;
+    }
     if (oppoSuperZoom(frameworkSettings)) {
         QCamera3SuperZoomPlan zoomPlan;
         if (!makeSuperZoomPlan(request, zoomPlan)) return BAD_VALUE;
@@ -5993,7 +6231,7 @@ int QCamera3HardwareInterface::validateCaptureRequest(
                     jpeg = true;
                 }
             }
-        if (!jpeg) return BAD_VALUE;
+        if (!jpeg && sceneMode != OPPO_NATIVE_OFF) return BAD_VALUE;
     }
     const int32_t requestedHdr = oppoRequestedVideoHdr(frameworkSettings);
     const auto hdrFps = frameworkSettings.find(ANDROID_CONTROL_AE_TARGET_FPS_RANGE);
@@ -6688,6 +6926,9 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
     currentSysTime =            systemTime(CLOCK_MONOTONIC);
 
     if (frame_number_valid) {
+        IF_META_AVAILABLE(int32_t, sensitivity, CAM_INTF_META_SENSOR_SENSITIVITY, metadata) {
+            cacheRealtimeSource(frame_number, metadata_buf->camera_handle, capture_time, *sensitivity);
+        }
         for (auto streamInfo = mStreamInfo.begin(); streamInfo != mStreamInfo.end(); ++streamInfo) {
             QCamera3Channel *channel = static_cast<QCamera3Channel *>((*streamInfo)->stream->priv);
             if (channel) channel->queueSensorMetadata(frame_number, metadata_buf->camera_handle, metadata);
@@ -7170,9 +7411,10 @@ void QCamera3HardwareInterface::handleMetadataWithLock(
                     mmsResult.acquire(const_cast<camera_metadata_t *>(result.result));
                     QCamera3MmsChannel *mms = findMmsChannel();
                     QCamera3MmsChannel::VstabDiagnostics vstab;
-                    const bool haveVstab = mms != NULL && mms->getVstabDiagnostics(vstab);
+                    const bool haveVstab = mms != NULL && mms->getVstabDiagnostics(i->frame_number, vstab);
                     // Report the mode actually run; a refused stabilisation reports OFF.
-                    uint8_t resultVstabMode = i->fwkVideoStabMode;
+                    uint8_t resultVstabMode = haveVstab ? i->fwkVideoStabMode :
+                            ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF;
                     if (haveVstab && vstab.reason != 0)
                         resultVstabMode = ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF;
                     mmsResult.update(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE,
@@ -8070,6 +8312,88 @@ static bool oppoPreparePairedCapability(cam_capability_t *cap)
     return true;
 }
 
+QCamera3RegularChannel *QCamera3HardwareInterface::findPreviewBokehChannel()
+{
+    for (auto it = mStreamInfo.begin(); it != mStreamInfo.end(); ++it) {
+        auto *channel = static_cast<QCamera3Channel *>((*it)->stream->priv);
+        if (channel && channel->getStreamTypeMask() == (1U << CAM_STREAM_TYPE_PREVIEW) &&
+                !channel->usesMmsVstab()) {
+            auto *regular = static_cast<QCamera3RegularChannel *>(channel);
+            if (regular->hasPreviewBokeh()) return regular;
+        }
+    }
+    return nullptr;
+}
+
+int32_t QCamera3HardwareInterface::preparePreviewBokehRequest(const camera3_capture_request_t *request)
+{
+    if (!request || !mSessionPreviewBokehStrength || findPreviewBokehChannel()) return NO_ERROR;
+    if (!mRealtimeLinearConfigured || !isVerifiedPairedSession() || !mPairedProfileValid ||
+            m_bIsVideo || isSecureMode() || !QCamera3StockPreviewBokeh::isAvailable()) return -ENOTSUP;
+    const auto *cap = gCamCapability[mCameraId];
+    if (!dualCapabilitiesMatch(mPairedProfile, cap->main_cam_cap, cap->aux_cam_cap)) return -ESTALE;
+    QCamera3RegularChannel *selected = nullptr;
+    camera3_stream_t *output = nullptr;
+    for (auto it = mStreamInfo.begin(); it != mStreamInfo.end(); ++it) {
+        auto *channel = static_cast<QCamera3Channel *>((*it)->stream->priv);
+        if (!channel || channel->getStreamTypeMask() != (1U << CAM_STREAM_TYPE_PREVIEW)) continue;
+        if (selected || channel->usesMmsVstab() || channel->isUBWCEnabled()) return -ENOTSUP;
+        selected = static_cast<QCamera3RegularChannel *>(channel);
+        output = (*it)->stream;
+    }
+    if (!selected || !output || output->rotation != CAMERA3_STREAM_ROTATION_0) return -ENOTSUP;
+    const auto supported = [&](const cam_capability_t *sensor) {
+        for (size_t i = 0; i < MIN(sensor->preview_sizes_tbl_cnt, MAX_SIZES_CNT); ++i)
+            if (sensor->preview_sizes_tbl[i].width == int32_t(output->width) &&
+                    sensor->preview_sizes_tbl[i].height == int32_t(output->height)) return true;
+        return false;
+    };
+    // Each input preserves its own full sensor field of view; the paired profile
+    // and runtime crop metadata must agree before any effect can be committed.
+    if (!supported(cap->main_cam_cap)) return -ENOTSUP;
+    cam_dimension_t auxiliarySize = {};
+    uint64_t bestAspect = UINT64_MAX, bestArea = UINT64_MAX;
+    for (size_t i = 0; i < MIN(cap->aux_cam_cap->preview_sizes_tbl_cnt, MAX_SIZES_CNT); ++i) {
+        const auto size = cap->aux_cam_cap->preview_sizes_tbl[i];
+        if (size.width <= 0 || size.height <= 0 || (size.width | size.height) & 1) continue;
+        const int64_t cross = int64_t(size.width) * output->height - int64_t(size.height) * output->width;
+        const uint64_t aspect = uint64_t(llabs(cross)) * 1000000 / (uint64_t(size.height) * output->height);
+        const uint64_t area = llabs(int64_t(size.width) * size.height - int64_t(output->width) * output->height);
+        if (aspect < bestAspect || (aspect == bestAspect && area < bestArea)) {
+            auxiliarySize = size; bestAspect = aspect; bestArea = area;
+        }
+    }
+    if (!auxiliarySize.width || !auxiliarySize.height) return -ENOTSUP;
+    QCamera3StockPreviewBokeh::Config config = {};
+    config.cameraHandles[0] = get_main_camera_handle(mCameraHandle->camera_handle);
+    config.cameraHandles[1] = get_aux_camera_handle(mCameraHandle->camera_handle);
+    QCamera3DualCapture::Rect crops[2];
+    for (unsigned i = 0; i < 2; ++i) {
+        crops[i] = mPairedProfile.sensors[i].capture.referenceCrop;
+        config.imageWidths[i] = i == 0 ? output->width : uint32_t(auxiliarySize.width);
+        config.imageHeights[i] = i == 0 ? output->height : uint32_t(auxiliarySize.height);
+        config.activeWidths[i] = crops[i].width; config.activeHeights[i] = crops[i].height;
+    }
+    config.degree = cap->main_cam_cap->sensor_mount_angle;
+    config.maxTimestampDeltaNs = std::min<int64_t>(mPairedProfile.maxTimestampDeltaNs, 10000000);
+    auto &aux = mStreamConfigInfo[CONFIG_INDEX_AUX];
+    if (aux.num_streams >= MAX_NUM_STREAMS) return -ENOSPC;
+    QCamera3DualBokehAlgo::UnitCalibration calibration;
+    int32_t status = QCamera3DualBokehAlgo::loadCalibration(calibration);
+    if (status != NO_ERROR) return status;
+    status = selected->configurePreviewBokeh(config, calibration,
+            get_aux_camera_handle(mChannelHandle), crops, 500000000LL);
+    if (status != NO_ERROR) return status;
+    const uint32_t index = aux.num_streams++;
+    aux.type[index] = CAM_STREAM_TYPE_CALLBACK;
+    aux.stream_sizes[index] = auxiliarySize;
+    aux.format[index] = CAM_FORMAT_YUV_420_NV21;
+    aux.postprocess_mask[index] = CAM_QCOM_FEATURE_NONE;
+    aux.is_type[index] = IS_TYPE_NONE;
+    aux.sync_type = CAM_TYPE_AUX;
+    return NO_ERROR;
+}
+
 QCamera3MmsChannel *QCamera3HardwareInterface::findMmsChannel()
 {
     for (List<stream_info_t *>::iterator it = mStreamInfo.begin();
@@ -8111,7 +8435,7 @@ int32_t QCamera3HardwareInterface::configureVerifiedDualCapture()
 }
 
 int32_t QCamera3HardwareInterface::beginVerifiedDualRequest(uint32_t frameNumber,
-        const CameraMetadata &settings)
+        const CameraMetadata &settings, const uint32_t *wideFrameIds, unsigned wideCount)
 {
     if (!isVerifiedPairedSession() || !mPictureChannel || !mPairedProfileValid) return BAD_VALUE;
     const auto &active = mPairedProfile.sensors[0].capture.activeArrayCrop;
@@ -8130,32 +8454,94 @@ int32_t QCamera3HardwareInterface::beginVerifiedDualRequest(uint32_t frameNumber
     const auto strength = settings.find(QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH);
     const int32_t percent = strength.count == 1 ? strength.data.i32[0] : 50;
     if (percent < 0 || percent > 100) return BAD_VALUE;
+    const auto framing = settings.find(QCAMERA3_NATIVE_ALGORITHM_PORTRAIT_FRAMING);
+    const int32_t framingValue = framing.count == 1 ? framing.data.i32[0] : 0;
     if (rc == NO_ERROR) rc = mPictureChannel->beginDualCapture(frameNumber, x, y,
-            percent * QCamera3DualBokehAlgo::kMaxBlurLevel / 100);
+            percent * QCamera3DualBokehAlgo::kMaxBlurLevel / 100,
+            static_cast<QCamera3DualCapture::PortraitFraming>(framingValue), wideFrameIds, wideCount);
     return rc;
 }
 
 int32_t QCamera3HardwareInterface::orchestrateDualCapture(camera3_capture_request_t *request)
 {
-    CameraMetadata settings;
-    if (request->settings) settings = request->settings;
-    else settings = mLastFrameworkSettings;
-    if (settings.isEmpty()) return BAD_VALUE;
-    camera3_capture_request_t frame = *request;
-    _orchestrationDb.allocStoreInternalFrameNumber(request->frame_number, frame.frame_number);
+    CameraMetadata original;
+    if (request->settings) original = request->settings;
+    else original = mLastFrameworkSettings;
+    if (original.isEmpty() || !mPictureChannel) return BAD_VALUE;
+    const auto strength = original.find(QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH);
+    camera_metadata_ro_entry_t faceModes = {};
+    uint8_t faceMode = ANDROID_STATISTICS_FACE_DETECT_MODE_OFF;
+    if (find_camera_metadata_ro_entry(gStaticMetadata[mCameraId],
+            ANDROID_STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES, &faceModes) == 0) {
+        for (size_t i = 0; i < faceModes.count; ++i)
+            if (faceModes.data.u8[i] == ANDROID_STATISTICS_FACE_DETECT_MODE_FULL ||
+                    (faceModes.data.u8[i] == ANDROID_STATISTICS_FACE_DETECT_MODE_SIMPLE && !faceMode))
+                faceMode = faceModes.data.u8[i];
+    }
+    const bool portraitBurst = (!strength.count || strength.data.i32[0] > 0) &&
+            QCamera3StillAlgo::isAvailable();
+    const unsigned count = portraitBurst ? 3U : 1U;
+    uint32_t ids[3] = {}, group[3] = {};
+    for (unsigned i = 0; i + 1 < count; ++i)
+        _orchestrationDb.generateStoreInternalFrameNumber(ids[i]);
+    _orchestrationDb.allocStoreInternalFrameNumber(request->frame_number, ids[count - 1]);
+    group[0] = ids[count - 1];
+    for (unsigned i = 1; i < count; ++i) group[i] = ids[i - 1];
+    struct DualBurstScope {
+        bool &pending;
+        explicit DualBurstScope(bool &value, bool enabled) : pending(value) { pending = enabled; }
+        ~DualBurstScope() { pending = false; }
+    } dualBurstScope(mDualBurstPending, portraitBurst);
+    if (portraitBurst) {
+        memcpy(mDualBurstFrameIds, group, sizeof(group));
+        deferAsyncFinalMetadata(request->frame_number);
+    }
     struct SubmissionScope {
         uint32_t &slot;
         SubmissionScope(uint32_t &value, uint32_t number) : slot(value) { slot = number; }
         ~SubmissionScope() { slot = UINT32_MAX; }
-    } submissionScope(mSubmittingBurstFrameNumber, frame.frame_number);
-    frame.settings = settings.getAndLock();
-    List<InternalRequest> empty;
-    int32_t rc = processCaptureRequest(&frame, empty);
-    settings.unlock(frame.settings);
+    } submissionScope(mSubmittingBurstFrameNumber, group[0]);
+    InternalRequest internal = {};
+    internal.need_metadata = true;
+    for (uint32_t i = 0; i < request->num_output_buffers; ++i)
+        if (request->output_buffers[i].stream->format == HAL_PIXEL_FORMAT_BLOB)
+            internal.stream = request->output_buffers[i].stream;
+    int32_t rc = NO_ERROR;
+    const uint8_t idle = 0, locked = 1, disabled = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        if (mAsyncCancelled.load()) { rc = -ECANCELED; break; }
+        if (portraitBurst) {
+            rc = mPictureChannel->waitForSnapshotBuffer(&mAsyncCancelled);
+            if (rc != NO_ERROR) break;
+        }
+        if (mAsyncCancelled.load()) { rc = -ECANCELED; break; }
+        CameraMetadata settings = original;
+        if (portraitBurst) {
+            settings.update(ANDROID_CONTROL_AE_LOCK, &locked, 1);
+            settings.update(ANDROID_CONTROL_AWB_LOCK, &locked, 1);
+            settings.update(ANDROID_CONTROL_ENABLE_ZSL, &disabled, 1);
+            settings.update(ANDROID_STATISTICS_FACE_DETECT_MODE, &faceMode, 1);
+        }
+        if (i + 1 < count) {
+            settings.update(ANDROID_CONTROL_AF_TRIGGER, &idle, 1);
+            settings.update(ANDROID_CONTROL_AE_PRECAPTURE_TRIGGER, &idle, 1);
+        }
+        camera3_capture_request_t frame = *request;
+        frame.frame_number = ids[i];
+        frame.settings = settings.getAndLock();
+        List<InternalRequest> streams;
+        if (i + 1 < count) { frame.num_output_buffers = 0; streams.push_back(internal); }
+        rc = processCaptureRequest(&frame, streams);
+        settings.unlock(frame.settings);
+        if (rc == NO_ERROR && mAsyncCancelled.load()) rc = -ECANCELED;
+        if (rc != NO_ERROR) break;
+    }
     if (rc != NO_ERROR) {
+        mPictureChannel->cancelHdrCapture(group[0]);
         const uint64_t token = mPictureChannel->getDualCapture().tokenFor(
-                mPictureChannel->getMyCamHandle(), frame.frame_number);
+                mPictureChannel->getMyCamHandle(), group[0]);
         if (token) mPictureChannel->getDualCapture().cancel(token);
+        mRestoreFrameworkSettings = true;
     }
     return rc;
 }
@@ -8163,6 +8549,10 @@ int32_t QCamera3HardwareInterface::orchestrateDualCapture(camera3_capture_reques
 int32_t QCamera3HardwareInterface::orchestrateAdvancedCapture(
         camera3_capture_request_t *request, bool &isAdvancedCapture)
 {
+    isAdvancedCapture = false;
+    for (uint32_t i = 0; i < request->num_output_buffers; ++i)
+        isAdvancedCapture |= isHighResolutionOutput(request->output_buffers[i].stream);
+    if (isAdvancedCapture) return orchestrateHighResolutionCapture(request);
     isAdvancedCapture = isDualSnapshotRequest(request);
     if (isAdvancedCapture) return orchestrateDualCapture(request);
     isAdvancedCapture = isHdrSnapshotRequest(request);
@@ -8222,10 +8612,43 @@ int32_t QCamera3HardwareInterface::acceptRequest(camera3_capture_request_t *requ
     owned->outputs.assign(request->output_buffers,
             request->output_buffers + request->num_output_buffers);
     owned->returned.resize(request->num_output_buffers, false);
+    unsigned captureFrames = 1;
+    for (const auto &output : owned->outputs)
+        if (isHighResolutionOutput(output.stream)) captureFrames = 5;
+    owned->captureWaitNs += oppoManualCaptureDurationNs(owned->settings,
+            gCamCapability[mCameraId]) * captureFrames;
     for (size_t i = 0; i < owned->outputs.size(); ++i) {
         if (!owned->outputs[i].stream || !owned->outputs[i].buffer) return BAD_VALUE;
+        const auto *channel = static_cast<QCamera3ProcessingChannel *>(owned->outputs[i].stream->priv);
+        if (channel && channel->usesMmsVstab()) owned->mmsOutput = owned->outputs[i].stream;
         owned->handles[i] = *owned->outputs[i].buffer;
         owned->outputs[i].buffer = &owned->handles[i];
+    }
+    if (oppoRealtimeRequested(owned->settings)) {
+        bool jpeg = false;
+        for (const auto &output : owned->outputs) {
+            auto *channel = static_cast<QCamera3Channel *>(output.stream->priv);
+            jpeg |= output.stream->format == HAL_PIXEL_FORMAT_BLOB;
+            if (!channel) continue;
+            const uint32_t types = channel->getStreamTypeMask();
+            if ((types & (1U << CAM_STREAM_TYPE_VIDEO)) ||
+                    (!owned->realtimeOutput && (types & (1U << CAM_STREAM_TYPE_PREVIEW))))
+                owned->realtimeOutput = output.stream;
+        }
+        // JPEG final-frame stages own still diagnostics when a preview surface
+        // accompanies the still request; do not process/record that stage twice.
+        if (jpeg) owned->realtimeOutput = nullptr;
+    }
+    const CameraMetadata &acceptedSettings = owned->settings;
+    const auto previewBokeh = acceptedSettings.find(QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH);
+    if (previewBokeh.count == 1 && previewBokeh.data.i32[0] > 0) {
+        for (const auto &output : owned->outputs) {
+            auto *channel = static_cast<QCamera3Channel *>(output.stream->priv);
+            if (channel && (channel->getStreamTypeMask() & (1U << CAM_STREAM_TYPE_PREVIEW))) {
+                owned->previewBokehOutput = output.stream;
+                break;
+            }
+        }
     }
     owned->request.output_buffers = owned->outputs.data();
     if (request->input_buffer) {
@@ -8372,7 +8795,7 @@ int32_t QCamera3HardwareInterface::waitForAsyncResult(uint32_t frameworkFrame)
     if (request == mAcceptedRequests.end() ||
             (!request->second->deferFinalMetadata && !oppoSuperZoom(request->second->settings)))
         return NO_ERROR;
-    const bool completed = mAsyncCondition.wait_for(lock, std::chrono::seconds(30), [&] {
+    const bool completed = mAsyncCondition.wait_for(lock, std::chrono::nanoseconds(request->second->captureWaitNs), [&] {
         const auto owned = mAcceptedRequests.find(frameworkFrame);
         return mAsyncCancelled.load() || owned == mAcceptedRequests.end() || owned->second->settled();
     });
@@ -8426,6 +8849,7 @@ void QCamera3HardwareInterface::pauseAsyncRequests()
         mAsyncCancelled.store(true);
         mAsyncCondition.notify_all();
     }
+    mRealtimeSourceCondition.notify_all();
     pthread_mutex_lock(&mMutex);
     pthread_cond_broadcast(&mRequestCond);
     pthread_cond_broadcast(&mHdrRequestCond);
@@ -8593,6 +9017,66 @@ int32_t QCamera3HardwareInterface::orchestrateLowLightCapture(
         camera3_capture_request_t *request)
 {
     return orchestrateBurstCapture(request, true);
+}
+
+int32_t QCamera3HardwareInterface::orchestrateHighResolutionCapture(
+        camera3_capture_request_t *request)
+{
+    if (!mPictureChannel) return BAD_VALUE;
+    CameraMetadata original;
+    if (request->settings) original = request->settings;
+    else original = mLastFrameworkSettings;
+    constexpr unsigned count = 5;
+    uint32_t ids[count], group[count];
+    for (unsigned i = 0; i + 1 < count; ++i)
+        _orchestrationDb.generateStoreInternalFrameNumber(ids[i]);
+    _orchestrationDb.allocStoreInternalFrameNumber(request->frame_number, ids[count - 1]);
+    group[0] = ids[count - 1];
+    for (unsigned i = 1; i < count; ++i) group[i] = ids[i - 1];
+    int32_t rc = mPictureChannel->beginHighResolutionCapture(group, group[0]);
+    if (rc != NO_ERROR) return rc;
+    deferAsyncFinalMetadata(request->frame_number);
+    struct SubmissionScope {
+        uint32_t &slot;
+        SubmissionScope(uint32_t &value, uint32_t frame) : slot(value) { slot = frame; }
+        ~SubmissionScope() { slot = UINT32_MAX; }
+    } submissionScope(mSubmittingBurstFrameNumber, group[0]);
+    InternalRequest internal = {};
+    internal.need_metadata = true;
+    internal.stream = request->output_buffers[0].stream;
+    const uint8_t idle = 0, disabled = 0, locked = 1;
+    const auto &active = gCamCapability[mCameraId]->active_array_size;
+    const int32_t crop[4] = {active.left, active.top, active.width, active.height};
+    for (unsigned i = 0; i < count; ++i) {
+        if (mAsyncCancelled.load()) { rc = -ECANCELED; break; }
+        rc = mPictureChannel->waitForSnapshotBuffer(&mAsyncCancelled,
+                3000000000LL + oppoManualCaptureDurationNs(original, gCamCapability[mCameraId]));
+        if (rc != NO_ERROR) break;
+        CameraMetadata settings = original;
+        const auto ae = settings.find(ANDROID_CONTROL_AE_MODE);
+        if (!ae.count || ae.data.u8[0] != ANDROID_CONTROL_AE_MODE_OFF)
+            settings.update(ANDROID_CONTROL_AE_LOCK, &locked, 1);
+        settings.update(ANDROID_CONTROL_AWB_LOCK, &locked, 1);
+        settings.update(ANDROID_CONTROL_ENABLE_ZSL, &disabled, 1);
+        settings.update(ANDROID_SCALER_CROP_REGION, crop, 4);
+        if (i + 1 < count) {
+            settings.update(ANDROID_CONTROL_AF_TRIGGER, &idle, 1);
+            settings.update(ANDROID_CONTROL_AE_PRECAPTURE_TRIGGER, &idle, 1);
+        }
+        camera3_capture_request_t frame = *request;
+        frame.frame_number = ids[i];
+        frame.settings = settings.getAndLock();
+        List<InternalRequest> streams;
+        if (i + 1 < count) { frame.num_output_buffers = 0; streams.push_back(internal); }
+        rc = processCaptureRequest(&frame, streams);
+        settings.unlock(frame.settings);
+        if (rc != NO_ERROR) break;
+    }
+    if (rc != NO_ERROR) {
+        mPictureChannel->cancelHdrCapture(group[0]);
+        mRestoreFrameworkSettings = true;
+    }
+    return rc;
 }
 
 int32_t QCamera3HardwareInterface::orchestrateStillCapture(
@@ -8923,7 +9407,9 @@ void QCamera3HardwareInterface::orchestrateResult(
                 }
                 result->num_output_buffers = newBuffers.size();
                 result->output_buffers = newBuffers.data();
-                if (it->second->deferFinalMetadata || oppoSuperZoom(it->second->settings)) {
+                if (it->second->deferFinalMetadata || it->second->mmsOutput ||
+                        it->second->realtimeOutput || it->second->previewBokehOutput ||
+                        oppoSuperZoom(it->second->settings)) {
                     auto &owned = *it->second;
                     if (owned.metadataDone) owned.deferredMetadata.clear();
                     if (result->result && result->partial_result >= PARTIAL_RESULT_COUNT) {
@@ -8932,12 +9418,51 @@ void QCamera3HardwareInterface::orchestrateResult(
                         result->partial_result = 0;
                     }
                     bool jpegReturned = false;
+                    bool mmsReturned = false;
+                    bool realtimeReturned = false;
+                    bool previewBokehReturned = false;
                     for (size_t i = 0; i < owned.outputs.size(); ++i)
                         jpegReturned |= owned.outputs[i].stream->format == HAL_PIXEL_FORMAT_BLOB && owned.returned[i];
+                    for (size_t i = 0; i < owned.outputs.size(); ++i)
+                        mmsReturned |= owned.outputs[i].stream == owned.mmsOutput && owned.returned[i];
                     for (const auto &buffer : newBuffers)
                         jpegReturned |= buffer.stream->format == HAL_PIXEL_FORMAT_BLOB;
-                    if (jpegReturned && !owned.deferredMetadata.isEmpty()) {
+                    for (const auto &buffer : newBuffers)
+                        mmsReturned |= buffer.stream == owned.mmsOutput;
+                    for (size_t i = 0; i < owned.outputs.size(); ++i)
+                        realtimeReturned |= owned.outputs[i].stream == owned.realtimeOutput && owned.returned[i];
+                    for (const auto &buffer : newBuffers)
+                        realtimeReturned |= buffer.stream == owned.realtimeOutput;
+                    for (size_t i = 0; i < owned.outputs.size(); ++i)
+                        previewBokehReturned |= owned.outputs[i].stream == owned.previewBokehOutput && owned.returned[i];
+                    for (const auto &buffer : newBuffers)
+                        previewBokehReturned |= buffer.stream == owned.previewBokehOutput;
+                    const bool needsJpeg = owned.deferFinalMetadata || oppoSuperZoom(owned.settings);
+                    const bool selectedReturned = (!needsJpeg || jpegReturned) &&
+                            (!owned.mmsOutput || mmsReturned) &&
+                            (!owned.realtimeOutput || realtimeReturned) &&
+                            (!owned.previewBokehOutput || previewBokehReturned);
+                    if (selectedReturned && !owned.deferredMetadata.isEmpty()) {
                         completedMetadata = owned.deferredMetadata;
+                        if (owned.mmsOutput) {
+                            auto *mms = static_cast<QCamera3MmsChannel *>(owned.mmsOutput->priv);
+                            QCamera3MmsChannel::VstabDiagnostics diagnostics;
+                            const bool available = mms && mms->getVstabDiagnostics(internalFrameNumber, diagnostics);
+                            const CameraMetadata &settings = owned.settings;
+                            const auto requested = settings.find(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE);
+                            const uint8_t applied = available && diagnostics.path > 0 && diagnostics.reason == 0 &&
+                                    requested.count == 1 && requested.data.u8[0] == ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_ON ?
+                                    ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_ON : ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF;
+                            completedMetadata.update(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE, &applied, 1);
+                            if (available) {
+                                completedMetadata.update(QCAMERA3_DIAGNOSTICS_VSTAB_PATH, &diagnostics.path, 1);
+                                completedMetadata.update(QCAMERA3_DIAGNOSTICS_VSTAB_REASON, &diagnostics.reason, 1);
+                                completedMetadata.update(QCAMERA3_DIAGNOSTICS_VSTAB_CORE_STATUS, &diagnostics.coreStatus, 1);
+                                completedMetadata.update(QCAMERA3_DIAGNOSTICS_VSTAB_GYRO_COUNT, &diagnostics.gyroCount, 1);
+                                completedMetadata.update(QCAMERA3_DIAGNOSTICS_VSTAB_RENDERER, &diagnostics.renderer, 1);
+                                completedMetadata.update(QCAMERA3_DIAGNOSTICS_VSTAB_GPU_STATUS, &diagnostics.gpuStatus, 1);
+                            }
+                        }
                         int32_t records[QCamera3AlgoTrace::kMaxStages * 4] = {};
                         int32_t count = 0, applied = 0;
                         if (getNativeStageRecords(internalFrameNumber, records,
@@ -9832,6 +10357,12 @@ int QCamera3HardwareInterface::processCaptureRequest(
     cam_is_type_t is_type = IS_TYPE_NONE;
 
     if (mState == CONFIGURED) {
+        rc = preparePreviewBokehRequest(request);
+        if (rc != NO_ERROR) {
+            pthread_mutex_unlock(&mMutex);
+            goto error_exit;
+        }
+        is_aux_configured = mStreamConfigInfo[CONFIG_INDEX_AUX].num_streams > 0;
         if (!mSensorVideoHdrChosen) {
             mSensorVideoHdrMode = oppoRequestedVideoHdr(meta);
             mSensorVideoHdrChosen = true;
@@ -10377,6 +10908,17 @@ int QCamera3HardwareInterface::processCaptureRequest(
             setDCDeferCamera(CAM_DEFER_START);
         }
 
+        if (auto *preview = findPreviewBokehChannel()) {
+            const QCamera3DualCapture::Rect crops[2] = {
+                mPairedProfile.sensors[0].capture.referenceCrop,
+                mPairedProfile.sensors[1].capture.referenceCrop};
+            rc = preview->bindPreviewBokehGeometry(crops);
+            if (rc != NO_ERROR) {
+                pthread_mutex_unlock(&mMutex);
+                goto error_exit;
+            }
+        }
+
         //First initialize all streams
         for (List<stream_info_t *>::iterator it = mStreamInfo.begin();
             it != mStreamInfo.end(); it++) {
@@ -10731,6 +11273,16 @@ no_error:
         m_bStopPicChannel = false;
     }
     mNativeDualBindStatus = NO_ERROR;
+    // Snapshot streams now have their actual sensor dimensions. Bind the burst
+    // before its first qbuf; pre-configure dimensions are not calibrated geometry.
+    if (mDualBurstPending) {
+        rc = beginVerifiedDualRequest(mDualBurstFrameIds[0], meta, mDualBurstFrameIds, 3);
+        if (rc != NO_ERROR) {
+            pthread_mutex_unlock(&mMutex);
+            return rc;
+        }
+        mDualBurstPending = false;
+    }
     // Paired capture is an explicit extension: only stillMode=DUAL_BOKEH binds the
     // auxiliary sensor. A plain JPEG request keeps the main-sensor single capture.
     if (isVerifiedPairedSession() && !m_bIsVideo &&
@@ -10739,7 +11291,8 @@ no_error:
             if (request->output_buffers[i].stream->format == HAL_PIXEL_FORMAT_BLOB) {
                 const auto strength = meta.find(QCAMERA3_NATIVE_ALGORITHM_BEAUTY_STRENGTH);
                 if (strength.count == 1 && strength.data.i32[0] == 0) break;
-                rc = beginVerifiedDualRequest(frameNumber, meta);
+                rc = mPictureChannel->isDualCaptureFrame(frameNumber) ? NO_ERROR :
+                        beginVerifiedDualRequest(frameNumber, meta);
                 if (rc != NO_ERROR) {
                     LOGW("Dual input binding failed for frame %u: %d; using main JPEG", frameNumber, rc);
                     const int32_t bindStatus = rc;
@@ -10777,6 +11330,14 @@ no_error:
         }
     }
 
+    const auto previewBokehControl = meta.find(QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH);
+    const int32_t previewBokehStrength = previewBokehControl.count == 1 ? previewBokehControl.data.i32[0] : 0;
+    QCamera3RegularChannel *previewBokehChannel = findPreviewBokehChannel();
+    if (previewBokehStrength && (!previewBokehChannel || !mSessionPreviewBokehStrength || request->input_buffer)) {
+        pthread_mutex_unlock(&mMutex);
+        return -ENOTSUP;
+    }
+
     // Acquire all request buffers first
     streamsArray.num_streams = 0;
     streamsArraySlave.num_streams = 0;
@@ -10796,6 +11357,49 @@ no_error:
         if (channel == NULL) {
             ALOGE("%s: invalid channel pointer for stream", __func__);
             continue;
+        }
+
+        if (channel == previewBokehChannel) {
+            const auto &active = mPairedProfile.sensors[0].capture.activeArrayCrop;
+            int32_t x = active.left + active.width / 2, y = active.top + active.height / 2;
+            int32_t weight = 0;
+            const auto regions = meta.find(ANDROID_CONTROL_AF_REGIONS);
+            for (size_t p = 0; p + 4 < regions.count; p += 5) {
+                const int32_t *region = regions.data.i32 + p;
+                if (region[4] <= weight || region[2] <= region[0] || region[3] <= region[1]) continue;
+                x = (int64_t(region[0]) + region[2]) / 2;
+                y = (int64_t(region[1]) + region[3]) / 2;
+                weight = region[4];
+            }
+            int32_t imageX, imageY;
+            if (!QCamera3DualCapture::mapFocus(active, output.stream->width, output.stream->height,
+                    x, y, imageX, imageY)) {
+                pthread_mutex_unlock(&mMutex);
+                return BAD_VALUE;
+            }
+            float ratio = 1.0f;
+            const auto framing = meta.find(QCAMERA3_NATIVE_ALGORITHM_PORTRAIT_FRAMING);
+            if (framing.count == 1 && framing.data.i32[0] == 0) {
+                const auto *cap = gCamCapability[mCameraId];
+                const float halfRadians = float(M_PI) / 360.0f;
+                ratio = tanf(fmaxf(cap->aux_cam_cap->hor_view_angle, cap->aux_cam_cap->ver_view_angle) * halfRadians) /
+                        tanf(fmaxf(cap->main_cam_cap->hor_view_angle, cap->main_cam_cap->ver_view_angle) * halfRadians);
+            }
+            rc = previewBokehChannel->setPreviewBokehRequest(frameNumber, previewBokehStrength,
+                    imageX, imageY, ratio);
+            if (rc != NO_ERROR) {
+                pthread_mutex_unlock(&mMutex);
+                return rc;
+            }
+            if (previewBokehStrength) {
+                if (streamsArraySlave.num_streams >= MAX_NUM_STREAMS) {
+                    pthread_mutex_unlock(&mMutex);
+                    return -ENOSPC;
+                }
+                auto &source = streamsArraySlave.stream_request[streamsArraySlave.num_streams++];
+                source.streamID = previewBokehChannel->previewBokehAuxStreamId();
+                source.buf_index = CAM_FREERUN_IDX;
+            }
         }
 
         if(IS_MULTI_CAMERA && is_requested_on_aux)
@@ -15106,6 +15710,9 @@ size_t QCamera3HardwareInterface::calcMaxJpegSize(uint32_t camera_id)
     }
 
     max_jpeg_size = max_jpeg_size * 3/2 + sizeof(camera3_jpeg_blob_t);
+    if (oppoHighResolutionSupported(gCamCapability[camera_id]))
+        max_jpeg_size = std::max(max_jpeg_size,
+                size_t(9216) * 6912 * 3 / 2 + sizeof(camera3_jpeg_blob_t));
 
     if(is_dual_camera_by_idx(camera_id))
     {
@@ -15500,6 +16107,8 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
     // validation) and executed as OFF; EIS2/MMS remain explicit A/B candidates.
     Vector<uint8_t> availableVstabModes;
     availableVstabModes.add(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF);
+    if (oppoMmsVstabSupported(gCamCapability[cameraId]))
+        availableVstabModes.add(ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_ON);
     staticInfo.update(ANDROID_CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES,
                       availableVstabModes.array(), availableVstabModes.size());
 
@@ -15668,6 +16277,9 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
         }
     }
 
+    if (oppoHighResolutionSupported(gCamCapability[cameraId]))
+        addStreamConfig(available_stream_configs, HAL_PIXEL_FORMAT_BLOB, {9216, 6912},
+                ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT);
     staticInfo.update(ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
                       available_stream_configs.array(), available_stream_configs.size());
     static const uint8_t hotpixelMode = ANDROID_HOT_PIXEL_MODE_FAST;
@@ -15723,6 +16335,12 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
             break;
             }
         }
+    }
+    if (oppoHighResolutionSupported(gCamCapability[cameraId])) {
+        available_min_durations.add(HAL_PIXEL_FORMAT_BLOB);
+        available_min_durations.add(9216);
+        available_min_durations.add(6912);
+        available_min_durations.add(5 * oppoMinDurationFor(gCamCapability[cameraId], {4608, 3456}));
     }
     staticInfo.update(ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
                       available_min_durations.array(), available_min_durations.size());
@@ -15978,12 +16596,6 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
     if (CAM_SENSOR_YUV != gCamCapability[cameraId]->sensor_type.sens_type) {
         available_capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_RAW);
     }
-#ifdef USE_HAL_3_5
-    if(is_dual_camera_by_idx(cameraId))
-    {
-        available_capabilities.add(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA);
-    }
-#endif //USE_HAL_3_5
     staticInfo.update(ANDROID_REQUEST_AVAILABLE_CAPABILITIES,
             available_capabilities.array(),
             available_capabilities.size());
@@ -16317,6 +16929,12 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
             }
         }
     }
+    if (oppoHighResolutionSupported(gCamCapability[cameraId])) {
+        available_stall_durations.add(HAL_PIXEL_FORMAT_BLOB);
+        available_stall_durations.add(9216);
+        available_stall_durations.add(6912);
+        available_stall_durations.add(5000000000LL);
+    }
     staticInfo.update(ANDROID_SCALER_AVAILABLE_STALL_DURATIONS,
                       available_stall_durations.array(),
                       available_stall_durations.size());
@@ -16546,29 +17164,7 @@ int QCamera3HardwareInterface::initStaticMetadata(uint32_t cameraId)
     staticInfo.update(QCAMERA3_MANUAL_WB_GAINS_RANGE,
             wb_gains_range, 2);
 
-#ifdef USE_HAL_3_5
-    if(is_dual_camera_by_idx(cameraId))
-    {
-        uint8_t physical_camera_ids[4];
-        memset(physical_camera_ids, 0, sizeof(physical_camera_ids));
-        physical_camera_ids[0] = convertIdToUTF8(get_main_camera_idx(cameraId));
-        physical_camera_ids[2] = convertIdToUTF8(get_aux_camera_idx(cameraId));
-        staticInfo.update(ANDROID_LOGICAL_MULTI_CAMERA_PHYSICAL_IDS,
-                                  (uint8_t *)physical_camera_ids, 4);
-        int sync_type = ANDROID_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE_CALIBRATED;
-        staticInfo.update(ANDROID_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE, &sync_type, 1);
-    }
-#endif //USE_HAL_3_5
-    staticInfo.update(ANDROID_REQUEST_AVAILABLE_PHYSICAL_CAMERA_REQUEST_KEYS,
-            available_request_keys.array(), available_request_keys.size());
-    bool logicalCamera = false;
-    {
-        QCamera3LogicalMultiCam::Plan logicalPlan;
-        if (oppoLogicalPlanForBackend(cameraId, logicalPlan))
-            logicalCamera = oppoPublishLogicalMetadata(staticInfo, logicalPlan);
-    }
-    applyOppoBasicMetadataPolicy(staticInfo, gCamCapability[cameraId], cameraId,
-            logicalCamera);
+    applyOppoBasicMetadataPolicy(staticInfo, gCamCapability[cameraId], cameraId);
     gStaticMetadata[cameraId] = staticInfo.release();
     return rc;
 }
@@ -16931,13 +17527,7 @@ int QCamera3HardwareInterface::getCamInfo(uint32_t cameraId,
 
 
     info->orientation = (int)gCamCapability[cameraId]->sensor_mount_angle;
-#ifdef USE_HAL_3_5
     info->device_version = CAMERA_DEVICE_API_VERSION_3_5;
-#elif USE_HAL_3_3
-    info->device_version = CAMERA_DEVICE_API_VERSION_3_4;
-#else
-    info->device_version = CAMERA_DEVICE_API_VERSION_3_3;
-#endif
     info->static_camera_characteristics = gStaticMetadata[cameraId];
 
     // Shared flash requires exclusive camera sessions.
@@ -17433,6 +18023,10 @@ int QCamera3HardwareInterface::setFrameParameters(
         mNativeSceneStrength = scene.count == 1 ? scene.data.i32[0] :
                 (mNativeStillMode == OPPO_NATIVE_SCENE ? 35 : 0);
         mNativeStages = native_stage_request_t();
+        const auto processing = controls.find(QCAMERA3_NATIVE_ALGORITHM_PROCESSING_ENABLE);
+        mNativeStages.processing_enable = processing.count == 1 ? processing.data.i32[0] : 0;
+        const auto framing = controls.find(QCAMERA3_NATIVE_ALGORITHM_PORTRAIT_FRAMING);
+        mNativeStages.portrait_framing = framing.count == 1 ? framing.data.i32[0] : 0;
         const camera_metadata_entry_t autoHdr =
                 controls.find(QCAMERA3_NATIVE_ALGORITHM_AUTO_HDR_ENABLE);
         const camera_metadata_entry_t autoNight =
@@ -17528,6 +18122,26 @@ int QCamera3HardwareInterface::setFrameParameters(
         const auto &geometry = mPairedProfile.sensors[aux ? 1 : 0].capture;
         const auto &measured = geometry.referenceCrop;
         cam_crop_region_t crop = {measured.left, measured.top, measured.width, measured.height};
+        CameraMetadata previewSettings;
+        if (settings) previewSettings = settings;
+        const auto previewBokeh = previewSettings.find(QCAMERA3_NATIVE_ALGORITHM_PREVIEW_BOKEH_STRENGTH);
+        if (!aux && !blob_request && !(previewBokeh.count == 1 && previewBokeh.data.i32[0] > 0)) {
+            CameraMetadata framingSettings;
+            if (settings) framingSettings = settings;
+            const auto framing = framingSettings.find(QCAMERA3_NATIVE_ALGORITHM_PORTRAIT_FRAMING);
+            if (framing.count == 1) {
+                const cam_capability_t *cap = gCamCapability[mCameraId];
+                QCamera3DualCapture::Config config = {};
+                config.wideMaxFov = fmaxf(cap->main_cam_cap->hor_view_angle, cap->main_cam_cap->ver_view_angle);
+                config.teleMaxFov = fmaxf(cap->aux_cam_cap->hor_view_angle, cap->aux_cam_cap->ver_view_angle);
+                QCamera3DualCapture::Rect relative;
+                if (!QCamera3DualCapture::framingCrop(config,
+                        static_cast<QCamera3DualCapture::PortraitFraming>(framing.data.i32[0]),
+                        measured.width, measured.height, relative)) return BAD_VALUE;
+                crop = {measured.left + relative.left, measured.top + relative.top,
+                        relative.width, relative.height};
+            }
+        }
         if (ADD_SET_PARAM_ENTRY_TO_BATCH(mParameters, CAM_INTF_META_SCALER_CROP_REGION, crop))
             return BAD_VALUE;
         if (aux) {
@@ -22025,6 +22639,26 @@ int32_t QCamera3HardwareInterface::handlePanoramaRequest(const camera_metadata_t
         config.panorama.directionDeg = QCamera3OppoPanorama::DIR_AUTO;
         config.panorama.crop = true;
         config.panorama.maxFrames = 12;
+        if (gCamCapability[mCameraId]->position == CAM_POSITION_FRONT) {
+            config.backend = QCamera3PanoramaWorker::Backend::FrontVisidon;
+            config.focalPx = int32_t(lroundf(oppoFocalLengthPx(
+                    gCamCapability[mCameraId], config.panorama.previewWidth)));
+        } else {
+            config.useGyro = true;
+            config.sensorMountAngle = gCamCapability[mCameraId]->sensor_mount_angle;
+            config.panorama.verticalSweep = config.panorama.orientationDeg == 90 ||
+                    config.panorama.orientationDeg == 270;
+            config.panorama.centerCanvas = true;
+            config.panorama.preserveCropSize = true;
+            config.panorama.canvasWidth = config.panorama.previewWidth *
+                    (config.panorama.verticalSweep ? 1 : 3);
+            config.panorama.canvasHeight = config.panorama.previewHeight *
+                    (config.panorama.verticalSweep ? 3 : 1);
+            config.panorama.outputWidth = config.panorama.canvasWidth;
+            config.panorama.outputHeight = config.panorama.canvasHeight;
+            config.panorama.pxPerDeg = oppoFocalLengthPx(gCamCapability[mCameraId],
+                    config.panorama.previewWidth) * float(M_PI / 180.0);
+        }
         if (!mPanorama) mPanorama = std::make_shared<QCamera3PanoramaWorker>();
         const int32_t rc = mPanorama->start(config);
         if (rc == QCamera3PanoramaWorker::OK) {
@@ -22073,6 +22707,8 @@ int32_t QCamera3HardwareInterface::capturePanorama(camera3_capture_request_t *re
         QCamera3PanoramaWorker::Result failed;
         failed.requestFrame = request->frame_number;
         failed.status = rc;
+        failed.failureReason = panorama->stats().failureReason;
+        if (failed.failureReason == 0) failed.failureReason = 13;
         finishPanorama(std::move(failed));
     }
     // Keep later native shutters behind this long capture while the public entry
@@ -22105,7 +22741,7 @@ void QCamera3HardwareInterface::finishPanorama(QCamera3PanoramaWorker::Result re
         mPanoramaFrameCount = result.sources.size();
     }
     pthread_mutex_lock(&mMutex);
-    bool success = result.status == QCamera3PanoramaWorker::OK && source &&
+    bool success = !mAsyncCancelled.load() && result.status == QCamera3PanoramaWorker::OK && source &&
             !result.jpeg.empty() && result.jpeg.size() <= output->capacity - sizeof(camera3_jpeg_blob_t);
     if (success) {
         QCamera3PanoramaJpeg::Metadata exif;
@@ -22130,8 +22766,8 @@ void QCamera3HardwareInterface::finishPanorama(QCamera3PanoramaWorker::Result re
     }
     {
         Mutex::Autolock lock(mPanoramaLock);
-        mPanoramaFailureReason = success ? 0 :
-                result.status == QCamera3OppoPanorama::E_CANCELED ? 12 : 13;
+        mPanoramaFailureReason = mAsyncCancelled.load() ? 12 : success ? 0 :
+                (result.failureReason == 0 ? 13 : result.failureReason);
     }
     camera3_capture_result_t completed = {};
     completed.frame_number = result.requestFrame;
@@ -22165,8 +22801,10 @@ void QCamera3HardwareInterface::finishPanorama(QCamera3PanoramaWorker::Result re
         CameraMetadata panoramaResult;
         panoramaResult.acquire(const_cast<camera_metadata_t *>(completed.result));
         const int32_t state = 3;
+        const int32_t applied = 21;
         const int32_t orientation = 0;
         panoramaResult.update(QCAMERA3_NATIVE_ALGORITHM_PANORAMA_STATE, &state, 1);
+        panoramaResult.update(QCAMERA3_NATIVE_ALGORITHM_APPLIED_NATIVE_MODE, &applied, 1);
         panoramaResult.update(ANDROID_JPEG_ORIENTATION, &orientation, 1);
         completed.result = panoramaResult.release();
     } else notifyError(result.requestFrame, CAMERA3_MSG_ERROR_REQUEST);
@@ -22218,7 +22856,12 @@ void QCamera3HardwareInterface::updatePanoramaMetadata(CameraMetadata &metadata)
 {
     if (!panoramaSupported(mCameraId)) return;
     Mutex::Autolock lock(mPanoramaLock);
-    if (mPanorama) mPanoramaFrameCount = mPanorama->stats().acceptedFrames;
+    if (mPanorama) {
+        const auto stats = mPanorama->stats();
+        mPanoramaFrameCount = stats.acceptedFrames;
+        if (stats.state == QCamera3PanoramaWorker::State::Failed)
+            mPanoramaFailureReason = stats.failureReason;
+    }
     const int32_t state = mPanoramaFailureReason != 0 ? 4 :
             mPanoramaOutput ? 2 : mPanoramaActive ? 1 : 0;
     const int32_t count = mPanoramaFrameCount;

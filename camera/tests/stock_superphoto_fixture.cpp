@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 // ABI/call-sequence fixture. It does not implement VDSuperPhoto reconstruction.
 #include "stock_superphoto_fixture.h"
+#include <atomic>
 #include <errno.h>
 #include <stddef.h>
 #include <string.h>
@@ -37,14 +38,14 @@ extern "C" int32_t VDInitializeSuperPhotoWithCores(int32_t count, int32_t bits,
     stats.outWidth = outWidth; stats.outHeight = outHeight; stats.initZoom = zoom;
     *counter = 0;
     *handle = &engine;
-    if (bits != 8 || left || top || a != -1 || b != -1 || limitWidth != width ||
-            limitHeight != height || cores != 8) return -EINVAL;
+    if (bits != 8 || left || top || a != -1 || b != -1 || limitWidth != outWidth ||
+            limitHeight != outHeight || cores != 8) return -EINVAL;
     return stats.failAt == 1 ? -EIO : 0;
 }
 extern "C" int32_t VDSuperPhoto_AddFramePlanar(uint8_t *y, uint8_t *uv, int32_t flag, void *) {
     if (stats.failAt == 2) return -EIO;
     const int32_t slot = stats.addedFrames++;
-    if (slot >= 4 || flag) return -EINVAL;
+    if (slot >= 5 || flag) return -EINVAL;
     stats.inputs[slot] = reinterpret_cast<uintptr_t>(y);
     stats.firstLuma[slot] = y[0]; stats.firstV[slot] = uv[0]; stats.firstU[slot] = uv[1];
     // Some stock stages use input as scratch; caller images must still be immutable.
@@ -62,6 +63,8 @@ extern "C" int32_t VDSuperPhoto_Process(RenderParameters parameters, void *) {
             stats.addedFrames != stats.count) return -EINVAL;
     memset(engine.y, 0xAB, size_t(stats.outWidth) * stats.outHeight);
     memset(engine.uv, 0xCD, size_t(stats.outWidth) * stats.outHeight / 2);
+    if (stats.cancelAfterProcess)
+        reinterpret_cast<std::atomic<bool> *>(stats.cancelAfterProcess)->store(true);
     return stats.failAt == 4 ? -EIO : 0;
 }
 extern "C" int32_t VDReleaseSuperPhoto(void **handle) {
@@ -69,10 +72,13 @@ extern "C" int32_t VDReleaseSuperPhoto(void **handle) {
     *handle = nullptr;
     return stats.failAt == 5 ? -EIO : 0;
 }
+#ifndef SUPERPHOTO_OMIT_OUTPUT_QUERY
 extern "C" int32_t VDSuperPhoto_GetOuputWidth(void *) {
     return stats.outWidth + (stats.failAt == 6 ? 2 : 0);
 }
 extern "C" int32_t VDSuperPhoto_GetOuputHeight(void *) { return stats.outHeight; }
+#endif
+#ifndef SUPERPHOTO_OMIT_BASE_FRAME
 extern "C" int32_t VDSuperPhoto_SetBaseFrameIndex(int32_t base, void *) {
     engine.base = base;
     stats.baseIndex = base;
@@ -81,3 +87,4 @@ extern "C" int32_t VDSuperPhoto_SetBaseFrameIndex(int32_t base, void *) {
 extern "C" int32_t VDSuperPhoto_GetBaseFrameIndex(void *) {
     return engine.base + (stats.failAt == 7 ? 1 : 0);
 }
+#endif

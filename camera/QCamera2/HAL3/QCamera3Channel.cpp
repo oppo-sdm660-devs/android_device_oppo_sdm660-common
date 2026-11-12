@@ -1152,6 +1152,24 @@ void QCamera3ProcessingChannel::streamCbRoutine(mm_camera_super_buf_t *super_fra
            return;
        }
 
+       if (stream->getMyType() == CAM_STREAM_TYPE_PREVIEW ||
+               stream->getMyType() == CAM_STREAM_TYPE_VIDEO) {
+           cam_format_t format;
+           const int32_t formatStatus = stream->getFormat(format);
+           const bool linear = formatStatus == NO_ERROR && (format == CAM_FORMAT_YUV_420_NV21 ||
+                   format == CAM_FORMAT_YUV_420_NV12 || format == CAM_FORMAT_YUV_420_NV12_VENUS);
+           const int32_t cacheStatus = IS_BUFFER_ERROR(super_frame->bufs[0]->flags) ? -EIO :
+                   linear ? mMemory.invalidateCache(frameIndex) : -ENOTSUP;
+           if (cacheStatus == NO_ERROR) {
+               processPreviewBokehFrame(uint32_t(resultFrameNumber), super_frame->bufs[0], stream);
+               hal_obj->processRealtimeFrame(uint32_t(resultFrameNumber), super_frame->bufs[0],
+                       dim, offset, format != CAM_FORMAT_YUV_420_NV21, mCamera3Stream, &mMemory);
+           } else {
+               hal_obj->noteRealtimeFailure(uint32_t(resultFrameNumber), mCamera3Stream,
+                       formatStatus != NO_ERROR ? formatStatus : cacheStatus);
+           }
+       }
+
        if(hal_obj->mStreamConfig == true) {
           switch (stream->getMyType()) {
               case CAM_STREAM_TYPE_PREVIEW:
@@ -2254,6 +2272,216 @@ bool QCamera3ProcessingChannel::isFwkInputBuffer(uint32_t resultFrameNumber)
 
 
 /* Regular Channel methods */
+namespace {
+QCamera3HdrAlgo::Image previewBokehImage(mm_camera_buf_def_t *frame, QCamera3Stream *stream) {
+    cam_dimension_t dim = {};
+    cam_frame_len_offset_t offset = {};
+    stream->getFrameDimension(dim);
+    stream->getFrameOffset(offset);
+    if (offset.num_planes != 2 || dim.width <= 0 || dim.height <= 0 ||
+            offset.mp[0].stride <= 0 || offset.mp[1].stride <= 0 ||
+            offset.mp[0].scanline <= 0 || offset.mp[1].scanline <= 0) return {};
+    return {static_cast<uint8_t *>(frame->buffer), frame->frame_len,
+        uint32_t(dim.width), uint32_t(dim.height), offset.mp[0].offset,
+        size_t(offset.mp[0].len) + offset.mp[1].offset,
+        uint32_t(offset.mp[0].stride), uint32_t(offset.mp[1].stride),
+        uint32_t(offset.mp[0].scanline), uint32_t(offset.mp[1].scanline)};
+}
+}
+
+class QCamera3PreviewBokehSource : public QCamera3Channel {
+public:
+    QCamera3PreviewBokehSource(uint32_t camera, uint32_t channel, mm_camera_ops_t *ops,
+            cam_padding_info_t *padding, void *hwi, const cam_dimension_t &size,
+            QCamera3RegularChannel *owner) : QCamera3Channel(camera, channel, ops,
+                nullptr, nullptr, padding, CAM_QCOM_FEATURE_NONE, hwi, 4),
+            mSize(size), mOwner(owner) {}
+    ~QCamera3PreviewBokehSource() override { destroy(); }
+    int32_t initialize(cam_is_type_t type) override {
+        return m_numStreams ? 0 : addStream(CAM_STREAM_TYPE_CALLBACK, CAM_FORMAT_YUV_420_NV21,
+                mSize, ROTATE_0, 4, CAM_QCOM_FEATURE_NONE, type);
+    }
+    int32_t registerBuffer(buffer_handle_t *, cam_is_type_t) override { return 0; }
+    int32_t timeoutFrame(uint32_t) override { return 0; }
+    QCamera3StreamMem *getStreamBufs(uint32_t length) override {
+        mMemory.reset(new QCamera3StreamMem(4, true, false));
+        if (mMemory->allocateAll(length) != NO_ERROR) mMemory.reset();
+        return mMemory.get();
+    }
+    void putStreamBufs() override { mMemory.reset(); }
+    void streamCbRoutine(mm_camera_super_buf_t *super, QCamera3Stream *stream) override {
+        if (!super) return;
+        for (uint32_t i = 0; i < super->num_bufs; ++i) {
+            auto *frame = super->bufs[i];
+            if (!frame) continue;
+            if (!IS_BUFFER_ERROR(frame->flags) && mMemory &&
+                    mMemory->invalidateCache(frame->buf_idx) == NO_ERROR)
+                mOwner->submitPreviewBokehAux(frame, stream);
+            stream->bufDone(frame->buf_idx);
+        }
+        free(super);
+    }
+private:
+    cam_dimension_t mSize;
+    QCamera3RegularChannel *mOwner;
+    std::unique_ptr<QCamera3StreamMem> mMemory;
+};
+
+int32_t QCamera3RegularChannel::configurePreviewBokeh(const QCamera3StockPreviewBokeh::Config &config,
+        const QCamera3DualBokehAlgo::UnitCalibration &calibration, uint32_t auxChannel,
+        const QCamera3DualCapture::Rect crops[2], int64_t timeoutNs) {
+    if (m_bIsActive || mPreviewBokehSource || mStreamType != CAM_STREAM_TYPE_PREVIEW ||
+            mAuxChannel || config.cameraHandles[0] != m_camHandle || !auxChannel ||
+            config.imageWidths[0] != mCamera3Stream->width || config.imageHeights[0] != mCamera3Stream->height)
+        return -EINVAL;
+    mPreviewBokehConfig = config;
+    mPreviewBokehCalibration = calibration;
+    mPreviewBokehTimeoutNs = timeoutNs;
+    std::copy(crops, crops + 2, mPreviewBokehSensorCrops);
+    const cam_dimension_t size = {int32_t(config.imageWidths[1]), int32_t(config.imageHeights[1])};
+    mPreviewBokehSource = new QCamera3PreviewBokehSource(config.cameraHandles[1], auxChannel,
+            m_camOps, &mPaddingInfo, mUserData, size, this);
+    const int32_t status = mPreviewBokehSource->initialize(IS_TYPE_NONE);
+    if (status != 0) {
+        delete mPreviewBokehSource; mPreviewBokehSource = nullptr;
+        mPreviewBokehWorker.stop();
+    }
+    return status;
+}
+
+int32_t QCamera3RegularChannel::bindPreviewBokehGeometry(const QCamera3DualCapture::Rect crops[2]) {
+    if (!mPreviewBokehSource || m_bIsActive) return -EINVAL;
+    for (unsigned i = 0; i < 2; ++i) {
+        mPreviewBokehConfig.activeWidths[i] = crops[i].width;
+        mPreviewBokehConfig.activeHeights[i] = crops[i].height;
+        mPreviewBokehSensorCrops[i] = crops[i];
+    }
+    const int32_t status = mPreviewBokehWorker.configure(mPreviewBokehConfig,
+            mPreviewBokehCalibration, mPreviewBokehTimeoutNs);
+    mPreviewBokehBound = status == NO_ERROR;
+    return status;
+}
+
+uint32_t QCamera3RegularChannel::previewBokehAuxStreamId() {
+    return mPreviewBokehSource ? mPreviewBokehSource->getStreamID(1U << CAM_STREAM_TYPE_CALLBACK) : 0;
+}
+
+int32_t QCamera3RegularChannel::setPreviewBokehRequest(uint32_t frameNumber, int32_t strength,
+        int32_t x, int32_t y, float framingRatio) {
+    if (strength < 0 || strength > 100 || !(framingRatio > 0.0f) || framingRatio > 1.0f) return -EINVAL;
+    if (strength && (!mPreviewBokehSource || x < 0 || y < 0 ||
+            uint32_t(x) >= mPreviewBokehConfig.imageWidths[0] ||
+            uint32_t(y) >= mPreviewBokehConfig.imageHeights[0])) return -ENOTSUP;
+    std::lock_guard<std::mutex> lock(mPreviewBokehLock);
+    mPreviewBokehRequests[frameNumber] = {strength, x, y, framingRatio};
+    while (mPreviewBokehRequests.size() > 32) mPreviewBokehRequests.erase(mPreviewBokehRequests.begin());
+    return 0;
+}
+
+void QCamera3RegularChannel::queueSensorMetadata(uint32_t frame, uint32_t handle,
+        const metadata_buffer_t *metadata) {
+    if (!mPreviewBokehSource || !metadata || !metadata->is_valid[CAM_INTF_META_SENSOR_TIMESTAMP] ||
+            !metadata->is_valid[CAM_INTF_META_SCALER_CROP_REGION] ||
+            !metadata->is_valid[CAM_INTF_META_CROP_DATA]) return;
+    const unsigned role = handle == mPreviewBokehConfig.cameraHandles[0] ? 0 : 1;
+    if (handle != mPreviewBokehConfig.cameraHandles[role]) return;
+    QCamera3Stream *stream = role == 0 ? mStreams[0] : mPreviewBokehSource->getStreamByIndex(0);
+    if (!stream) return;
+    const auto &crop = *POINTER_OF_META(CAM_INTF_META_SCALER_CROP_REGION, metadata);
+    const auto &expected = mPreviewBokehSensorCrops[role];
+    if (crop.left != expected.left || crop.top != expected.top ||
+            crop.width != expected.width || crop.height != expected.height) return;
+    const auto &crops = *POINTER_OF_META(CAM_INTF_META_CROP_DATA, metadata);
+    if (crops.ignore_crop || crops.num_of_streams > MAX_NUM_STREAMS) return;
+    bool matching = false;
+    for (unsigned i = 0; i < crops.num_of_streams; ++i) {
+        const auto &entry = crops.crop_info[i];
+        if (entry.stream_id != stream->getMyServerID()) continue;
+        if (matching || entry.crop.left != 0 || entry.crop.top != 0 ||
+                entry.crop.width != int32_t(mPreviewBokehConfig.imageWidths[role]) ||
+                entry.crop.height != int32_t(mPreviewBokehConfig.imageHeights[role]) ||
+                entry.roi_map.left != expected.left || entry.roi_map.top != expected.top ||
+                entry.roi_map.width != expected.width || entry.roi_map.height != expected.height) return;
+        matching = true;
+    }
+    if (matching) mPreviewBokehWorker.metadata({handle, frame,
+            *POINTER_OF_META(CAM_INTF_META_SENSOR_TIMESTAMP, metadata)});
+}
+
+void QCamera3RegularChannel::submitPreviewBokehAux(mm_camera_buf_def_t *frame, QCamera3Stream *stream) {
+    const int64_t timestamp = int64_t(frame->ts.tv_sec) * 1000000000LL + frame->ts.tv_nsec;
+    mPreviewBokehWorker.auxiliary({mPreviewBokehConfig.cameraHandles[1], frame->frame_idx, timestamp},
+            previewBokehImage(frame, stream), false);
+}
+
+bool QCamera3RegularChannel::processPreviewBokehFrame(uint32_t frameNumber,
+        mm_camera_buf_def_t *frame, QCamera3Stream *stream) {
+    PreviewBokehRequest request = {};
+    {
+        std::lock_guard<std::mutex> lock(mPreviewBokehLock);
+        const auto found = mPreviewBokehRequests.find(frameNumber);
+        if (found == mPreviewBokehRequests.end()) return false;
+        request = found->second;
+        mPreviewBokehRequests.erase(found);
+    }
+    if (!request.strength) {
+        mPreviewBokehWorker.resetTemporalState();
+        return false;
+    }
+    const int64_t timestamp = int64_t(frame->ts.tv_sec) * 1000000000LL + frame->ts.tv_nsec;
+    const auto image = previewBokehImage(frame, stream);
+    cam_format_t format;
+    int32_t status = stream->getFormat(format);
+    QCamera3StockPreviewBokeh::Result result;
+    if (status == NO_ERROR) status = mPreviewBokehWorker.process(
+            {m_camHandle, frame->frame_idx, timestamp}, image, format != CAM_FORMAT_YUV_420_NV21,
+            image, {request.focusX, request.focusY, request.strength}, result);
+    bool framingApplied = false;
+    if (QCamera3HdrAlgo::validImage(image) && request.framingRatio < 1.0f) {
+        std::vector<uint8_t> pixels(size_t(image.width) * image.height * 3 / 2);
+        QCamera3HdrAlgo::Image source = {pixels.data(), pixels.size(), image.width, image.height,
+            0, size_t(image.width) * image.height, image.width, image.width, image.height, image.height / 2};
+        if (!QCamera3DualCapture::resize(image, source, false) ||
+                !QCamera3DualCapture::resize(source, image, true, request.framingRatio)) status = -EINVAL;
+        else framingApplied = true;
+    }
+    if (status == NO_ERROR || framingApplied) {
+        const int32_t cache = mMemory.cleanCache(frame->buf_idx);
+        if (cache != NO_ERROR) status = cache;
+    }
+    static_cast<QCamera3HardwareInterface *>(mUserData)->noteNativeStage(frameNumber, 23, status,
+            status == NO_ERROR && result.applied ? 1 : 0);
+    LOGD("preview bokeh frame=%u sources=0x%x/%u/%lld,0x%x/%u/%lld core=%d effect=%d status=%d applied=%d",
+            frameNumber, result.source.cameraHandles[0], result.source.frameNumbers[0],
+            static_cast<long long>(result.source.timestampsNs[0]), result.source.cameraHandles[1],
+            result.source.frameNumbers[1], static_cast<long long>(result.source.timestampsNs[1]),
+            result.coreStatus, result.effectStatus, status, status == NO_ERROR && result.applied);
+    return status == NO_ERROR && result.applied;
+}
+
+int32_t QCamera3RegularChannel::start() {
+    if (mPreviewBokehSource && !mPreviewBokehBound) {
+        const int32_t rc = bindPreviewBokehGeometry(mPreviewBokehSensorCrops);
+        if (rc != NO_ERROR) return rc;
+    }
+    int32_t rc = mPreviewBokehSource ? mPreviewBokehSource->start() : NO_ERROR;
+    return rc == NO_ERROR ? QCamera3ProcessingChannel::start() : rc;
+}
+int32_t QCamera3RegularChannel::stop() {
+    mPreviewBokehWorker.cancel();
+    const int32_t rc = QCamera3ProcessingChannel::stop();
+    if (mPreviewBokehSource) mPreviewBokehSource->stop();
+    mPreviewBokehWorker.stop();
+    mPreviewBokehBound = false;
+    return rc;
+}
+int32_t QCamera3RegularChannel::flush() {
+    mPreviewBokehWorker.flush();
+    std::lock_guard<std::mutex> lock(mPreviewBokehLock);
+    mPreviewBokehRequests.clear();
+    return QCamera3ProcessingChannel::flush();
+}
+
 /*===========================================================================
  * FUNCTION   : QCamera3RegularChannel
  *
@@ -2321,7 +2549,11 @@ QCamera3RegularChannel::QCamera3RegularChannel(uint32_t cam_handle,
  *==========================================================================*/
 QCamera3RegularChannel::~QCamera3RegularChannel()
 {
+    mPreviewBokehWorker.cancel();
     destroy();
+    mPreviewBokehWorker.stop();
+    delete mPreviewBokehSource;
+    mPreviewBokehSource = nullptr;
     if(NULL != mAuxChannel)
     {
         delete mAuxChannel;
@@ -5373,6 +5605,40 @@ void QCamera3PicChannel::jpegEvtHandle(jpeg_job_status_t status,
                                               mm_jpeg_output_t *p_output,
                                               void *userdata)
 {
+    auto *channel = static_cast<QCamera3PicChannel *>(userdata);
+    qcamera_hal3_jpeg_data_t *job = channel ? channel->m_postprocessor.findJpegJobByJobId(jobId) : nullptr;
+    jpegJobDone(status, job, p_output, userdata);
+}
+
+ssize_t QCamera3PicChannel::jpegOutputCapacity(uint32_t index)
+{
+    return getJpegBufferCapacity(static_cast<buffer_handle_t *>(mMemory.getBufferHandle(index)),
+            mMemory.getSize(index));
+}
+
+void QCamera3PicChannel::deliverHighResolutionJpeg(qcamera_hal3_jpeg_data_t *job,
+        const std::vector<uint8_t> &jpeg, int32_t status)
+{
+    mm_jpeg_output_t output = {};
+    if (status == NO_ERROR && job && job->jpeg_settings) {
+        const uint32_t index = job->jpeg_settings->out_buf_index;
+        const ssize_t capacity = jpegOutputCapacity(index);
+        output.buf_vaddr = static_cast<uint8_t *>(mMemory.getPtr(index));
+        if (!output.buf_vaddr || capacity < ssize_t(sizeof(camera3_jpeg_blob_t)) ||
+                jpeg.empty() || jpeg.size() > size_t(capacity) - sizeof(camera3_jpeg_blob_t)) {
+            status = -ENOSPC;
+        } else {
+            memcpy(output.buf_vaddr, jpeg.data(), jpeg.size());
+            output.buf_filled_len = jpeg.size();
+        }
+    }
+    jpegJobDone(status == NO_ERROR ? JPEG_JOB_STATUS_DONE : JPEG_JOB_STATUS_ERROR,
+            job, &output, this);
+}
+
+void QCamera3PicChannel::jpegJobDone(jpeg_job_status_t status,
+        qcamera_hal3_jpeg_data_t *job, mm_jpeg_output_t *p_output, void *userdata)
+{
     ATRACE_CAMSCOPE_CALL(CAMSCOPE_HAL3_PIC_CH_JPEG_EVT_HANDLE);
     buffer_handle_t *resultBuffer = NULL;
     buffer_handle_t *jpegBufferHandle = NULL;
@@ -5388,10 +5654,8 @@ void QCamera3PicChannel::jpegEvtHandle(jpeg_job_status_t status,
     if (obj) {
         //Construct payload for process_capture_result. Call mChannelCb
 
-        qcamera_hal3_jpeg_data_t *job = obj->m_postprocessor.findJpegJobByJobId(jobId);
-
         if ((job == NULL) || (status == JPEG_JOB_STATUS_ERROR)) {
-            LOGE("Error in jobId: (%d) with status: %d", jobId, status);
+            LOGE("Error in JPEG job (%d) with status: %d", job ? job->jobId : 0, status);
             resultStatus = CAMERA3_BUFFER_STATUS_ERROR;
         }
 
@@ -5621,12 +5885,13 @@ QCamera3PicChannel::QCamera3PicChannel(uint32_t cam_handle,
 {
     QCamera3HardwareInterface* hal_obj = (QCamera3HardwareInterface*)mUserData;
     m_max_pic_dim = hal_obj->calcMaxJpegDim();
-    mYuvWidth = stream->width;
-    mYuvHeight = stream->height;
+    mHighResolution = hal_obj->isHighResolutionOutput(stream);
+    mYuvWidth = mHighResolution ? stream->width / 2 : stream->width;
+    mYuvHeight = mHighResolution ? stream->height / 2 : stream->height;
     mStreamType = CAM_STREAM_TYPE_SNAPSHOT;
     // Use same pixelformat for 4K video case
     mStreamFormat = getStreamDefaultFormat(CAM_STREAM_TYPE_SNAPSHOT,
-            stream->width, stream->height);
+            mYuvWidth, mYuvHeight);
     setZSLMode(isZSL);
     mLiveShot = isLiveshot;
     m_bStarted = false;
@@ -6629,7 +6894,7 @@ void QCamera3PicChannel::configureMpo()
     char prop[PROPERTY_VALUE_MAX];
     property_get("persist.vendor.camera.mpo.disabled",prop,"0");
     auto *hal = static_cast<QCamera3HardwareInterface *>(mUserData);
-    m_bMpoEnabled = hal->isVerifiedPairedSession() ? FALSE : (atoi(prop)?FALSE:TRUE);
+    m_bMpoEnabled = (mHighResolution || hal->isVerifiedPairedSession()) ? FALSE : (atoi(prop)?FALSE:TRUE);
     m_postprocessor.setMpoMode(m_bMpoEnabled);
 }
 void QCamera3PicChannel::stopPostProc()
@@ -6671,9 +6936,12 @@ int32_t QCamera3PicChannel::configureDualCapture(const QCamera3DualCapture::Conf
 }
 
 int32_t QCamera3PicChannel::beginDualCapture(uint32_t frameNumber, int32_t activeFocusX,
-        int32_t activeFocusY, int32_t blurLevel)
+        int32_t activeFocusY, int32_t blurLevel, QCamera3DualCapture::PortraitFraming framing,
+        const uint32_t *wideFrameIds, unsigned wideCount)
 {
-    if (mDualOwner || !mAuxPicChannel || !QCamera3DualCapture::validConfig(mDualConfig))
+    if (mDualOwner || !mAuxPicChannel || !QCamera3DualCapture::validConfig(mDualConfig) ||
+            (wideCount != 1 && wideCount != 3) ||
+            (wideCount > 1 && (!wideFrameIds || wideFrameIds[0] != frameNumber)))
         return -ENOTSUP;
     QCamera3DualCapture::Calibration calibration = mDualCalibration;
     int32_t rc = NO_ERROR;
@@ -6685,11 +6953,12 @@ int32_t QCamera3PicChannel::beginDualCapture(uint32_t frameNumber, int32_t activ
     if (!QCamera3DualCapture::mapFocus(wide.activeArrayCrop, wide.referenceCrop.width,
             wide.referenceCrop.height, activeFocusX, activeFocusY, x, y)) return BAD_VALUE;
     QCamera3DualCapture::Request request = {{frameNumber, frameNumber},
-        wide.referenceCrop.left + x, wide.referenceCrop.top + y, blurLevel};
+        wide.referenceCrop.left + x, wide.referenceCrop.top + y, blurLevel, framing};
     uint64_t token;
     rc = mDualCapture.begin(mDualConfig, request, calibration, token);
     if (rc != NO_ERROR) return rc;
-    rc = m_postprocessor.beginDualCapture(frameNumber, token);
+    rc = wideCount > 1 ? m_postprocessor.beginDualBurst(wideFrameIds, wideCount, token) :
+            m_postprocessor.beginDualCapture(frameNumber, token);
     if (rc == NO_ERROR) rc = mAuxPicChannel->m_postprocessor.beginDualCapture(frameNumber, token);
     if (rc != NO_ERROR) {
         mDualCapture.cancel(token);
@@ -6867,7 +7136,7 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
 
     rc = setReprocConfig(reproc_cfg, pInputBuffer, metadata, mStreamFormat, dim, mNeedPPUpscale);
     if (rc != NO_ERROR) return rc;
-    if (hal_obj->isVerifiedPairedSession()) {
+    if (mHighResolution || hal_obj->isVerifiedPairedSession()) {
         // Keep each source at its calibrated FOV through CPP; the single JPEG
         // encoder does the public crop/scale after fusion.
         reproc_cfg.output_stream_dim = dim;
@@ -6914,6 +7183,8 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
     //                 mAuxPicChannel will always be Tele.
     //bIsMaster will be true if current pic channel is mMasterCam.
     const bool dualPair = isDualCaptureFrame(frameNumber);
+    const bool dualWideBurst = !mDualOwner && !dualPair &&
+            mDualCapture.hasActiveCapture() && m_postprocessor.isHdrCaptureFrame(frameNumber);
     bool bIsMaster = true;
     if(m_bDualChannel)
     {
@@ -6923,6 +7194,7 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
     //if needHALPP() is false then take snapshot from mMaster channel,
     // else request on both channels.
     if (dualPair) bIsMaster = mDualOwner == nullptr;
+    if (dualWideBurst) bIsMaster = true;
     if(dualPair || hal_obj->needHALPP() || bIsMaster)
     {
         if (!internalRequest && (!dualPair || bIsMaster)) {
@@ -7196,7 +7468,8 @@ int32_t QCamera3PicChannel::request(buffer_handle_t *buffer,
         }
     }
 
-    if (mAuxPicChannel && (dualPair || !bIsMaster || hal_obj->needHALPP()) ) {
+    if (mAuxPicChannel && !dualWideBurst &&
+            (dualPair || !bIsMaster || hal_obj->needHALPP())) {
         int AuxIndexUsed = 0;
         rc = mAuxPicChannel->request(dualPair ? nullptr : buffer, frameNumber,
                 pInputBuffer, metadata, AuxIndexUsed,
@@ -7311,11 +7584,12 @@ int32_t QCamera3PicChannel::releaseOfflineMemory(uint32_t resultFrameNumber)
     return QCamera3ProcessingChannel::releaseOfflineMemory(resultFrameNumber);
 }
 
-int32_t QCamera3PicChannel::waitForSnapshotBuffer(const std::atomic<bool> *cancelled)
+int32_t QCamera3PicChannel::waitForSnapshotBuffer(const std::atomic<bool> *cancelled,
+        int64_t timeoutNs)
 {
     // HWI calls this before processCaptureRequest without mMutex; waiting in
     // request() would block the metadata needed to recycle these buffers.
-    const nsecs_t deadline = systemTime(SYSTEM_TIME_MONOTONIC) + 3000000000LL;
+    const nsecs_t deadline = systemTime(SYSTEM_TIME_MONOTONIC) + timeoutNs;
     Mutex::Autolock lock(mFreeBuffersLock);
     for (;;) {
         if ((cancelled && cancelled->load()) || m_postprocessor.isHdrCaptureCancelled())

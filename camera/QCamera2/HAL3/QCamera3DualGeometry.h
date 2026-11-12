@@ -43,6 +43,9 @@ public:
     static int32_t bind(const Profile &, const Calibration &, const SensorInfo sensors[2],
             const uint32_t handles[2], const uint32_t widths[2], const uint32_t heights[2],
             QCamera3DualCapture::Config &);
+    // The same active-array framing used for a preview SCALER_CROP_REGION.
+    static int32_t portraitCrop(const SensorInfo sensors[2],
+            QCamera3DualCapture::PortraitFraming, const Rect &wideCrop, Rect &);
 };
 } // namespace qcamera
 #endif

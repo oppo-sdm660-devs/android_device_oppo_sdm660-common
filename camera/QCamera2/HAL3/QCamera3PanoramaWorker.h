@@ -3,10 +3,12 @@
 #define QCAMERA3_PANORAMA_WORKER_H
 
 #include "QCamera3OppoPanorama.h"
+#include "QCamera3OppoVisidonPanorama.h"
 
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -16,10 +18,16 @@ namespace qcamera {
 class QCamera3PanoramaWorker {
 public:
     enum class State { Idle, Initializing, Capturing, Finalizing, Completed, Canceled, Failed };
-    enum Status : int32_t { OK = 0, E_BUSY = -100, E_JPEG = -101 };
+    enum Status : int32_t { OK = 0, E_BUSY = -100, E_JPEG = -101, E_BACKEND = -102 };
+    enum class Backend { RearOss, FrontVisidon };
 
     struct Config {
         QCamera3OppoPanorama::Config panorama;
+        Backend backend = Backend::RearOss;
+        int32_t focalPx = 0;
+        bool useGyro = false;
+        int32_t sensorMountAngle = 0;
+        const QCamera3OppoVisidonPanorama::EngineAbi *testVisidonEngine = nullptr;
         size_t maxPendingFrames = 2; // includes the frame currently being processed
         size_t maxPendingBytes = 16u * 1024u * 1024u;
         size_t maxOutputBytes = 32u * 1024u * 1024u;
@@ -48,6 +56,7 @@ public:
         // Opaque HWI internal frame; its orchestration map owns framework identity.
         uint32_t requestFrame = 0;
         int32_t status = QCamera3OppoPanorama::E_STATE;
+        int32_t failureReason = 13;
         uint32_t width = 0;
         uint32_t height = 0;
         std::vector<Source> sources;
@@ -63,6 +72,11 @@ public:
         size_t pendingBytes = 0;
         size_t peakPendingBytes = 0;
         int32_t lastStatus = OK;
+        int32_t failureReason = 0;
+        int32_t gyroFeedStatus = 0;
+        bool gyroFeedStarted = false;
+        uint32_t gyroMatchedFrames = 0;
+        uint32_t gyroMissingFrames = 0;
     };
 
     using Completion = std::function<void(Result)>;
@@ -89,6 +103,7 @@ public:
     std::vector<Source> retainedSources() const;
 
 private:
+    struct GyroFeed;
     struct OwnedFrame {
         std::vector<uint8_t> bytes;
         Source source;
@@ -97,6 +112,8 @@ private:
     void run();
     Result finish(QCamera3OppoPanorama &panorama, uint32_t requestFrame,
             uint32_t quality, size_t maxJpegBytes);
+    Result finish(QCamera3OppoVisidonPanorama &panorama, uint32_t requestFrame,
+            uint32_t quality, size_t maxJpegBytes);
     void complete(Result result, Completion completion);
     static bool validFrame(const Frame &frame);
 
@@ -104,6 +121,7 @@ private:
     std::condition_variable wake_;
     std::condition_variable drained_;
     std::thread thread_;
+    std::unique_ptr<GyroFeed> gyroFeed_;
     Config config_;
     Stats stats_;
     std::deque<OwnedFrame> frames_;

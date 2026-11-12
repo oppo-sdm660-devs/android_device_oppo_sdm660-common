@@ -33,6 +33,7 @@
 // Camera dependencies
 #include "hardware/camera3.h"
 #include "QCamera3HALHeader.h"
+#include "QCamera3StockPicBest.h"
 #include "QCameraCmdThread.h"
 #include "QCameraQueue.h"
 #include "QCameraPerf.h"
@@ -40,6 +41,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <vector>
+#include <errno.h>
 
 extern "C" {
 #include "mm_camera_interface.h"
@@ -164,10 +167,12 @@ public:
             const metadata_buffer_t *p_metadata = NULL, uint32_t frameNumber = UINT32_MAX);
     int32_t beginHdrCapture(const uint32_t frameIds[3], uint32_t baseId, bool frontCamera);
     int32_t beginLowLightCapture(const uint32_t frameIds[5], uint32_t baseId, bool frontCamera);
+    int32_t beginHighResolutionCapture(const uint32_t frameIds[5], uint32_t baseId);
     int32_t beginStillCapture(const uint32_t frameIds[4], uint32_t baseId,
             bool frontCamera, bool enhanceDetail, bool superZoom = false);
     void abortHdrCapture();
     int32_t beginDualCapture(uint32_t frameNumber, uint64_t token);
+    int32_t beginDualBurst(const uint32_t *frameIds, unsigned count, uint64_t token);
     void notifyDualFrameReady();
     bool cancelHdrCapture(uint32_t frameNumber);
     void retireHdrFrame(uint32_t frameNumber);
@@ -236,7 +241,11 @@ private:
     static bool matchJpegSetting(void *data, void *user_data, void *match_data);
     static bool matchPPJob(void *data, void *user_data, void *match_data);
     bool isDiscardedHdrFrame(uint32_t frameNumber);
+    struct HdrCaptureState;
     bool collectHdrFrame(qcamera_hal3_pp_data_t *&job, mm_camera_super_buf_t *&frame);
+    void processHighResolutionGroup(const std::shared_ptr<HdrCaptureState> &,
+            qcamera_hal3_pp_data_t *job);
+    bool deliverHighResolutionJpeg(qcamera_hal3_jpeg_data_t *job);
     bool getHdrImage(mm_camera_super_buf_t *frame, QCamera3HdrAlgo::Image &image,
             QCamera3StreamMem *&memory);
     void discardHdrFrame(qcamera_hal3_pp_data_t *job, mm_camera_super_buf_t *frame);
@@ -247,7 +256,7 @@ private:
     int32_t beginBurstCapture(const uint32_t *frameIds, unsigned count,
             uint32_t baseId, bool frontCamera, bool lowLight,
             bool still = false, bool enhanceDetail = false, uint64_t dualToken = 0,
-            int32_t nativeMode = 0);
+            int32_t nativeMode = 0, bool highResolution = false);
     static void *dataProcessRoutine(void *data);
     qcamera_hal3_meta_pp_buffer_t * isMetaMatched(uint32_t resultFrameNumber);
     qcamera_hal3_pp_buffer_t * isFrameMatched(uint32_t resultFrameNumber);
@@ -301,11 +310,11 @@ private:
         enum Stage { COLLECTING, READY, HANDED_OFF, FAILED };
         explicit HdrCaptureState(const uint32_t *ids, unsigned imageCount,
                 bool isLowLight, bool isStill = false, bool detail = false,
-                uint64_t pairToken = 0, int32_t nativeMode = 0) :
+                uint64_t pairToken = 0, int32_t nativeMode = 0, bool isHighResolution = false) :
                 cancelled(false), stage(COLLECTING), outputPending(true),
                 count(imageCount), lowLight(isLowLight), still(isStill),
                 enhanceDetail(detail), dualToken(pairToken),
-                nativeMode(nativeMode) {
+                nativeMode(nativeMode), highResolution(isHighResolution) {
             for (unsigned i = 0; i < kMaxBurstFrames; ++i) {
                 if (i >= count) { frameIds[i] = 0; pending[i] = false; continue; }
                 frameIds[i] = ids[i];
@@ -324,6 +333,9 @@ private:
         const uint64_t dualToken;
         // Requested native still mode; 0 = the HDR/MFNR/dual path.
         const int32_t nativeMode;
+        const bool highResolution;
+        int32_t highResolutionStatus = -EINVAL;
+        std::vector<uint8_t> highResolutionJpeg;
     };
     std::shared_ptr<HdrCaptureState> mHdrCaptureState;
     // Entries persist until their PP or framework output owner arrives.
@@ -333,6 +345,7 @@ private:
     uint32_t mHdrFrameIds[kMaxBurstFrames];
     bool mHdrReceived[kMaxBurstFrames];
     QCamera3HdrAlgo::Image mHdrImages[kMaxBurstFrames];
+    QCamera3StockPicBest::Frame mPicBestFrames[kMaxBurstFrames] = {};
     double mHdrExposure[kMaxBurstFrames];
     int32_t mHdrSensitivity[kMaxBurstFrames];
     int64_t mHdrExposureTime[kMaxBurstFrames];

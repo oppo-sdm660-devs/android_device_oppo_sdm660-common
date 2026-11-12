@@ -49,6 +49,8 @@
 #include "QCamera3StockBeauty.h"
 #include "QCamera3FrontBeauty.h"
 #include "QCamera3StockSuperPhoto.h"
+#include "QCamera3PanoramaJpeg.h"
+#include "QCamera3HighResolutionJpeg.h"
 #include "QCamera3StockScene.h"
 #include "QCamera3EisSnapshot.h"
 #include "QCamera3FlashSequence.h"
@@ -68,6 +70,8 @@ extern "C" {
 #define ENABLE_MODEL_INFO_EXIF
 
 namespace qcamera {
+
+int32_t getExifDateTime(String8 &dateTime, String8 &subsecTime);
 
 static void nativeAlgorithmTrace(jpeg_settings_t *settings, const char *algorithm,
         int32_t status, uint32_t frame, uint32_t inputs,
@@ -99,6 +103,38 @@ static void nativeAlgorithmTrace(jpeg_settings_t *settings, const char *algorith
         }
     }
     LOGI("%s", settings->image_desc);
+}
+
+static int32_t processPlatformImage(const QCamera3HdrAlgo::Image &image, int32_t mode,
+        int32_t strength, bool front, int32_t iso,
+        const QCamera3OppoPlatformFaceInfo *faces = nullptr)
+{
+    const size_t yBytes = size_t(image.width) * image.height;
+    std::vector<uint8_t> pixels(yBytes * 3 / 2);
+    for (uint32_t y = 0; y < image.height; ++y)
+        memcpy(pixels.data() + size_t(y) * image.width,
+                image.data + image.yOffset + size_t(y) * image.yStride, image.width);
+    for (uint32_t y = 0; y < image.height / 2; ++y)
+        memcpy(pixels.data() + yBytes + size_t(y) * image.width,
+                image.data + image.uvOffset + size_t(y) * image.uvStride, image.width);
+    QCamera3OppoPlatformFrame frame = {};
+    frame.data = pixels.data();
+    frame.length = pixels.size();
+    frame.width = frame.stride = image.width;
+    frame.height = frame.slice = image.height;
+    frame.beautyStrength = frame.sceneStrength = strength;
+    if (faces) frame.faceInfo = *faces;
+    const int32_t status = mode == 30 ?
+            QCamera3OppoPlatformHwi::get().processImageAdjustFrame(frame, front, iso) :
+            QCamera3OppoPlatformHwi::get().processExplicitFrame(mode, frame, front);
+    if (status != NO_ERROR) return status;
+    for (uint32_t y = 0; y < image.height; ++y)
+        memcpy(image.data + image.yOffset + size_t(y) * image.yStride,
+                pixels.data() + size_t(y) * image.width, image.width);
+    for (uint32_t y = 0; y < image.height / 2; ++y)
+        memcpy(image.data + image.uvOffset + size_t(y) * image.uvStride,
+                pixels.data() + yBytes + size_t(y) * image.width, image.width);
+    return NO_ERROR;
 }
 
 static const char ExifAsciiPrefix[] =
@@ -1424,6 +1460,14 @@ int32_t QCamera3PostProcessor::beginLowLightCapture(const uint32_t frameIds[5],
     return beginBurstCapture(frameIds, 5, baseId, frontCamera, true);
 }
 
+int32_t QCamera3PostProcessor::beginHighResolutionCapture(const uint32_t frameIds[5],
+        uint32_t baseId)
+{
+    if (!m_parent->isSnapshotJpegChannel() ||
+            !static_cast<QCamera3PicChannel *>(m_parent)->isHighResolution()) return BAD_VALUE;
+    return beginBurstCapture(frameIds, 5, baseId, false, false, false, false, 0, 0, true);
+}
+
 int32_t QCamera3PostProcessor::beginStillCapture(const uint32_t frameIds[4],
         uint32_t baseId, bool frontCamera, bool enhanceDetail, bool superZoom)
 {
@@ -1437,6 +1481,13 @@ int32_t QCamera3PostProcessor::beginDualCapture(uint32_t frameNumber, uint64_t t
     return beginBurstCapture(&frameNumber, 1, frameNumber, false, false, false, false, token);
 }
 
+int32_t QCamera3PostProcessor::beginDualBurst(const uint32_t *frameIds, unsigned count,
+        uint64_t token)
+{
+    if (!token || !m_parent->dualCapture() || count != 3) return BAD_VALUE;
+    return beginBurstCapture(frameIds, count, frameIds[0], false, false, false, false, token);
+}
+
 void QCamera3PostProcessor::notifyDualFrameReady()
 {
     // Driver/metadata callbacks never enter another channel's worker or locks.
@@ -1445,16 +1496,19 @@ void QCamera3PostProcessor::notifyDualFrameReady()
 
 int32_t QCamera3PostProcessor::beginBurstCapture(const uint32_t *frameIds,
         unsigned count, uint32_t baseId, bool frontCamera, bool lowLight,
-        bool still, bool enhanceDetail, uint64_t dualToken, int32_t nativeMode)
+        bool still, bool enhanceDetail, uint64_t dualToken, int32_t nativeMode, bool highResolution)
 {
     if (!frameIds || frameIds[0] != baseId || (still && lowLight) ||
+            (highResolution && (still || lowLight || dualToken || frontCamera || nativeMode)) ||
             (dualToken && (still || lowLight)) ||
-            count != (dualToken ? 1U : still ? 4U : lowLight ? 5U : 3U))
+            (dualToken ? (count != 1 && count != 3) :
+             count != (highResolution ? 5U : still ? 4U : lowLight ? 5U : 3U)))
             return BAD_VALUE;
     for (unsigned i = 0; i < count; ++i)
         for (unsigned j = 0; j < i; ++j)
             if (frameIds[i] == frameIds[j]) return BAD_VALUE;
-    if (!(dualToken ? m_parent->dualCapture() != nullptr :
+    if (!(highResolution ? QCamera3StockSuperPhoto::isHighResolutionAvailable() :
+            dualToken ? m_parent->dualCapture() != nullptr :
             still ? (nativeMode == OPPO_NATIVE_SUPERZOOM ? QCamera3StockSuperPhoto::is2xAvailable() :
                     QCamera3StillAlgo::isAvailable()) :
             lowLight ? QCamera3LowLightHdrAlgo::isAvailable() :
@@ -1491,11 +1545,12 @@ int32_t QCamera3PostProcessor::beginBurstCapture(const uint32_t *frameIds,
     memset(mHdrDrcValid, 0, sizeof(mHdrDrcValid));
     memset(mHdrTimestamps, 0, sizeof(mHdrTimestamps));
     memset(mHdrImages, 0, sizeof(mHdrImages));
+    memset(mPicBestFrames, 0, sizeof(mPicBestFrames));
     mHdrBaseJob = NULL;
     mHdrBaseFrame = NULL;
     mHdrFrontCamera = frontCamera;
     const auto state = std::make_shared<HdrCaptureState>(frameIds, count, lowLight,
-            still, enhanceDetail, dualToken, nativeMode);
+            still, enhanceDetail, dualToken, nativeMode, highResolution);
     if (dualToken && m_parent->dualPostprocessor() != this) state->outputPending = false;
     for (unsigned i = 0; i < count; ++i) mHdrFrameStates[frameIds[i]] = state;
     std::atomic_store(&mHdrCaptureState, state);
@@ -1800,7 +1855,7 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
             mHdrExposure[slot] = double(exposure) * sensitivity;
         mHdrSensitivity[slot] = sensitivity;
         mHdrExposureTime[slot] = exposure;
-        if (state->nativeMode == OPPO_NATIVE_SUPERZOOM) {
+        if (state->nativeMode == OPPO_NATIVE_SUPERZOOM || state->highResolution) {
             auto *hardware = static_cast<QCamera3HardwareInterface *>(m_parent->mUserData);
             mHdrFullFieldOfView[slot] = hardware && hardware->isSuperZoomFullFieldOfView(job->metadata) &&
                     job->metadata->is_valid[CAM_INTF_META_FRAME_NUMBER] &&
@@ -1814,6 +1869,46 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
         if (mHdrDrcValid[slot])
             mHdrDrcGain[slot] = job->metadata->oppo_algorithm.llhdr_drc_gain;
     }
+    if (state->dualToken && state->count > 1 && imageOk && job->metadata) {
+        auto &target = mPicBestFrames[slot];
+        target.image = mHdrImages[slot];
+        target.frameNumber = job->frameNumber;
+        target.timestampNs = mHdrTimestamps[slot];
+        const auto *metadata = job->metadata;
+        if (metadata->is_valid[CAM_INTF_META_FRAME_NUMBER] &&
+                *POINTER_OF_META(CAM_INTF_META_FRAME_NUMBER, metadata) == job->frameNumber &&
+                metadata->is_valid[CAM_INTF_META_FACE_DETECTION]) {
+            const auto &detected = *POINTER_OF_META(CAM_INTF_META_FACE_DETECTION, metadata);
+            const int32_t width = detected.fd_frame_dim.width, height = detected.fd_frame_dim.height;
+            // Without the detector's real coordinate extent, borrowing a preview
+            // face box for a snapshot would replace the wrong pixels.
+            if (detected.frame_id == job->frameNumber && width > 0 && height > 0 &&
+                    int64_t(width) * source.height == int64_t(height) * source.width &&
+                    detected.num_faces_detected <= MAX_ROI) {
+                for (unsigned i = 0; i < detected.num_faces_detected &&
+                        target.faceCount < QCamera3StockPicBest::kMaxFaces; ++i) {
+                    const auto &face = detected.faces[i];
+                    const auto &box = face.face_boundary;
+                    if (face.face_id < 0 || box.left < 0 || box.top < 0 ||
+                            box.width <= 0 || box.height <= 0 ||
+                            int64_t(box.left) + box.width > width ||
+                            int64_t(box.top) + box.height > height) continue;
+                    float roll = 0.0f;
+                    if (metadata->is_valid[CAM_INTF_META_FACE_GAZE]) {
+                        const int32_t angle = POINTER_OF_META(CAM_INTF_META_FACE_GAZE,
+                                metadata)->gaze[i].roll_dir;
+                        if (angle < -180 || angle > 179) continue;
+                        roll = float(angle);
+                    }
+                    target.faces[target.faceCount++] = {face.face_id,
+                        int32_t(int64_t(box.left) * source.width / width),
+                        int32_t(int64_t(box.top) * source.height / height),
+                        int32_t(int64_t(box.width) * source.width / width),
+                        int32_t(int64_t(box.height) * source.height / height), roll};
+                }
+            }
+        }
+    }
     if (slot == 0) {
         mHdrBaseJob = job;
         mHdrBaseFrame = frame;
@@ -1824,16 +1919,41 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
     if (state->dualToken) {
         QCamera3DualCapture *capture = m_parent->dualCapture();
         QCamera3PostProcessor *owner = m_parent->dualPostprocessor();
+        for (unsigned i = 0; i < state->count; ++i)
+            if (!mHdrReceived[i]) {
+                pthread_mutex_unlock(&mHdrCaptureLock);
+                return true;
+            }
         const bool haveBase = QCamera3HdrAlgo::validImage(mHdrImages[0]);
-        LOGI("DUALBDBG submit main=%d valid=%d image=%ux%u",
-                m_parent->dualPostprocessor() == this, haveBase ? 1 : 0,
-                haveBase ? mHdrImages[0].width : 0, haveBase ? mHdrImages[0].height : 0);
+        if (state->count > 1 && owner == this) {
+            bool sameExposure = haveBase && mHdrExposureTime[0] > 0 && mHdrSensitivity[0] > 0;
+            for (unsigned i = 1; i < state->count; ++i)
+                sameExposure &= mHdrSensitivity[i] == mHdrSensitivity[0] &&
+                        mHdrExposureTime[i] >= mHdrExposureTime[0] * 0.90 &&
+                        mHdrExposureTime[i] <= mHdrExposureTime[0] * 1.10;
+            QCamera3StillAlgo::Options denoiseOptions;
+            QCamera3StillAlgo::Result denoised;
+            const int32_t denoiseStatus = sameExposure ? QCamera3StillAlgo::process(
+                    mHdrImages, state->count, mHdrImages[0], denoiseOptions, &denoised,
+                    &state->cancelled) : -ERANGE;
+            nativeAlgorithmTrace(mHdrBaseJob ? mHdrBaseJob->jpeg_settings : nullptr,
+                    "PortraitMFNR", denoiseStatus, state->frameIds[0], state->count,
+                    static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
+                    denoiseStatus == NO_ERROR && denoised.acceptedFrames > 1 &&
+                    denoised.pixelsChanged ? 1 : 0, 26);
+            QCamera3StockPicBest::Selection fusion;
+            const int32_t status = sameExposure ? QCamera3StockPicBest::fuseNv21(
+                    mPicBestFrames, state->count, mHdrImages[0], fusion, &state->cancelled) : -ERANGE;
+            nativeAlgorithmTrace(mHdrBaseJob ? mHdrBaseJob->jpeg_settings : nullptr,
+                    "PicBestFaceFusion", status, state->frameIds[0], state->count,
+                    static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
+                    status == NO_ERROR && fusion.fusionApplied ? 1 : 0, 25);
+        }
         const int32_t rc = capture && haveBase ?
                 capture->submitImage(state->dualToken, m_parent->getMyCamHandle(),
                         state->frameIds[0], mHdrImages[0]) : -EINVAL;
         if (rc != NO_ERROR && capture) capture->cancel(state->dualToken);
         if (owner != this) {
-            // The shared collector copied the tele input; no JPEG ownership crosses.
             discardHdrFrame(mHdrBaseJob, mHdrBaseFrame);
             finishHdrGroupLocked();
         }
@@ -1848,6 +1968,14 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
         }
     job = mHdrBaseJob;
     frame = mHdrBaseFrame;
+    if (state->highResolution) {
+        processHighResolutionGroup(state, job);
+        const bool discard = state->cancelled.load();
+        if (discard) discardHdrFrame(job, frame);
+        finishHdrGroupLocked();
+        pthread_mutex_unlock(&mHdrCaptureLock);
+        return discard;
+    }
     int32_t rc = -EINVAL;
     const bool superZoom = state->nativeMode == OPPO_NATIVE_SUPERZOOM;
     const bool superPhoto = state->still && job->jpeg_settings &&
@@ -2049,6 +2177,108 @@ bool QCamera3PostProcessor::collectHdrFrame(qcamera_hal3_pp_data_t *&job,
     finishHdrGroupLocked();
     pthread_mutex_unlock(&mHdrCaptureLock);
     return discard;
+}
+
+void QCamera3PostProcessor::processHighResolutionGroup(
+        const std::shared_ptr<HdrCaptureState> &state, qcamera_hal3_pp_data_t *job)
+{
+    auto *channel = static_cast<QCamera3PicChannel *>(m_parent);
+    auto *hardware = static_cast<QCamera3HardwareInterface *>(m_parent->mUserData);
+    const char *sensor = hardware ? hardware->getOppoSensorName() : nullptr;
+    int32_t rc = -EINVAL;
+    QCamera3StockSuperPhoto::Source sources[5];
+    bool fullFieldOfView = true;
+    for (unsigned i = 0; i < state->count; ++i) {
+        sources[i] = {state->frameIds[i], mHdrTimestamps[i], mHdrExposureTime[i], mHdrSensitivity[i]};
+        fullFieldOfView &= mHdrFullFieldOfView[i];
+    }
+    const uint32_t width = channel->mCamera3Stream->width;
+    const uint32_t height = channel->mCamera3Stream->height;
+    const uint64_t bytes = uint64_t(width) * height * 3 / 2;
+    uint8_t *pixels = nullptr;
+    const ssize_t capacity = job && job->jpeg_settings ?
+            channel->jpegOutputCapacity(job->jpeg_settings->out_buf_index) : -1;
+    if (job && job->jpeg_settings && sensor && fullFieldOfView &&
+            width == mHdrImages[0].width * 2 && height == mHdrImages[0].height * 2 &&
+            width <= 16384 && height <= 16384 && bytes <= SIZE_MAX &&
+            capacity > ssize_t(sizeof(camera3_jpeg_blob_t) + 1024)) {
+        pixels = static_cast<uint8_t *>(malloc(size_t(bytes)));
+        rc = pixels ? NO_ERROR : NO_MEMORY;
+    }
+    if (rc == NO_ERROR) {
+        const QCamera3HdrAlgo::Image output = {pixels, size_t(bytes), width, height,
+            0, size_t(width) * height, width, width, height, height / 2};
+        QCamera3StockSuperPhoto::HighResolutionOptions options;
+        options.fullFieldOfView = fullFieldOfView;
+        QCamera3StockSuperPhoto::HighResolutionResult applied;
+        rc = QCamera3StockSuperPhoto::processHighResolution(mHdrImages, sources, state->count,
+                output, sensor, options, &applied, &state->cancelled);
+        if (rc == NO_ERROR && !applied.algorithmApplied) rc = -ENODATA;
+        if (rc == NO_ERROR) {
+            QCamera3HighResolutionJpeg::Options encoding;
+            auto &config = encoding.jpeg;
+            config.width = width; config.height = height;
+            config.quality = job->jpeg_settings->jpeg_quality;
+            config.orientationDeg = job->jpeg_settings->jpeg_orientation;
+            config.maxJpegBytes = size_t(capacity) - sizeof(camera3_jpeg_blob_t);
+            encoding.thumbnailWidth = job->jpeg_settings->thumbnail_size.width;
+            encoding.thumbnailHeight = job->jpeg_settings->thumbnail_size.height;
+            encoding.thumbnailQuality = job->jpeg_settings->jpeg_thumb_quality;
+            QCamera3PanoramaJpeg::Metadata metadata;
+            metadata.exposureTimeNs = sources[0].exposureTimeNs;
+            metadata.sensitivity = sources[0].sensitivity;
+            char property[PROPERTY_VALUE_MAX];
+            if (property_get("ro.product.manufacturer", property, "") > 0) metadata.make = property;
+            if (property_get("ro.product.model", property, "") > 0) metadata.model = property;
+            if (property_get("ro.build.description", property, "") > 0) metadata.software = property;
+            String8 dateTime, subsecTime;
+            if (getExifDateTime(dateTime, subsecTime) == NO_ERROR) {
+                metadata.dateTime = dateTime.c_str(); metadata.subsecTime = subsecTime.c_str();
+            }
+            IF_META_AVAILABLE(float, focal, CAM_INTF_META_LENS_FOCAL_LENGTH, job->metadata) {
+                metadata.focalLengthMm = *focal;
+            }
+            const auto &settings = *job->jpeg_settings;
+            metadata.gpsCoordinatesValid = settings.gps_coordinates_valid;
+            if (metadata.gpsCoordinatesValid)
+                memcpy(metadata.gpsCoordinates, settings.gps_coordinates, sizeof(metadata.gpsCoordinates));
+            metadata.gpsTimestampValid = settings.gps_timestamp_valid;
+            metadata.gpsTimestamp = settings.gps_timestamp;
+            metadata.gpsProcessingMethod.assign(settings.gps_processing_method,
+                    strnlen(settings.gps_processing_method, sizeof(settings.gps_processing_method)));
+            if (settings.image_desc_valid)
+                metadata.imageDescription.assign(settings.image_desc, strnlen(settings.image_desc, sizeof(settings.image_desc)));
+            if (settings.native_stages.exif_comment_length > 0)
+                metadata.userComment.assign(settings.native_stages.exif_comment,
+                        settings.native_stages.exif_comment_length);
+            rc = QCamera3HighResolutionJpeg::encode(output, encoding, metadata,
+                    state->highResolutionJpeg);
+        }
+    }
+    free(pixels);
+    if (state->cancelled.load()) rc = -ECANCELED;
+    if (rc != NO_ERROR) state->highResolutionJpeg.clear();
+    state->highResolutionStatus = rc;
+    nativeAlgorithmTrace(job ? job->jpeg_settings : nullptr, "VDSuperPhotoHighResolution",
+            rc, state->frameIds[0], state->count, hardware, rc == NO_ERROR ? 1 : 0, 24);
+    LOGI("HAL3 high-resolution output=%ux%u inputs=%u bytes=%zu status=%d",
+            width, height, state->count, state->highResolutionJpeg.size(), rc);
+}
+
+bool QCamera3PostProcessor::deliverHighResolutionJpeg(qcamera_hal3_jpeg_data_t *job)
+{
+    if (!job || !job->jpeg_settings) return false;
+    pthread_mutex_lock(&mHdrCaptureLock);
+    const auto tracked = mHdrFrameStates.find(job->jpeg_settings->frame_number);
+    const auto state = tracked == mHdrFrameStates.end() ? nullptr : tracked->second;
+    pthread_mutex_unlock(&mHdrCaptureLock);
+    if (!state || !state->highResolution) return false;
+    const int32_t status = state->cancelled.load() ? -ECANCELED : state->highResolutionStatus;
+    std::vector<uint8_t> jpeg;
+    jpeg.swap(state->highResolutionJpeg);
+    static_cast<QCamera3PicChannel *>(m_parent)->deliverHighResolutionJpeg(job,
+            jpeg, status);
+    return true;
 }
 
 bool QCamera3PostProcessor::fallbackDualCapture(uint32_t frameNumber)
@@ -3403,171 +3633,67 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
         return NO_MEMORY;
     }
 
-    if (jpeg_settings && jpeg_settings->native_still_mode == OPPO_NATIVE_REAR_BEAUTY) {
-        bool rearHandledByPlatform = false;
-        // Original HAL1 face-beauty block first (same algorithm as HAL1 rear beauty).
-        // ZSL past frames must not enter the platform algorithms.
-        if (!jpeg_settings->zsl_snapshot && QCamera3OppoPlatformHwi::configured() &&
-                QCamera3OppoPlatformHwi::runEnabled()) {
-            QCamera3OppoPlatformFaceInfo platformFaces;
-            const bool haveFaces = QCamera3OppoPlatformHwi::getFaceInfo(
-                    jpeg_settings->frame_number, platformFaces);
-            int32_t platformStatus = -EOPNOTSUPP;
-            // RE task-70: beauty does not consume the face block; it needs the
-            // beauty params that task-74 will construct. Until then fail closed.
-            if (QCamera3OppoPlatformHwi::get().beautyParamsReady(
-                    OPPO_NATIVE_REAR_BEAUTY)) {
-                QCamera3HdrAlgo::Image platformImage;
-                QCamera3StreamMem *platformMemory = nullptr;
-                if (getHdrImage(recvd_frame, platformImage, platformMemory)) {
-                    QCamera3OppoPlatformFrame platformFrame = {};
-                    platformFrame.data = platformImage.data;
-                    platformFrame.length = platformImage.length;
-                    platformFrame.width = platformImage.width;
-                    platformFrame.height = platformImage.height;
-                    platformFrame.stride = platformImage.yStride;
-                    platformFrame.slice = platformImage.yScanline;
-                    platformFrame.beautyStrength = jpeg_settings->native_beauty_strength;
-                    if (haveFaces) platformFrame.faceInfo = platformFaces;
-                    platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
-                            OPPO_NATIVE_REAR_BEAUTY, platformFrame);
-                    if (platformStatus == NO_ERROR) {
-                        platformStatus = platformMemory->cleanCache(main_frame->buf_idx);
-                        if (platformStatus != NO_ERROR) return platformStatus;
-                        rearHandledByPlatform = true;
-                    }
-                }
-            } else {
-                LOGW("beauty model path unavailable; using self-developed fallback");
-            }
-            nativeAlgorithmTrace(jpeg_settings, "FaceBeauty", platformStatus,
-                    jpeg_settings->frame_number, 1,
-                    static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
-                    rearHandledByPlatform ? 1 : 0);
+    // These are final-frame stages: HDR/low-light fusion has already completed.
+    // Strengths are captured with the request, so beauty can follow HDR without
+    // selecting a second mutually exclusive capture mode.
+    const bool frontCamera = hal_obj->isFrontCamera();
+    if (jpeg_settings && jpeg_settings->native_stages.processing_enable) {
+        QCamera3HdrAlgo::Image image;
+        QCamera3StreamMem *memory = nullptr;
+        int32_t status = -ENODATA;
+        int32_t iso = 0;
+        IF_META_AVAILABLE(int32_t, sensitivity, CAM_INTF_META_SENSOR_SENSITIVITY, metadata) {
+            iso = *sensitivity;
         }
-        if (!rearHandledByPlatform) {
-            // Self-developed stock beauty fallback; the frame is still delivered.
-            QCamera3HdrAlgo::Image image;
-            QCamera3StreamMem *memory = nullptr;
-            int32_t beautyStatus = -ENOTSUP;
-            if (getHdrImage(recvd_frame, image, memory)) {
-                QCamera3StockBeauty::Options options;
-                const int32_t strength = jpeg_settings->native_beauty_strength;
-                if (strength >= 0 && strength <= 100) {
-                    options.soften = strength;
-                    options.softenSharp = strength;
-                    options.skinBright = strength;
-                    // Style is an independent stock feature; do not derive it from strength.
-                    options.skinStyle = 0;
-                    beautyStatus = QCamera3StockBeauty::process(image, options);
-                    if (beautyStatus == NO_ERROR) {
-                        beautyStatus = memory->cleanCache(main_frame->buf_idx);
-                        if (beautyStatus != NO_ERROR) return beautyStatus;
-                    }
-                } else beautyStatus = -EINVAL;
+        if (iso > 0 && getHdrImage(recvd_frame, image, memory)) {
+            status = processPlatformImage(image, 30, 0, frontCamera, iso);
+            if (status == NO_ERROR) {
+                status = memory->cleanCache(main_frame->buf_idx);
+                if (status != NO_ERROR) return status;
             }
-            nativeAlgorithmTrace(jpeg_settings, "ARCRLP", beautyStatus,
-                    jpeg_settings->frame_number, 1,
-                    static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
-                    beautyStatus == NO_ERROR ? 1 : 0);
         }
+        nativeAlgorithmTrace(jpeg_settings, "VDImageAdjust", status,
+                jpeg_settings->frame_number, 1, hal_obj, status == NO_ERROR ? 1 : 0, 30);
     }
-    // Front beauty (explicit org.lineageos stillMode=FRONT_BEAUTY only).
-    if (jpeg_settings && jpeg_settings->native_still_mode == OPPO_NATIVE_FRONT_BEAUTY) {
-        bool frontHandled = false;
-        // Original HAL1 path first: the same face-beauty block the stock HAL1 uses.
-        if (!jpeg_settings->zsl_snapshot && QCamera3OppoPlatformHwi::configured() &&
-                QCamera3OppoPlatformHwi::runEnabled()) {
-            QCamera3OppoPlatformFaceInfo platformFaces;
-            const bool haveFaces = QCamera3OppoPlatformHwi::getFaceInfo(
-                    jpeg_settings->frame_number, platformFaces);
-            int32_t platformStatus = -EOPNOTSUPP;
-            // ArcFaceBeauty has no reversed param layout yet (task-74); fail closed.
-            if (QCamera3OppoPlatformHwi::get().beautyParamsReady(
-                    OPPO_NATIVE_FRONT_BEAUTY)) {
-                QCamera3HdrAlgo::Image platformImage;
-                QCamera3StreamMem *platformMemory = nullptr;
-                if (getHdrImage(recvd_frame, platformImage, platformMemory)) {
-                    QCamera3OppoPlatformFrame platformFrame = {};
-                    platformFrame.data = platformImage.data;
-                    platformFrame.length = platformImage.length;
-                    platformFrame.width = platformImage.width;
-                    platformFrame.height = platformImage.height;
-                    platformFrame.stride = platformImage.yStride;
-                    platformFrame.slice = platformImage.yScanline;
-                    platformFrame.beautyStrength = jpeg_settings->native_front_beauty_strength;
-                    if (haveFaces) platformFrame.faceInfo = platformFaces;
-                    platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
-                            OPPO_NATIVE_FRONT_BEAUTY, platformFrame);
-                    if (platformStatus == NO_ERROR) {
-                        platformStatus = platformMemory->cleanCache(main_frame->buf_idx);
-                        if (platformStatus != NO_ERROR) return platformStatus;
-                        frontHandled = true;
-                    }
-                }
-            } else {
-                LOGW("beauty model path unavailable; using self-developed fallback");
+    if (jpeg_settings && (jpeg_settings->native_still_mode == OPPO_NATIVE_REAR_BEAUTY ||
+            jpeg_settings->native_front_beauty_strength > 0)) {
+        const bool frontBeauty = jpeg_settings->native_front_beauty_strength > 0;
+        QCamera3HdrAlgo::Image image;
+        QCamera3StreamMem *memory = nullptr;
+        int32_t status = -ENODATA;
+        if (getHdrImage(recvd_frame, image, memory)) {
+            status = processPlatformImage(image,
+                    frontBeauty ? OPPO_NATIVE_FRONT_BEAUTY : OPPO_NATIVE_REAR_BEAUTY,
+                    frontBeauty ? jpeg_settings->native_front_beauty_strength :
+                            jpeg_settings->native_beauty_strength, frontBeauty, 0);
+            if (status == NO_ERROR) {
+                status = memory->cleanCache(main_frame->buf_idx);
+                if (status != NO_ERROR) return status;
             }
-            nativeAlgorithmTrace(jpeg_settings, "ArcFaceBeauty", platformStatus,
-                    jpeg_settings->frame_number, 1,
-                    static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
-                    frontHandled ? 1 : 0);
         }
-        if (!frontHandled) {
-            // Self-developed ARC_BS_IMAGE adapter fallback; the original block is
-            // unavailable or failed, so the frame is still delivered unprocessed.
-            QCamera3HdrAlgo::Image image;
-            QCamera3StreamMem *memory = nullptr;
-            int32_t beautyStatus = -ENOTSUP;
-            if (getHdrImage(recvd_frame, image, memory)) {
-                const int32_t strength = jpeg_settings->native_front_beauty_strength;
-                if (strength >= 0 && strength <= 100) {
-                    beautyStatus = QCamera3FrontBeauty::process(image, strength);
-                    if (beautyStatus == NO_ERROR) {
-                        beautyStatus = memory->cleanCache(main_frame->buf_idx);
-                        if (beautyStatus != NO_ERROR) return beautyStatus;
-                    }
-                } else beautyStatus = -EINVAL;
-            }
-            nativeAlgorithmTrace(jpeg_settings, "FrontBeauty", beautyStatus,
-                    jpeg_settings->frame_number, 1,
-                    static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
-                    beautyStatus == NO_ERROR ? 1 : 0);
-        }
+        nativeAlgorithmTrace(jpeg_settings, frontBeauty ? "FrontBeauty" : "ARCRLP", status,
+                jpeg_settings->frame_number, 1, hal_obj, status == NO_ERROR ? 1 : 0,
+                frontBeauty ? OPPO_NATIVE_FRONT_BEAUTY : OPPO_NATIVE_REAR_BEAUTY);
     }
-    // Mode 9: original HAL1 SCES block first, self-developed tuning as fallback.
     bool sceneHandledByPlatform = false;
-    if (jpeg_settings && jpeg_settings->native_still_mode == OPPO_NATIVE_SCENE &&
-            !jpeg_settings->zsl_snapshot &&
-            QCamera3OppoPlatformHwi::configured() && QCamera3OppoPlatformHwi::runEnabled()) {
-        QCamera3OppoPlatformFaceInfo platformFaces;
-        const bool haveFaces = QCamera3OppoPlatformHwi::getFaceInfo(
-                jpeg_settings->frame_number, platformFaces);
-        QCamera3HdrAlgo::Image platformImage;
-        QCamera3StreamMem *platformMemory = nullptr;
-        int32_t platformStatus = -EOPNOTSUPP;
-        if (getHdrImage(recvd_frame, platformImage, platformMemory)) {
-            QCamera3OppoPlatformFrame platformFrame = {};
-            platformFrame.data = platformImage.data;
-            platformFrame.length = platformImage.length;
-            platformFrame.width = platformImage.width;
-            platformFrame.height = platformImage.height;
-            platformFrame.stride = platformImage.yStride;
-            platformFrame.slice = platformImage.yScanline;
-            platformFrame.sceneStrength = jpeg_settings->native_scene_strength;
-            if (haveFaces) platformFrame.faceInfo = platformFaces;
-            platformStatus = QCamera3OppoPlatformHwi::get().processStillFrame(
-                    OPPO_NATIVE_SCENE, platformFrame);
-            if (platformStatus == NO_ERROR) {
-                platformStatus = platformMemory->cleanCache(main_frame->buf_idx);
-                if (platformStatus != NO_ERROR) return platformStatus;
+    if (jpeg_settings && (jpeg_settings->native_still_mode == OPPO_NATIVE_SCENE ||
+            jpeg_settings->native_scene_strength > 0)) {
+        QCamera3HdrAlgo::Image image;
+        QCamera3StreamMem *memory = nullptr;
+        int32_t status = -ENODATA;
+        if (getHdrImage(recvd_frame, image, memory)) {
+            QCamera3OppoPlatformFaceInfo faces;
+            QCamera3OppoPlatformHwi::getFaceInfo(jpeg_settings->frame_number, faces);
+            status = processPlatformImage(image, OPPO_NATIVE_SCENE,
+                    jpeg_settings->native_scene_strength, frontCamera, 0, &faces);
+            if (status == NO_ERROR) {
+                status = memory->cleanCache(main_frame->buf_idx);
+                if (status != NO_ERROR) return status;
                 sceneHandledByPlatform = true;
             }
         }
-        nativeAlgorithmTrace(jpeg_settings, "VDSces", platformStatus,
-                jpeg_settings->frame_number, 1,
-                static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
-                sceneHandledByPlatform ? 1 : 0);
+        nativeAlgorithmTrace(jpeg_settings, "VDSces", status, jpeg_settings->frame_number,
+                1, hal_obj, sceneHandledByPlatform ? 1 : 0, OPPO_NATIVE_SCENE);
     }
     // Mode 9 fallback: semantic scene classification and tuning.
     if (jpeg_settings && (jpeg_settings->native_still_mode == OPPO_NATIVE_SCENE ||
@@ -3594,7 +3720,7 @@ int32_t QCamera3PostProcessor::encodeData(qcamera_hal3_jpeg_data_t *jpeg_job_dat
         nativeAlgorithmTrace(jpeg_settings, "ArcSoftScene", sceneStatus,
                 jpeg_settings->frame_number, 1,
                 static_cast<QCamera3HardwareInterface *>(m_parent->mUserData),
-                sceneStatus == NO_ERROR && detected.applied ? 1 : 0);
+                sceneStatus == NO_ERROR && detected.applied ? 1 : 0, OPPO_NATIVE_SCENE);
         // Append scene state to the fusion trace; a failed core keeps the frame.
         size_t used = jpeg_settings->image_desc_valid ?
             strnlen(jpeg_settings->image_desc, sizeof(jpeg_settings->image_desc)) : 0;
@@ -4454,6 +4580,7 @@ void *QCamera3PostProcessor::dataProcessRoutine(void *data)
                             (qcamera_hal3_jpeg_data_t *)pme->m_inputJpegQ.dequeue();
 
                         if (NULL != jpeg_job) {
+                            if (pme->deliverHighResolutionJpeg(jpeg_job)) break;
                             // add into ongoing jpeg job Q
                             pme->m_ongoingJpegQ.enqueue((void *)jpeg_job);
 

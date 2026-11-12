@@ -303,6 +303,8 @@ int32_t QCamera3OppoPanorama::init(const Config &config) {
         return fail(E_UNSUPPORTED, "direction");
     if (config.maxFrames == 0 || config.minFrames == 0 || config.maxFrames < config.minFrames)
         return fail(E_PARAM, "frame limits");
+    if (!std::isfinite(config.pxPerDeg) || config.pxPerDeg < 0.0f)
+        return fail(E_PARAM, "gyro scale");
 
     canvasW_ = config.canvasWidth;
     canvasH_ = config.canvasHeight;
@@ -317,6 +319,13 @@ int32_t QCamera3OppoPanorama::init(const Config &config) {
     if (!even(canvasW_) || !even(canvasH_) || canvasW_ < config.previewWidth ||
             canvasH_ < config.previewHeight)
         return fail(E_PARAM, "canvas size");
+    if (config.centerCanvas) {
+        offset_.x = int32_t((canvasW_ - config.previewWidth) / 2) & ~1;
+        offset_.y = int32_t((canvasH_ - config.previewHeight) / 2) & ~1;
+    } else {
+        if (config.directionDeg == 180) offset_.x = canvasW_ - config.previewWidth;
+        if (config.directionDeg == 270) offset_.y = canvasH_ - config.previewHeight;
+    }
 
     outW_ = config.outputWidth;
     outH_ = config.outputHeight;
@@ -388,6 +397,8 @@ void QCamera3OppoPanorama::cancel() {
 int32_t QCamera3OppoPanorama::addGyro(const GyroSample &gyro) {
     if (state_ != State::Inited && state_ != State::Capturing)
         return fail(E_STATE, "addGyro");
+    if (gyro.valid && (!std::isfinite(gyro.angleXDeg) || !std::isfinite(gyro.angleYDeg)))
+        return fail(E_PARAM, "gyro sample");
     impl_->pendingGyroX = gyro.angleXDeg;
     impl_->pendingGyroY = gyro.angleYDeg;
     impl_->pendingGyroValid = gyro.valid;
@@ -412,7 +423,7 @@ void QCamera3OppoPanorama::estimateShift(const Frame &frame, bool gyroValid,
     const uint32_t fh = frame.height;
     const uint8_t *srcY = frame.data;
 
-    int axis = 0; // 0 = x, 1 = y
+    int axis = config_.verticalSweep ? 1 : 0; // 0 = x, 1 = y
     int sign = 0; // 0 = both, +1 / -1 constrained
     if (config_.directionDeg == 90 || config_.directionDeg == 270) {
         axis = 1;
@@ -430,8 +441,7 @@ void QCamera3OppoPanorama::estimateShift(const Frame &frame, bool gyroValid,
     const int32_t radius = config_.searchRadiusPx > 0 ? config_.searchRadiusPx : 0;
 
     if (!impl_->hasPrev) {
-        // No reference frame yet: the first frame always defines the canvas
-        // origin (the stock engine's first frame is placed at 0,0 as well).
+        // The first frame defines the reference without an inter-frame shift.
         *shiftX = 0;
         *shiftY = 0;
         return;
@@ -466,8 +476,8 @@ void QCamera3OppoPanorama::estimateShift(const Frame &frame, bool gyroValid,
                 continue;
             for (uint32_t y = 2; y < fh; y += 4) {
                 for (uint32_t x = 2; x < static_cast<uint32_t>(overlapW); x += 4) {
-                    const uint32_t px = (s >= 0) ? x : x + static_cast<uint32_t>(-s);
-                    const uint32_t cx = (s >= 0) ? x + static_cast<uint32_t>(s) : x;
+                    const uint32_t px = (s >= 0) ? x + static_cast<uint32_t>(s) : x;
+                    const uint32_t cx = (s >= 0) ? x : x + static_cast<uint32_t>(-s);
                     const int dif = static_cast<int>(
                             srcY[static_cast<size_t>(y) * frame.yStride + cx]) -
                             static_cast<int>(impl_->prevY[static_cast<size_t>(y) * fw + px]);
@@ -481,8 +491,8 @@ void QCamera3OppoPanorama::estimateShift(const Frame &frame, bool gyroValid,
                 continue;
             for (uint32_t y = 2; y < static_cast<uint32_t>(overlapH); y += 4) {
                 for (uint32_t x = 2; x < fw; x += 4) {
-                    const uint32_t py = (s >= 0) ? y : y + static_cast<uint32_t>(-s);
-                    const uint32_t cy = (s >= 0) ? y + static_cast<uint32_t>(s) : y;
+                    const uint32_t py = (s >= 0) ? y + static_cast<uint32_t>(s) : y;
+                    const uint32_t cy = (s >= 0) ? y : y + static_cast<uint32_t>(-s);
                     const int dif = static_cast<int>(
                             srcY[static_cast<size_t>(cy) * frame.yStride + x]) -
                             static_cast<int>(impl_->prevY[static_cast<size_t>(py) * fw + x]);
@@ -519,16 +529,15 @@ int32_t QCamera3OppoPanorama::addFrame(const Frame &frame, const GyroSample *gyr
     if (stats_.frames >= config_.maxFrames)
         return fail(E_LIMIT, "maxFrames");
 
-    const bool gyroValid = gyro != nullptr && gyro->valid;
     if (gyro != nullptr) {
-        impl_->pendingGyroX = gyro->angleXDeg;
-        impl_->pendingGyroY = gyro->angleYDeg;
-        impl_->pendingGyroValid = gyro->valid;
+        const int32_t status = addGyro(*gyro);
+        if (status != OK) return status;
     }
 
     int32_t shiftX = 0;
     int32_t shiftY = 0;
-    estimateShift(frame, gyroValid, &shiftX, &shiftY);
+    estimateShift(frame, impl_->pendingGyroValid, &shiftX, &shiftY);
+    impl_->pendingGyroValid = false;
     stats_.shiftPx = (shiftX != 0) ? shiftX : shiftY;
     const int32_t newX = offset_.x + shiftX;
     const int32_t newY = offset_.y + shiftY;
@@ -658,6 +667,10 @@ int32_t QCamera3OppoPanorama::finetune() {
         return fail(E_STATE, "finetune");
     if (stats_.frames < config_.minFrames)
         return fail(E_NOFRAME, "finetune");
+    if (config_.crop && config_.preserveCropSize) {
+        outW_ = uint32_t((impl_->bboxMaxX & ~1) - (impl_->bboxMinX & ~1));
+        outH_ = uint32_t((impl_->bboxMaxY & ~1) - (impl_->bboxMinY & ~1));
+    }
     state_ = State::Finetuned;
     stats_.lastStatus = OK;
     return OK;
@@ -706,6 +719,10 @@ int32_t QCamera3OppoPanorama::stitch(Image *out) {
     const uint32_t cropH = static_cast<uint32_t>(maxY - minY);
     if (cropW < 2 || cropH < 2)
         return fail(E_NOFRAME, "empty canvas");
+    if (config_.crop && config_.preserveCropSize) {
+        outW_ = cropW;
+        outH_ = cropH;
+    }
 
     const size_t baseYSize = static_cast<size_t>(cropW) * cropH;
     const size_t baseSize = baseYSize + baseYSize / 2;

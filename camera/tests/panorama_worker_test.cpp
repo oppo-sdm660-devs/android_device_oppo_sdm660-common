@@ -1,7 +1,12 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #include "QCamera3PanoramaWorker.h"
+#include "visidon_jnienv.h"
+#include "QCamera3PanoramaGyro.h"
+#include "fake_panorama_gyro_source.h"
 
 #include <chrono>
+#include <algorithm>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -97,6 +102,248 @@ int decodedLuma(const std::vector<uint8_t> &jpeg, uint32_t width, uint32_t heigh
     jpeg_abort_decompress(&decoder);
     jpeg_destroy_decompress(&decoder);
     return luma;
+}
+
+using Front = qcamera::QCamera3OppoVisidonPanorama;
+using Jni = qcamera::VisidonJniEnv;
+struct FrontObservation {
+    int width = 0, height = 0, focal = 0, transposed = 0;
+    std::vector<uint8_t> measured, added;
+} frontObservation;
+struct FrontEngine {
+    std::vector<std::vector<uint8_t>> frames;
+    std::vector<int32_t> displacements;
+    uint32_t width = 0, height = 0;
+    bool transposed = false;
+};
+long long frontInit(void *, void *, int width, int height, int focal, int transposed) {
+    frontObservation = {width, height, focal, transposed, {}, {}};
+    auto *engine = new FrontEngine;
+    engine->width = uint32_t(width);
+    engine->height = uint32_t(height);
+    engine->transposed = transposed != 0;
+    return reinterpret_cast<intptr_t>(engine);
+}
+int frontAdd(void *, void *, void *array, int width, int height, int displacement, long long handle) {
+    auto *engine = reinterpret_cast<FrontEngine *>(handle);
+    const auto *input = static_cast<Jni::ByteArrayIn *>(array);
+    const auto *data = static_cast<const uint8_t *>(input->data);
+    engine->frames.emplace_back(data, data + input->size);
+    CHECK(width == int(engine->width) && height == int(engine->height));
+    frontObservation.added.assign(data, data + input->size);
+    engine->displacements.push_back(displacement);
+    return 0;
+}
+void *frontMeasure(void *env, void *, void *array, int width, int height, float, float, long long handle) {
+    const auto *engine = reinterpret_cast<FrontEngine *>(handle);
+    const auto *input = static_cast<Jni::ByteArrayIn *>(array);
+    const auto *data = static_cast<const uint8_t *>(input->data);
+    CHECK(width == int(engine->width) && height == int(engine->height));
+    frontObservation.measured.assign(data, data + input->size);
+    const float position = (float(data[0]) - 100.0f) / 100.0f;
+    auto *table = *static_cast<void ***>(env);
+    using NewArray = void *(*)(void *, int);
+    using Set = void (*)(void *, void *, int, int, const float *);
+    void *output = reinterpret_cast<NewArray>(table[Jni::kNewFloatArray])(env, 4);
+    const float values[4] = {engine->transposed ? 0.0f : position,
+        engine->transposed ? position * engine->width / engine->height : 0.0f, 2.0f, 1.0f};
+    reinterpret_cast<Set>(table[Jni::kSetFloatArrayRegion])(env, output, 0, 4, values);
+    return output;
+}
+void *frontProcess(void *env, void *, long long handle) {
+    auto *engine = reinterpret_cast<FrontEngine *>(handle);
+    CHECK(engine->transposed);
+    CHECK(engine->frames.size() == 3);
+    CHECK(engine->displacements == std::vector<int32_t>({0, 16, 32}));
+    auto *table = *static_cast<void ***>(env);
+    using NewArray = void *(*)(void *, int);
+    using Set = void (*)(void *, void *, int, int, const int32_t *);
+    void *output = reinterpret_cast<NewArray>(table[Jni::kNewIntArray])(env, 2);
+    const int32_t values[2] = {int32_t(engine->width * (engine->transposed ? 1 : 3)),
+        int32_t(engine->height * (engine->transposed ? 3 : 1))};
+    reinterpret_cast<Set>(table[Jni::kSetIntArrayRegion])(env, output, 0, 2, values);
+    return output;
+}
+void *frontNv21(void *env, void *, long long handle) {
+    auto *engine = reinterpret_cast<FrontEngine *>(handle);
+    const uint32_t width = engine->width * (engine->transposed ? 1 : 3);
+    const uint32_t height = engine->height * (engine->transposed ? 3 : 1);
+    std::vector<uint8_t> bytes(size_t(width) * height * 3 / 2, 128);
+    for (size_t n = 0; n < engine->frames.size(); ++n) {
+        for (uint32_t y = 0; y < engine->height; ++y) {
+            const size_t offset = engine->transposed ? size_t(n * engine->height + y) * width :
+                    size_t(y) * width + n * engine->width;
+            memcpy(bytes.data() + offset,
+                    engine->frames[n].data() + size_t(y) * engine->width, engine->width);
+        }
+    }
+    auto *table = *static_cast<void ***>(env);
+    using NewArray = void *(*)(void *, int);
+    using Set = void (*)(void *, void *, int, int, const uint8_t *);
+    void *output = reinterpret_cast<NewArray>(table[Jni::kNewByteArray])(env, int(bytes.size()));
+    reinterpret_cast<Set>(table[Jni::kSetByteArrayRegion])(env, output, 0,
+            int(bytes.size()), bytes.data());
+    return output;
+}
+void *frontUnusedJpeg(void *, void *, int, int, long long) { return nullptr; }
+void frontRelease(void *, void *, long long handle) { delete reinterpret_cast<FrontEngine *>(handle); }
+Front::EngineAbi frontAbi() {
+    Front::EngineAbi api;
+    api.init = frontInit;
+    api.addYuvFrame = frontAdd;
+    api.measureOverlap = frontMeasure;
+    api.process = frontProcess;
+    api.getNv21 = frontNv21;
+    api.getJpeg = frontUnusedJpeg;
+    api.release = frontRelease;
+    return api;
+}
+void pendingDrained(Worker &worker) {
+    for (int i = 0; i < 5000 && worker.stats().pendingFrames != 0; ++i)
+        std::this_thread::sleep_for(1ms);
+    CHECK(worker.stats().pendingFrames == 0);
+}
+void frontUsesMeasuredKeyframesAndSharedJpeg(int orientation) {
+    Worker worker;
+    const auto api = frontAbi();
+    auto cfg = config();
+    cfg.backend = Worker::Backend::FrontVisidon;
+    cfg.focalPx = 100;
+    cfg.testVisidonEngine = &api;
+    cfg.panorama.orientationDeg = orientation;
+    CHECK(worker.start(cfg) == Worker::OK);
+    CHECK(ready(worker));
+    const uint8_t luma[5] = {100, 100, 125, 150, 125};
+    for (uint32_t n = 0; n < 5; ++n) {
+        Input input(64, 48, luma[n]);
+        input.frame.source = {20 + n, 123456000 + n};
+        CHECK(worker.submit(input.frame) == Worker::OK);
+        memset(input.bytes.data(), 0, input.bytes.size());
+        pendingDrained(worker);
+    }
+    CHECK(worker.stats().acceptedFrames == 3);
+    CHECK(worker.stats().droppedFrames == 2);
+    Completion completion;
+    CHECK(worker.requestJpeg(500, 55, 16384, [&](Worker::Result result) {
+        completion.accept(std::move(result));
+    }) == Worker::OK);
+    CHECK(completion.wait());
+    CHECK(completion.result.status == Worker::OK);
+    CHECK(completion.result.failureReason == 0);
+    const uint32_t outWidth = orientation == 90 ? 144 : 64;
+    const uint32_t outHeight = orientation == 90 ? 64 : 144;
+    CHECK(completion.result.width == outWidth && completion.result.height == outHeight);
+    CHECK(completion.result.sources.size() == 3);
+    if (completion.result.sources.size() == 3) {
+        CHECK(completion.result.sources[0].frameNumber == 20);
+        CHECK(completion.result.sources[1].frameNumber == 22);
+        CHECK(completion.result.sources[2].timestampNs == 123456003);
+    }
+    CHECK(!completion.result.jpeg.empty());
+    if (!completion.result.jpeg.empty()) {
+        const int luma = decodedLuma(completion.result.jpeg, outWidth, outHeight);
+        CHECK(orientation == 90 ? luma > 110 && luma < 145 : luma > 90 && luma < 110);
+        CHECK(completion.result.jpeg[30] == 1 && completion.result.jpeg[31] == 0);
+    }
+    worker.cancelAndDrain();
+    CHECK(worker.stats().pendingBytes == 0);
+}
+
+void frontNormalizesPaddedSourceAtPixelBoundary() {
+    const auto api = frontAbi();
+    Worker worker;
+    struct Case { uint32_t width, height, outWidth, outHeight; int focal, outFocal; };
+    const Case cases[] = {
+        {1840, 1380, 1440, 1080, 1408, 1102},
+        {1440, 1080, 1440, 1080, 1102, 1102},
+        {1280, 960, 1280, 960, 980, 980},
+        {1920, 1080, 1440, 808, 1470, 1103},
+    };
+    for (const auto &test : cases) {
+        auto cfg = config(test.width, test.height);
+        cfg.backend = Worker::Backend::FrontVisidon;
+        cfg.focalPx = test.focal;
+        cfg.testVisidonEngine = &api;
+        CHECK(worker.start(cfg) == Worker::OK);
+        CHECK(ready(worker));
+        CHECK(frontObservation.width == int(test.outWidth));
+        CHECK(frontObservation.height == int(test.outHeight));
+        CHECK(frontObservation.focal == test.outFocal);
+        CHECK(frontObservation.transposed == 1);
+        Input input(test.width, test.height);
+        auto pixel = [](uint32_t x, uint32_t y, int channel) -> uint8_t {
+            if (channel == 0) return uint8_t(x / 16 + y / 32);
+            return channel == 1 ? uint8_t(30 + x / 16) : uint8_t(210 - y / 16);
+        };
+        for (uint32_t y = 0; y < test.height; ++y)
+            for (uint32_t x = 0; x < test.width; ++x)
+                input.bytes[input.frame.yOffset + size_t(y) * input.frame.yStride + x] = pixel(x, y, 0);
+        for (uint32_t y = 0; y < test.height / 2; ++y)
+            for (uint32_t x = 0; x < test.width / 2; ++x)
+                for (int c = 0; c < 2; ++c)
+                    input.bytes[input.frame.uvOffset + size_t(y) * input.frame.uvStride + 2 * x + c] = pixel(x, y, c + 1);
+        input.frame.source = {73, 123456789};
+        CHECK(worker.submit(input.frame) == Worker::OK);
+        memset(input.bytes.data(), 0xee, input.bytes.size());
+        pendingDrained(worker);
+        CHECK(worker.stats().acceptedFrames == 1);
+        CHECK(frontObservation.measured == frontObservation.added);
+        CHECK(frontObservation.measured.size() == size_t(test.outWidth) * test.outHeight * 3 / 2);
+        const auto sources = worker.retainedSources();
+        CHECK(sources.size() == 1);
+        if (sources.size() == 1) CHECK(sources[0].frameNumber == 73 && sources[0].timestampNs == 123456789);
+        for (int c = 0; c < 3; ++c) {
+            const uint32_t sw = c == 0 ? test.width : test.width / 2;
+            const uint32_t sh = c == 0 ? test.height : test.height / 2;
+            const uint32_t dw = c == 0 ? test.outWidth : test.outWidth / 2;
+            const uint32_t dh = c == 0 ? test.outHeight : test.outHeight / 2;
+            for (uint32_t y : {0u, 1u, dh / 3, dh - 1}) {
+                for (uint32_t x : {0u, 1u, dw / 3, dw - 1}) {
+                    const double sx = std::clamp((x + 0.5) * sw / dw - 0.5, 0.0, double(sw - 1));
+                    const double sy = std::clamp((y + 0.5) * sh / dh - 0.5, 0.0, double(sh - 1));
+                    const uint32_t x0 = uint32_t(sx), y0 = uint32_t(sy);
+                    const uint32_t x1 = std::min(x0 + 1, sw - 1), y1 = std::min(y0 + 1, sh - 1);
+                    const double wx = sx - x0, wy = sy - y0;
+                    const double expected = (pixel(x0, y0, c) * (1 - wx) + pixel(x1, y0, c) * wx) * (1 - wy) +
+                            (pixel(x0, y1, c) * (1 - wx) + pixel(x1, y1, c) * wx) * wy;
+                    const size_t offset = c == 0 ? size_t(y) * dw + x :
+                            size_t(test.outWidth) * test.outHeight + size_t(y) * test.outWidth + 2 * x + c - 1;
+                    CHECK(std::abs(frontObservation.measured[offset] - expected) <= 1.0);
+                }
+            }
+        }
+        worker.cancelAndDrain();
+        CHECK(worker.stats().pendingBytes == 0);
+    }
+}
+void frontStationaryFramesFailWithoutImageAndCanRestart() {
+    Worker worker;
+    const auto api = frontAbi();
+    auto cfg = config();
+    cfg.backend = Worker::Backend::FrontVisidon;
+    cfg.focalPx = 100;
+    cfg.testVisidonEngine = &api;
+    CHECK(worker.start(cfg) == Worker::OK);
+    CHECK(ready(worker));
+    for (uint32_t n = 0; n < 4; ++n) {
+        Input input(64, 48, 100);
+        input.frame.source = {n, int64_t(n + 1)};
+        CHECK(worker.submit(input.frame) == Worker::OK);
+        pendingDrained(worker);
+    }
+    Completion completion;
+    CHECK(worker.requestJpeg(501, 95, 8192, [&](Worker::Result result) {
+        completion.accept(std::move(result));
+    }) == Worker::OK);
+    CHECK(completion.wait());
+    CHECK(completion.result.status == QCamera3OppoPanorama::E_NOFRAME);
+    CHECK(completion.result.failureReason == 3);
+    CHECK(completion.result.jpeg.empty());
+    worker.cancelAndDrain();
+    CHECK(worker.start(cfg) == Worker::OK);
+    CHECK(ready(worker));
+    CHECK(frontObservation.transposed == 1);
+    worker.cancelAndDrain();
 }
 
 void copiedPlanesAndSourcesReachJpeg() {
@@ -267,15 +514,146 @@ void outputMemoryBudgetIsCheckedBeforeCapture() {
     CHECK(worker.stats().lastStatus == QCamera3OppoPanorama::E_NOMEM);
     worker.cancelAndDrain();
 }
+
+void gyroIntegratesOnlyTheSourceFrameInterval() {
+    qcamera::QCamera3PanoramaGyro timeline;
+    const float velocity[3] = {float(M_PI / 2), float(M_PI), 0.0f};
+    const float zero[3] = {};
+    for (int mount : {0, 90, 180, 270}) {
+        timeline.reset(mount);
+        CHECK(timeline.add(1000000000, zero) == 0);
+        CHECK(timeline.add(1020000000, velocity) == 0);
+        CHECK(timeline.add(1040000000, velocity) == 0);
+        auto result = timeline.interval(1010000000, 1030000000);
+        CHECK(result.valid && result.timestampUs == 1030000);
+        const float pitch = 1.575f, yaw = 3.15f;
+        const float expectedX = mount == 0 ? -yaw : mount == 90 ? -pitch : mount == 180 ? yaw : pitch;
+        const float expectedY = mount == 0 ? -pitch : mount == 90 ? yaw : mount == 180 ? pitch : -yaw;
+        CHECK(std::abs(result.angleXDeg - expectedX) < 0.00001f);
+        CHECK(std::abs(result.angleYDeg - expectedY) < 0.00001f);
+        CHECK(!timeline.interval(999999999, 1030000000).valid);
+        CHECK(!timeline.interval(1010000000, 1040000001).valid);
+        CHECK(!timeline.interval(1030000000, 1010000000).valid);
+        CHECK(timeline.add(1040000000, zero) == -EINVAL);
+        CHECK(timeline.add(1100000000, velocity) == 0);
+        CHECK(!timeline.interval(1030000000, 1090000000).valid);
+    }
+    timeline.reset(0);
+    for (int64_t n = 1; n <= 600; ++n) CHECK(timeline.add(n * 5000000, velocity) == 0);
+    CHECK(!timeline.interval(5000000, 10000000).valid);
+    CHECK(timeline.interval(2990000000, 3000000000).valid);
+}
+
+void rearMatchesGyroAndDrainsFeedAcrossFinishAndCancel() {
+    qcamera::panoramaTestGyroReset();
+    Worker worker;
+    auto cfg = config();
+    cfg.useGyro = true;
+    cfg.sensorMountAngle = 90;
+    cfg.panorama.pxPerDeg = 10.0f;
+    cfg.panorama.centerCanvas = true;
+    cfg.panorama.preserveCropSize = true;
+    CHECK(worker.start(cfg) == Worker::OK);
+    CHECK(ready(worker));
+    CHECK(qcamera::panoramaTestGyroStarts() == 1);
+    CHECK(qcamera::panoramaTestGyroPeriod() == 5000000);
+    const float velocity[3] = {float(100 * M_PI / 180), 0.0f, 0.0f};
+    for (int64_t time = 995000000; time <= 1025000000; time += 5000000)
+        CHECK(qcamera::panoramaTestGyroEmit(time, velocity) == 0);
+    for (uint32_t n = 0; n < 2; ++n) {
+        Input input(64, 48);
+        input.frame.source = {n + 70, 1000000000 + n * 20000000};
+        CHECK(worker.submit(input.frame) == Worker::OK);
+        pendingDrained(worker);
+    }
+    CHECK(worker.stats().gyroFeedStarted && worker.stats().gyroFeedStatus == 0);
+    CHECK(worker.stats().gyroMatchedFrames == 1 && worker.stats().gyroMissingFrames == 0);
+    Completion completion;
+    CHECK(worker.requestJpeg(777, 95, 16384, [&](Worker::Result result) {
+        completion.accept(std::move(result));
+    }) == Worker::OK);
+    CHECK(completion.wait());
+    CHECK(completion.result.status == Worker::OK);
+    CHECK(completion.result.width == 84 && completion.result.height == 48);
+    CHECK(completion.result.sources.size() == 2);
+    if (!completion.result.jpeg.empty()) CHECK(decodedLuma(completion.result.jpeg, 84, 48) > 150);
+    CHECK(qcamera::panoramaTestGyroStops() == 1);
+    CHECK(qcamera::panoramaTestGyroEmit(1030000000, velocity) == -ENODEV);
+    worker.cancelAndDrain();
+    CHECK(worker.start(cfg) == Worker::OK);
+    CHECK(ready(worker));
+    worker.cancelAndDrain();
+    CHECK(qcamera::panoramaTestGyroStarts() == 2 && qcamera::panoramaTestGyroStops() == 2);
+}
+
+void missingGyroRemainsAnObservableImageOnlyFallback() {
+    qcamera::panoramaTestGyroReset(-ENODEV);
+    Worker worker;
+    auto cfg = config();
+    cfg.useGyro = true;
+    cfg.panorama.pxPerDeg = 10.0f;
+    CHECK(worker.start(cfg) == Worker::OK);
+    CHECK(ready(worker));
+    CHECK(!worker.stats().gyroFeedStarted && worker.stats().gyroFeedStatus == -ENODEV);
+    for (uint32_t n = 0; n < 2; ++n) {
+        Input input(64, 48);
+        input.frame.source = {n, 1000000000 + n * 20000000};
+        CHECK(worker.submit(input.frame) == Worker::OK);
+        pendingDrained(worker);
+    }
+    CHECK(worker.stats().gyroMatchedFrames == 0 && worker.stats().gyroMissingFrames == 1);
+    Completion completion;
+    CHECK(worker.requestJpeg(778, 95, 16384, [&](Worker::Result result) {
+        completion.accept(std::move(result));
+    }) == Worker::OK);
+    CHECK(completion.wait());
+    CHECK(completion.result.status == Worker::OK && !completion.result.jpeg.empty());
+    worker.cancelAndDrain();
+    qcamera::panoramaTestGyroReset();
+}
+
+void frontBackendErrorCompletesWithItsOriginalFailure() {
+    Worker worker;
+    auto api = frontAbi();
+    api.addYuvFrame = [](void *, void *, void *, int, int, int, long long) { return -1; };
+    auto cfg = config();
+    cfg.backend = Worker::Backend::FrontVisidon;
+    cfg.focalPx = 100;
+    cfg.testVisidonEngine = &api;
+    CHECK(worker.start(cfg) == Worker::OK);
+    CHECK(ready(worker));
+    Input input(64, 48, 100);
+    input.frame.source = {3, 1000000000};
+    CHECK(worker.submit(input.frame) == Worker::OK);
+    pendingDrained(worker);
+    CHECK(worker.stats().state == Worker::State::Failed);
+    CHECK(worker.stats().lastStatus == Worker::E_BACKEND);
+    Completion completion;
+    CHECK(worker.requestJpeg(779, 95, 16384, [&](Worker::Result result) {
+        completion.accept(std::move(result));
+    }) == Worker::OK);
+    CHECK(completion.wait());
+    CHECK(completion.calls == 1 && completion.result.status == Worker::E_BACKEND);
+    CHECK(completion.result.failureReason == 13 && completion.result.jpeg.empty());
+    worker.cancelAndDrain();
+}
 }
 
 int main() {
+    frontUsesMeasuredKeyframesAndSharedJpeg(90);
+    frontUsesMeasuredKeyframesAndSharedJpeg(0);
+    frontNormalizesPaddedSourceAtPixelBoundary();
+    frontStationaryFramesFailWithoutImageAndCanRestart();
     copiedPlanesAndSourcesReachJpeg();
     inputValidationIntervalAndQueueBounds();
     tooFewFramesCompleteWithFailureAndRestartWorks();
     cancellationCompletesAcceptedRequestExactlyOnce();
     cancelBarrierWaitsForCompletionCallback();
     outputMemoryBudgetIsCheckedBeforeCapture();
+    gyroIntegratesOnlyTheSourceFrameInterval();
+    rearMatchesGyroAndDrainsFeedAcrossFinishAndCancel();
+    missingGyroRemainsAnObservableImageOnlyFallback();
+    frontBackendErrorCompletesWithItsOriginalFailure();
     if (failures) return 1;
     puts("panorama worker tests: PASS");
     return 0;

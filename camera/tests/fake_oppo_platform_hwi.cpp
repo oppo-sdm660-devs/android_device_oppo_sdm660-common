@@ -11,6 +11,7 @@
 namespace {
 FakeOppoPlatformStats g_stats = {};
 int g_initRc = 0;
+bool g_mutate = false;
 }  // namespace
 
 extern "C" int fake_oppo_platform_init(void *p1, unsigned long long mask,
@@ -46,6 +47,11 @@ extern "C" int fake_oppo_platform_process(void *frameCtx, void *param,
         memcpy(g_stats.processParam, param, sizeof(g_stats.processParam));
     if (frameCtx != nullptr)
         memcpy(g_stats.frameCtx, frameCtx, sizeof(g_stats.frameCtx));
+    if (g_mutate && frameCtx) {
+        unsigned char *pixel = nullptr;
+        memcpy(&pixel, static_cast<unsigned char *>(frameCtx) + 4, sizeof(pixel));
+        pixel[0] = 123;
+    }
     return g_stats.processRc;
 }
 
@@ -78,6 +84,7 @@ extern "C" void fake_oppo_platform_reset(void)
 {
     memset(&g_stats, 0, sizeof(g_stats));
     g_initRc = 0;
+    g_mutate = false;
 }
 
 extern "C" void fake_oppo_platform_set_process_rc(int rc)
@@ -89,3 +96,22 @@ extern "C" void fake_oppo_platform_set_init_rc(int rc)
 {
     g_initRc = rc;
 }
+
+extern "C" void fake_oppo_platform_set_mutate(int value) { g_mutate = value != 0; }
+extern "C" void Sces_initialize_gpu_engine() {}
+extern "C" void Sces_process_snapshot() {}
+extern "C" void Sces_release_gpu_engine() {}
+extern "C" void VDImageAdjustmentCreateAPI() {}
+extern "C" void VDImageAdjustmentSetInputData() {}
+extern "C" void VDImageAdjustmentApply() {}
+extern "C" void VDImageAdjustmentUpdateResultBuffer() {}
+extern "C" void VDImageAdjustmentReleaseAPI() {}
+extern "C" void VDRTImageAdjustmentInitWithMode() {}
+extern "C" void VDRTImageAdjustmentInit() {}
+extern "C" void VDRTImageAdjustmentRelease() {}
+extern "C" void VDRTImageAdjustmentProcess() {}
+extern "C" void VDRTImageAdjustmentSetFilters() {}
+extern "C" void VDRTImageAdjustmentSetVignetting() {}
+extern "C" void VDRTImageAdjustmentSetGlobalFilterStrength() {}
+extern "C" void VDRTImageAdjustmentResetOutput() {}
+extern "C" void VDRTImageAdjustmentSetMaskParameters() {}

@@ -77,7 +77,7 @@ public:
     VisidonJniEnv &operator=(const VisidonJniEnv &) = delete;
 
     // First argument for every Java_visidon_Lib_Panorama_* entry.
-    void *jniEnv() { return &table_; }
+    void *jniEnv() { sActive = this; return &table_; }
     static void *fakeThis();
 
     // Output helpers are also used by host-test mock engines.
@@ -110,10 +110,10 @@ private:
     static void slotSetFloatArrayRegion(void *env, void *array, int start, int length,
             const float *buffer);
     static void *slotGetDirectBufferAddress(void *env, void *buffer);
-    static void unsupportedSlot();
+    static uintptr_t unsupportedSlot(void *env, ...);
 
     void reset();
-    static VisidonJniEnv *sActive;
+    static thread_local VisidonJniEnv *sActive;
     void *slots_[kSlotCount];
     void **table_ = nullptr;
     bool slotError_ = false;

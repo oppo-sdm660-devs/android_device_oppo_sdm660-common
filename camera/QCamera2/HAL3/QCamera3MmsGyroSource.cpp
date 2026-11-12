@@ -50,15 +50,16 @@ struct Callback : public IEventQueueCallback {
         }
         if (event.sensorType == SensorType::GYROSCOPE && event.sensorHandle == handle) {
             ++gyroEvents;
-            int32_t status = -ENODEV;
-            if (engine) status = engine->addGyro(event.timestamp, values);
-            if (status) {
-                error.store(status);
-                ++engineFailures;
-                lastEngineError = status;
-            } else {
-                ++engineDelivered;
-                if (notify) notify(user);
+            if (engine) {
+                const int32_t status = engine->addGyro(event.timestamp, values);
+                if (status) {
+                    error.store(status);
+                    ++engineFailures;
+                    lastEngineError = status;
+                } else {
+                    ++engineDelivered;
+                    if (notify) notify(user);
+                }
             }
             // Fan-out is independent of the engine's verdict.
             for (uint32_t i = 0; i < listenerCount; ++i) {
@@ -201,6 +202,13 @@ int32_t QCamera3MmsGyroSource::gravityAvailable() const {
     return enabled;
 }
 int32_t QCamera3MmsGyroSource::start(QCamera3MmsVstab &engine, Notify notify, void *user) {
+    return startFeed(&engine, notify, user, nullptr, engine.gyroPeriodNs());
+}
+int32_t QCamera3MmsGyroSource::start(Listener &listener, int64_t periodNs) {
+    return startFeed(nullptr, nullptr, nullptr, &listener, periodNs);
+}
+int32_t QCamera3MmsGyroSource::startFeed(QCamera3MmsVstab *engine, Notify notify, void *user,
+        Listener *listener, int64_t periodNs) {
     if (!mImpl) return -ENOMEM;
     // Listener registrations survive a stop()/start() cycle.
     Listener *saved[kMaxListeners] = {};
@@ -212,17 +220,25 @@ int32_t QCamera3MmsGyroSource::start(QCamera3MmsVstab &engine, Notify notify, vo
             saved[i] = mImpl->callback->listeners[i];
         pthread_mutex_unlock(&mImpl->callback->lock);
     }
+    if (listener) {
+        bool registered = false;
+        for (uint32_t i = 0; i < savedCount; ++i)
+            registered |= saved[i] == listener;
+        if (!registered) {
+            if (savedCount == kMaxListeners) return -ENOSPC;
+            saved[savedCount++] = listener;
+        }
+    }
     stop();
     sp<ISensorManager> manager = ISensorManager::tryGetService();
     SensorInfo info;
     int32_t status = getSensor(manager, info);
     if (status) return status;
-    int64_t periodNs = engine.gyroPeriodNs();
     if (periodNs < 1000000 || periodNs > 20000000 || periodNs % 1000 ||
             periodNs / 1000 < info.minDelay ||
             (info.maxDelay > 0 && periodNs / 1000 > info.maxDelay)) return -EINVAL;
     mImpl->callback = new Callback;
-    mImpl->callback->engine = &engine;
+    mImpl->callback->engine = engine;
     mImpl->callback->notify = notify;
     mImpl->callback->user = user;
     mImpl->callback->handle = info.sensorHandle;
