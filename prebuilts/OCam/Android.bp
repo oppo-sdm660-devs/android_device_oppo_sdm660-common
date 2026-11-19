@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+
+android_app_import {
+    name: "OCam",
+    apk: "OCam.apk",
+    presigned: true,
+    preprocessed: true,
+    product_specific: true,
+}

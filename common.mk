@@ -77,7 +77,8 @@ PRODUCT_PACKAGES += \
     camera.sdm660 \
     libmmcamera_interface \
     libmmjpeg_interface \
-    libqomx_core
+    libqomx_core \
+    OCam
 
 # Configstore
 PRODUCT_PACKAGES += \
@@ -159,7 +160,6 @@ PRODUCT_PACKAGES += \
 
 # Overlays
 PRODUCT_PACKAGES += \
-    ApertureResSdm660 \
     CarrierConfigOverlayCommon \
     FrameworkResOverlayCommon \
     LineageSdkResOverlayCommon \
